@@ -78,6 +78,10 @@ export interface LineProvider {
   unsendMessage(channel: ChannelRef, messageId: string): Promise<void>;
   /** Sets (or, with undefined, removes) this account's reaction to a message. */
   react(channel: ChannelRef, messageId: string, kind: ReactionKind | undefined): Promise<void>;
+  /** Removes another member: from a group, or from the whole OpenChat community (`p…` member id). Needs the rights to do so. */
+  removeMember(channel: ChannelRef, memberId: string): Promise<void>;
+  /** Deletes someone else's message for everyone; OpenChat only (as a manager). */
+  deleteMessage(channel: ChannelRef, messageId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -952,6 +956,30 @@ export class EvexLineProvider implements LineProvider {
     // Same calls as linejs' TalkMessage.unsend()/SquareMessage.unsend(), without their extra ownership lookup (the hub checks).
     if (channel.kind === "square") await client.base.square.unsendMessage({ messageId, squareChatMid: channel.channelId });
     else await client.base.talk.unsendMessage({ messageId });
+    if (this.client !== client) throw new Error("NOT_AUTHENTICATED");
+    this.mediaOrigins.delete(messageId);
+    this.updateSquareMessage(channel.channelId, messageId, { unsent: true });
+  }
+
+  async removeMember(channel: ChannelRef, memberId: string): Promise<void> {
+    const client = this.requireClient();
+    if (channel.kind === "square") {
+      // linejs' own helper: re-reads the member and sets its membership to KICK_OUT (removes it from the whole community).
+      await client.base.square.deleteOtherFromSquare(memberId);
+    } else if (channel.kind === "group") {
+      const reqSeq = await client.base.getReqseq("talk");
+      await client.base.talk.deleteOtherFromChat({ request: { reqSeq, chatMid: channel.channelId, targetUserMids: [memberId] } });
+    } else {
+      throw new Error("REMOVE_UNSUPPORTED");
+    }
+    if (this.client !== client) throw new Error("NOT_AUTHENTICATED");
+  }
+
+  async deleteMessage(channel: ChannelRef, messageId: string): Promise<void> {
+    const client = this.requireClient();
+    // Only OpenChat lets a manager delete someone else's message for everyone.
+    if (channel.kind !== "square") throw new Error("DELETE_UNSUPPORTED");
+    await client.base.square.destroyMessage({ messageId, squareChatMid: channel.channelId });
     if (this.client !== client) throw new Error("NOT_AUTHENTICATED");
     this.mediaOrigins.delete(messageId);
     this.updateSquareMessage(channel.channelId, messageId, { unsent: true });

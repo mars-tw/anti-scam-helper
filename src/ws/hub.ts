@@ -7,12 +7,12 @@ import type { LineProvider } from "../line/provider.js";
 import type { ApiTokenStore } from "../http/apiToken.js";
 import type { ScamAnalyzer } from "../jev/client.js";
 import { SlidingWindowLimiter } from "../limit.js";
-import type { MediaService } from "../media/service.js";
+import { sniffImage, type MediaService } from "../media/service.js";
 import type { Channel, ChannelKind, Message, Reactions, ReadPosition } from "../model/dto.js";
 import type { UpdateInfo } from "../update/checker.js";
 import { withMyReaction, type ChatStore } from "../model/store.js";
 import { PROTOCOL_VERSION, type ClientFrame, type ListenState, type ServerFrame } from "./protocol.js";
-import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseSend, requestIdOf } from "./requests.js";
+import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseRemove, parseSend, requestIdOf } from "./requests.js";
 
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const HISTORY_PER_SECOND = 10;
@@ -21,6 +21,11 @@ const MAX_BOT_CONNECTIONS = 4;
 const READ_RANGE_FRESH_MS = 10_000;
 // Each check is a paid call to TypeSafe made on a user's click: plenty for that, too few for a runaway script.
 const SCAM_CHECKS_PER_MINUTE = 10;
+// All bots together: removing people is the riskiest thing an account can automate, keep LINE's view of it calm.
+const REMOVALS_PER_MINUTE = 10;
+// Pictures for moderation bots (QR checks): bounded so a bot cannot turn this server into a bulk downloader.
+const BOT_MEDIA_PER_MINUTE = 30;
+const BOT_MEDIA_MAX_BYTES = 5 * 1024 * 1024;
 // A connection that has not answered a ping by the next round is gone (a sleeping laptop, a dropped
 // network): it is closed so broadcasts stop piling up behind it and the page can reconnect.
 const HEARTBEAT_MS = 30_000;
@@ -82,6 +87,9 @@ const GENERIC = {
   REACT_FAILED: "無法送出回應，請稍後重試。",
   SCAM_CHECK_UNAVAILABLE: "未啟用詐騙訊息分析。",
   SCAM_CHECK_FAILED: "詐騙機率分析失敗，請稍後重試。",
+  MODERATION_UNAVAILABLE: "未啟用成員移除。",
+  REMOVE_FAILED: "無法移除這位成員，請確認帳號有管理權限。",
+  MEDIA_FAILED: "無法取得這張圖片。",
 } as const;
 
 function updateFrame(info: UpdateInfo): ServerFrame {
@@ -96,6 +104,10 @@ export function createHub(options: HubOptions): Hub {
   const botSendLimiter = new SlidingWindowLimiter(config.api.sendsPerMinute, 60_000);
   // Shared by every bot connection: several connections must not multiply the paid TypeSafe calls.
   const botScamLimiter = new SlidingWindowLimiter(SCAM_CHECKS_PER_MINUTE, 60_000);
+  const botRemoveLimiter = new SlidingWindowLimiter(REMOVALS_PER_MINUTE, 60_000);
+  const botMediaLimiter = new SlidingWindowLimiter(BOT_MEDIA_PER_MINUTE, 60_000);
+  // "chat member" pairs already removed for this account: a second scam message from them must not ask LINE again.
+  const removedMembers = new Set<string>();
   let status: ListenState = "starting";
   let refreshing: Promise<void> | undefined;
   // State can become ready again before an old LINE request settles; "ready" alone is not an account boundary.
@@ -403,6 +415,82 @@ export function createHub(options: HubOptions): Hub {
     }
   }
 
+  /**
+   * Removes the sender of a message this server has shown, in a group or OpenChat the bot may reach.
+   * The target comes from the server's own copy (never a client-given member id), so a bot cannot
+   * name arbitrary people, this account itself, or an OpenChat manager.
+   */
+  async function handleRemove(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseRemove(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, messageId, deleteMessage } = parsed.value;
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "group" && channel.kind !== "square") return fail(socket, "INVALID_REQUEST", requestId);
+    const message = store.get(messageId, chatId);
+    const mine = message !== undefined && (message.senderId === provider.getProfile().userId || message.senderId === ownSquareSenders.get(chatId));
+    if (!message || mine || message.contentType === "CHATEVENT" || message.senderRole !== undefined) return fail(socket, "INVALID_REQUEST", requestId);
+    if (!botRemoveLimiter.allow()) return fail(socket, "RATE_LIMITED", requestId);
+    const memberId = message.senderId;
+    const ref = { channelId: chatId, kind: channel.kind };
+    const key = `${chatId} ${memberId}`;
+    const account = generation;
+    try {
+      if (!removedMembers.has(key)) {
+        await provider.removeMember(ref, memberId);
+        if (account !== generation) return;
+        removedMembers.add(key);
+        console.info(`MEMBER_REMOVED chat=${chatId} member=${memberId} message=${messageId}`);
+      }
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("REMOVE_FAILED", error);
+      return fail(socket, "REMOVE_FAILED", requestId);
+    }
+    // The person is out either way; the message is a best effort, and only OpenChat allows it.
+    let messageDeleted = false;
+    if (deleteMessage && channel.kind === "square" && !message.unsent) {
+      try {
+        await provider.deleteMessage(ref, messageId);
+        if (account !== generation) return;
+        messageDeleted = true;
+        takeBack(chatId, messageId);
+      } catch (error) {
+        if (account !== generation) return;
+        logFailure("MESSAGE_DELETE_FAILED", error);
+      }
+    }
+    if (login.state === "ready") send(socket, { type: "member:removed", requestId, chatId, messageId, memberId, messageDeleted });
+  }
+
+  /**
+   * Hands a moderation bot the picture of an image message this server has shown (PNG, JPEG or GIF by
+   * content, at most 5 MB), so it can look for scam QR codes. Nothing else: no videos, files or stickers.
+   */
+  async function handleBotMedia(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseMessageRequest(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, messageId } = parsed.value;
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    if (login.state !== "ready" || !store.channelOf(chatId) || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    const message = store.get(messageId, chatId);
+    if (!message || message.unsent || message.contentType !== "IMAGE" || message.mediaId !== `msg-${messageId}`) return fail(socket, "INVALID_REQUEST", requestId);
+    if (!botMediaLimiter.allow()) return fail(socket, "RATE_LIMITED", requestId);
+    const account = generation;
+    try {
+      const picture = await media.get(message.mediaId);
+      if (account !== generation || login.state !== "ready") return;
+      const mime = picture ? sniffImage(picture.bytes) : undefined;
+      if (!picture || !mime || picture.bytes.length > BOT_MEDIA_MAX_BYTES) return fail(socket, "MEDIA_FAILED", requestId);
+      send(socket, { type: "media", requestId, chatId, messageId, mime, data: picture.bytes.toString("base64") });
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("MEDIA_FAILED", error);
+      fail(socket, "MEDIA_FAILED", requestId);
+    }
+  }
+
   /** Stores and announces new reactions; returns the message as now cached, or undefined if nothing changed. */
   function updateReactions(chatId: string, messageId: string, reactions: Reactions | undefined): Message | undefined {
     const before = store.channelOf(chatId);
@@ -544,6 +632,7 @@ export function createHub(options: HubOptions): Hub {
       seenReads.clear();
       readFetches.clear();
       ownSquareSenders.clear();
+      removedMembers.clear();
       status = "starting";
     }
     broadcastAll({ type: "auth:state", state });
@@ -610,6 +699,12 @@ export function createHub(options: HubOptions): Hub {
         case "profile:get":
           if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
           else handleProfile(socket, frame as Record<string, unknown>);
+          return;
+        case "member:remove":
+          void handleRemove(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "media:fetch":
+          void handleBotMedia(socket, frame as Record<string, unknown>, botScope);
           return;
         default:
           fail(socket, "UNKNOWN_TYPE");

@@ -13,7 +13,8 @@ export interface Config {
   chat: { sendReadReceipts: boolean };
   update: { check: boolean };
   /** Bot endpoint (/api/ws). Off unless enabled; the token is created from the web page, never stored here. */
-  api: { enabled: boolean; chats: string[]; sendsPerMinute: number };
+  /** `moderation` (off by default) lets bots remove the sender of a message from a group or OpenChat. */
+  api: { enabled: boolean; chats: string[]; sendsPerMinute: number; moderation: boolean };
   /** Scam-probability check (TypeSafe Jev). Off unless a token is set; the token never leaves the server except to TypeSafe. */
   jev: { token?: string; model: string };
   limits: {
@@ -81,6 +82,7 @@ export async function loadConfig(root = process.cwd()): Promise<Config> {
   const api = data.api === undefined ? {} : record(data.api);
   if (api.enabled !== undefined && typeof api.enabled !== "boolean") throw new Error("CONFIG_INVALID");
   const apiEnabled = api.enabled === true;
+  if (api.moderation !== undefined && typeof api.moderation !== "boolean") throw new Error("CONFIG_INVALID");
   if (apiEnabled) {
     // A bot only ever reaches the chats listed here, so an empty list is a mistake, not "everything".
     if (!Array.isArray(api.chats) || api.chats.length === 0 || api.chats.length > 100 || !api.chats.every((id) => typeof id === "string" && CHAT_ID.test(id))) throw new Error("CONFIG_INVALID");
@@ -110,6 +112,7 @@ export async function loadConfig(root = process.cwd()): Promise<Config> {
       enabled: apiEnabled,
       chats: apiEnabled ? [...new Set(api.chats as string[])] : [],
       sendsPerMinute: api.sendsPerMinute === undefined ? DEFAULT_API_SENDS_PER_MINUTE : integer(api.sendsPerMinute, 120),
+      moderation: apiEnabled && api.moderation === true,
     },
     jev: { ...(jevToken !== undefined ? { token: jevToken } : {}), model: (jev.model as string | undefined) ?? DEFAULT_JEV_MODEL },
     limits: {

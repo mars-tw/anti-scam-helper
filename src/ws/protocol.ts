@@ -41,6 +41,10 @@ export type ServerFrame =
   | { type: "scam:state"; enabled: boolean }
   /** Answer to `scam:check`, only to the connection that asked. */
   | { type: "scam:result"; requestId: string; chatId: string; messageId: string; analysis: ScamAnalysis }
+  /** Answer to a bot's `member:remove`: the sender is out; `messageDeleted` says whether their message went too. */
+  | { type: "member:removed"; requestId: string; chatId: string; messageId: string; memberId: string; messageDeleted: boolean }
+  /** Answer to a bot's `media:fetch`: the picture of a received image message, base64. */
+  | { type: "media"; requestId: string; chatId: string; messageId: string; mime: string; data: string }
   /** Answer to a client `ping`: lets the page tell a silent connection from a dead one. */
   | { type: "pong" }
   | { type: "error"; requestId?: string; code: string; message: string };
@@ -57,6 +61,10 @@ export type ClientFrame =
   | { type: "message:react"; requestId: string; chatId: string; messageId: string; reaction: ReactionKind | null }
   /** Rate a received text message (someone else's, shown by this server) with Jev. Bots only within `api.chats`. */
   | { type: "scam:check"; requestId: string; chatId: string; messageId: string }
+  /** Bots only, with `api.moderation`: remove the sender of a message shown by this server (and, in OpenChat, delete it). */
+  | { type: "member:remove"; requestId: string; chatId: string; messageId: string; deleteMessage?: boolean }
+  /** Bots only, with `api.moderation`: the picture of an image message shown by this server (e.g. to read QR codes). */
+  | { type: "media:fetch"; requestId: string; chatId: string; messageId: string }
   /** This account's own id, name and picture, on demand (pages and bots alike). */
   | { type: "profile:get"; requestId: string }
   | { type: "stickers:list"; requestId: string }

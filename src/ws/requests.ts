@@ -140,3 +140,16 @@ export function parseReact(frame: Record<string, unknown>): Parsed<ReactRequest>
   if (reaction !== null && !(REACTION_KINDS as readonly unknown[]).includes(reaction)) return { ok: false, requestId: base.requestId };
   return { ok: true, value: { ...base, messageId, reaction: (reaction ?? undefined) as ReactionKind | undefined } };
 }
+
+export interface RemoveRequest extends MessageRequest {
+  deleteMessage: boolean;
+}
+
+/** "Remove whoever sent this message", optionally deleting the message too. */
+export function parseRemove(frame: Record<string, unknown>): Parsed<RemoveRequest> {
+  const parsed = parseMessageRequest(frame);
+  if (!parsed.ok) return parsed;
+  const { deleteMessage } = frame;
+  if (deleteMessage !== undefined && typeof deleteMessage !== "boolean") return { ok: false, requestId: parsed.value.requestId };
+  return { ok: true, value: { ...parsed.value, deleteMessage: deleteMessage === true } };
+}

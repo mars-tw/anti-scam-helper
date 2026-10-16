@@ -108,6 +108,16 @@ class FakeProvider {
     this.calls.push(["react", channel, messageId, kind]);
     if (this.reactError) throw this.reactError;
   }
+  removeError = undefined;
+  async removeMember(channel, memberId) {
+    this.calls.push(["remove", channel, memberId]);
+    if (this.removeError) throw this.removeError;
+  }
+  deleteError = undefined;
+  async deleteMessage(channel, messageId) {
+    this.calls.push(["delete", channel, messageId]);
+    if (this.deleteError) throw this.deleteError;
+  }
 }
 
 async function freePort() {
@@ -1340,6 +1350,108 @@ test("a bot can rate someone else's text only in an allowed chat, on one budget 
   for (let i = 0; i < 7; i += 1) assert.equal((await ask(second, { type: "scam:check", requestId: `c${i}`, chatId: CHAT, messageId: "901" })).type, "scam:result");
   assert.equal((await ask(second, { type: "scam:check", requestId: "c7", chatId: CHAT, messageId: "901" })).code, "RATE_LIMITED");
   assert.equal(rated.length, 8);
+});
+
+test("a bot removes the sender of a shown message only with moderation on, never itself or a manager", async (t) => {
+  const SQUARE = `m${"d".repeat(32)}`;
+  const env = await botEnv(t, { moderation: true, chats: [CHAT, SQUARE, OTHER] });
+  env.provider.channels = [...env.provider.channels, { channelId: SQUARE, kind: "square", name: "社群" }, { channelId: OTHER, kind: "room", name: "多人聊天" }];
+  env.page.socket.send(JSON.stringify({ type: "channels:refresh" }));
+  await env.page.until((frame) => frame.type === "channels" && frame.channels.some((channel) => channel.channelId === SQUARE));
+  const bot = await env.open();
+  const ask = async (frame) => {
+    bot.socket.send(JSON.stringify(frame));
+    return bot.until((reply) => reply.requestId === frame.requestId);
+  };
+  const base = { senderName: "詐騙仔", contentType: "NONE", createdAt: 1, text: "加我賴帶你飆股" };
+  env.hub.handleMessage({ ...base, messageId: "1001", channelId: CHAT, channelKind: "group", senderId: "u-scam" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "1002", channelId: SQUARE, channelKind: "square", senderId: "p-scam" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "1003", channelId: SQUARE, channelKind: "square", senderId: "p-boss", senderRole: "admin" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "1004", channelId: CHAT, channelKind: "group", senderId: "u-me" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "1005", channelId: OTHER, channelKind: "room", senderId: "u-scam" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "1006", channelId: CHAT, channelKind: "group", senderId: "u-scam" }, "new");
+
+  assert.deepEqual(await ask({ type: "member:remove", requestId: "k1", chatId: CHAT, messageId: "1001", deleteMessage: true }),
+    { type: "member:removed", requestId: "k1", chatId: CHAT, messageId: "1001", memberId: "u-scam", messageDeleted: false });
+  assert.deepEqual(await ask({ type: "member:remove", requestId: "k2", chatId: SQUARE, messageId: "1002", deleteMessage: true }),
+    { type: "member:removed", requestId: "k2", chatId: SQUARE, messageId: "1002", memberId: "p-scam", messageDeleted: true });
+  assert.equal((await bot.until((frame) => frame.type === "message:unsend" && frame.messageId === "1002")).chatId, SQUARE);
+  for (const [requestId, chatId, messageId] of [["k3", SQUARE, "1003"], ["k4", CHAT, "1004"], ["k5", OTHER, "1005"], ["k6", CHAT, "999"]]) {
+    assert.equal((await ask({ type: "member:remove", requestId, chatId, messageId })).code, "INVALID_REQUEST", requestId);
+  }
+  // A second message from someone already removed costs LINE nothing more.
+  assert.equal((await ask({ type: "member:remove", requestId: "k7", chatId: CHAT, messageId: "1006" })).type, "member:removed");
+  assert.deepEqual(env.provider.calls.filter((call) => call[0] === "remove" || call[0] === "delete"), [
+    ["remove", { channelId: CHAT, kind: "group" }, "u-scam"],
+    ["remove", { channelId: SQUARE, kind: "square" }, "p-scam"],
+    ["delete", { channelId: SQUARE, kind: "square" }, "1002"],
+  ]);
+});
+
+test("removal is refused without moderation, outside the bot's chats, and reported generically when LINE says no", async (t) => {
+  const off = await botEnv(t);
+  const plain = await off.open();
+  off.hub.handleMessage({ messageId: "1001", channelId: CHAT, channelKind: "group", senderId: "u-scam", senderName: "x", text: "x", contentType: "NONE", createdAt: 1 }, "new");
+  plain.socket.send(JSON.stringify({ type: "member:remove", requestId: "k1", chatId: CHAT, messageId: "1001" }));
+  assert.equal((await plain.until((frame) => frame.requestId === "k1")).code, "MODERATION_UNAVAILABLE");
+
+  const env = await botEnv(t, { moderation: true });
+  const bot = await env.open();
+  env.hub.handleMessage({ messageId: "1001", channelId: CHAT, channelKind: "group", senderId: "u-scam", senderName: "x", text: "x", contentType: "NONE", createdAt: 1 }, "new");
+  env.hub.handleMessage({ messageId: "1002", channelId: OTHER, channelKind: "group", senderId: "u-scam", senderName: "x", text: "x", contentType: "NONE", createdAt: 1 }, "new");
+  bot.socket.send(JSON.stringify({ type: "member:remove", requestId: "k2", chatId: OTHER, messageId: "1002" }));
+  assert.equal((await bot.until((frame) => frame.requestId === "k2")).code, "UNKNOWN_CHAT");
+  bot.socket.send(JSON.stringify({ type: "member:remove", requestId: "k3", chatId: CHAT, messageId: "1001", deleteMessage: "yes" }));
+  assert.equal((await bot.until((frame) => frame.requestId === "k3")).code, "INVALID_REQUEST");
+  env.provider.removeError = new Error("not an admin");
+  bot.socket.send(JSON.stringify({ type: "member:remove", requestId: "k4", chatId: CHAT, messageId: "1001" }));
+  const refused = await bot.until((frame) => frame.requestId === "k4");
+  assert.equal(refused.code, "REMOVE_FAILED");
+  assert.equal(refused.message.includes("not an admin"), false);
+  // Not marked as removed: once LINE allows it, the same request goes through.
+  env.provider.removeError = undefined;
+  bot.socket.send(JSON.stringify({ type: "member:remove", requestId: "k5", chatId: CHAT, messageId: "1001" }));
+  assert.equal((await bot.until((frame) => frame.requestId === "k5")).type, "member:removed");
+  assert.equal(env.provider.calls.filter((call) => call[0] === "remove").length, 2);
+});
+
+test("a moderation bot gets the picture of a shown image message, and nothing else", async (t) => {
+  const env = await botEnv(t, { moderation: true });
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("qr-picture")]);
+  env.provider.fetchMessageMedia = async (id) => (id === "3001" ? { mime: "image/png", bytes: png } : { mime: "video/mp4", bytes: Buffer.from("not an image") });
+  const bot = await env.open();
+  const ask = async (frame) => {
+    bot.socket.send(JSON.stringify(frame));
+    return bot.until((reply) => reply.requestId === frame.requestId);
+  };
+  const base = { channelId: CHAT, channelKind: "group", senderId: "u1", senderName: "x", createdAt: 1 };
+  env.hub.handleMessage({ ...base, messageId: "3001", contentType: "IMAGE", mediaId: "msg-3001" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "3002", contentType: "VIDEO", mediaId: "msg-3002" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "3003", contentType: "IMAGE", mediaId: "msg-3003" }, "new");
+  assert.deepEqual(await ask({ type: "media:fetch", requestId: "g1", chatId: CHAT, messageId: "3001" }),
+    { type: "media", requestId: "g1", chatId: CHAT, messageId: "3001", mime: "image/png", data: png.toString("base64") });
+  assert.equal((await ask({ type: "media:fetch", requestId: "g2", chatId: CHAT, messageId: "3002" })).code, "INVALID_REQUEST", "videos are not handed out");
+  assert.equal((await ask({ type: "media:fetch", requestId: "g3", chatId: CHAT, messageId: "3003" })).code, "MEDIA_FAILED", "bytes that are not a picture");
+  assert.equal((await ask({ type: "media:fetch", requestId: "g4", chatId: CHAT, messageId: "9999" })).code, "INVALID_REQUEST");
+
+  const off = await botEnv(t);
+  const plain = await off.open();
+  off.hub.handleMessage({ ...base, messageId: "3001", contentType: "IMAGE", mediaId: "msg-3001" }, "new");
+  plain.socket.send(JSON.stringify({ type: "media:fetch", requestId: "g5", chatId: CHAT, messageId: "3001" }));
+  assert.equal((await plain.until((frame) => frame.requestId === "g5")).code, "MODERATION_UNAVAILABLE");
+});
+
+test("bots share one removal budget per minute", async (t) => {
+  const env = await botEnv(t, { moderation: true });
+  const bot = await env.open();
+  for (let i = 0; i < 11; i += 1) {
+    env.hub.handleMessage({ messageId: String(2000 + i), channelId: CHAT, channelKind: "group", senderId: `u-scam${i}`, senderName: "x", text: "x", contentType: "NONE", createdAt: 1 }, "new");
+  }
+  for (let i = 0; i < 11; i += 1) bot.socket.send(JSON.stringify({ type: "member:remove", requestId: `r${i}`, chatId: CHAT, messageId: String(2000 + i) }));
+  await bot.until(() => bot.frames.filter((frame) => frame.requestId?.startsWith("r")).length === 11);
+  const answers = bot.frames.filter((frame) => frame.requestId?.startsWith("r"));
+  assert.equal(answers.filter((frame) => frame.type === "member:removed").length, 10);
+  assert.equal(answers.filter((frame) => frame.code === "RATE_LIMITED").length, 1);
 });
 
 test("a bot is refused the scam check when no Jev token is set", async (t) => {
