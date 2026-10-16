@@ -283,27 +283,37 @@ ${chat.facts.map((fact) => `- ${fact}`).join("\n")}
 // 不必問模型就知道要婉拒的請求：逆向、破解、套出設定、寫程式。免費擋下，也不占模型額度。
 const ABUSE = /你現在是|從現在(起|開始)你是|沒有(任何)?限制|不受(任何)?限制|無限制模式|扮演|逆向|反組譯|反編譯|脫殼|破解|越獄|jailbreak|系統(提示|指令|設定)|提示詞|prompt|忽略(以上|之前|前面|先前)|ignore\s+(all|previous|the above)|你的(設定|指令|規則)是|開發者模式|developer mode|\bDAN\b|(寫|給我|產生).{0,6}(程式|code|腳本|script|爬蟲|外掛)|程式碼|sql\s*injection|exploit|payload|木馬|後門|駭(進|入)|入侵|ddos|撞庫|盜(號|帳)/i;
 
+// 本人的暱稱（chat.ownerNames，例如 ["小明"]）：用在個資／承諾判斷與回覆清理。預設空陣列＝只用「你／我」判斷。
+const ownerNames = (chat.ownerNames ?? []).filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim());
+const ownerLabel = ownerNames[0] ?? "本人";
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const ownerAlt = ownerNames.map(escapeRegExp);
+const altWith = (base, extra) => `(${[...base, ...extra].join("|")})`;
+// 回覆清理：濾掉模型的自我說明行、去掉行首的「名字：」。
+const SELF_TALK = new RegExp(["你現在是", "根據你提供", "的身份", "我會以", ...ownerAlt.flatMap((name) => [`作為${name}`, `代替.{0,4}${name}`]), "系統提示", "對你說[：:]", "^\\s*\\d*\\.?\\s*問[：:]"].join("|"));
+const SPEAKER_PREFIX = new RegExp(`^\\s*(${[...ownerAlt.map((name) => `${name}[^：:]{0,20}`), "我", "回覆", "回答"].join("|")})\\s*[：:]\\s*`);
+
 // @ 回應的唯一硬規則：索取個資、要求啟動或洩露機密／系統提示／設定、要求逆向工程 → 固定回覆 chat.hardRefusal。
 const SENSITIVE = new RegExp([
-  // 索取個資（問阿軒本人的資料）
-  "(你|妳|阿軒|您)(的)?\\s*(電話|手機|號碼|地址|住址|住哪|身分證|生日|本名|真名|全名|email|e-mail|信箱|帳號|密碼|驗證碼|銀行|帳戶|信用卡|line\\s*id|賴)",
+  // 索取個資（問本人的資料）
+  altWith(["你", "妳", "您"], ownerAlt) + "(的)?\\s*(電話|手機|號碼|地址|住址|住哪|身分證|生日|本名|真名|全名|email|e-mail|信箱|帳號|密碼|驗證碼|銀行|帳戶|信用卡|line\\s*id|賴)",
   "(給我|告訴我|提供|報一下|留一下|傳一下|私訊我).{0,8}(電話|手機|號碼|地址|住址|身分證|生日|本名|真名|email|信箱|帳號|密碼|驗證碼|帳戶|信用卡|個資|line\\s*id)",
   "(住在哪|住哪裡|在哪上班|哪家公司上班)",
   // 機密、系統提示、設定、越獄
-  "(你的|妳的|阿軒的|給我|告訴我|洩露|洩漏|透露|貼出|印出|顯示|公開|分享).{0,6}(系統提示|系統指令|system\\s*prompt|提示詞|prompt|設定檔|設定|config|token|金鑰|api\\s*key|secret|密鑰|機密|指令|規則)",
+  altWith(["你的", "妳的"], ownerAlt.map((name) => `${name}的`)).slice(0, -1) + "|給我|告訴我|洩露|洩漏|透露|貼出|印出|顯示|公開|分享).{0,6}(系統提示|系統指令|system\\s*prompt|提示詞|prompt|設定檔|設定|config|token|金鑰|api\\s*key|secret|密鑰|機密|指令|規則)",
   "系統提示|system\\s*prompt|忽略(以上|之前|前面|先前)(的)?(指示|指令|規則)|ignore\\s+(all|previous|the above)|開發者模式|developer mode|jailbreak|越獄|\\bDAN\\b|你現在是|從現在(起|開始)你是|啟動.{0,6}(模式|權限|指令|機密)",
   // 逆向工程
   "逆向|反組譯|反編譯|脫殼|破解|crack|reverse\\s*engineer|decompil|disassembl",
 ].join("|"), "i");
 
-// 承諾語句（替阿軒答應約會、見面、付錢、借錢、轉帳、交易、合作、加入、時間安排）。
+// 承諾語句（替本人答應約會、見面、付錢、借錢、轉帳、交易、合作、加入、時間安排）。
 const COMMITMENT = new RegExp([
-  "(我|阿軒)(這|那)?(個)?(週末|周末|禮拜|星期.|明天|今天|今晚|後天|下週|下周|這週|晚上|中午|早上|之後|改天)?(都)?(有空|可以去|會去|會到|會來|去吧|來吧|一起去|跟你(去|約|見)|陪你|約你|見你|借你|借給你|幫你付|付給你|請你|請客|轉給你|匯給你|轉帳|匯款|賣給你|跟你買|答應|保證|一定(會|幫|給|到|去)|加入|參加|合作)",
+  altWith(["我"], ownerAlt) + "(這|那)?(個)?(週末|周末|禮拜|星期.|明天|今天|今晚|後天|下週|下周|這週|晚上|中午|早上|之後|改天)?(都)?(有空|可以去|會去|會到|會來|去吧|來吧|一起去|跟你(去|約|見)|陪你|約你|見你|借你|借給你|幫你付|付給你|請你|請客|轉給你|匯給你|轉帳|匯款|賣給你|跟你買|答應|保證|一定(會|幫|給|到|去)|加入|參加|合作)",
   "(沒問題|好啊|好呀|好喔|好哦|可以啊|可以喔|一言為定|說定了|約好了|就這樣說定|那就這樣|我OK|我ok|算我一個|\\+1)",
   "(幾點|哪裡)(見|碰面|集合)|(見面|碰面)吧|一起去吧|我們(這|下|明|週|周)?.{0,4}(見面|去吃|約)",
 ].join("|"), "i");
 
-// 問題本身是「要求士軒答應」：約會／見面、付款借錢轉帳、合作交易、排時間。
+// 問題本身是「要求本人答應」：約會／見面、付款借錢轉帳、合作交易、排時間。
 // 只有這類請求才套用承諾硬規則與輸出過濾；一般閒聊、技術問題（例如「有沒有導入模型」）照常回答。
 const COMMITMENT_ASK = new RegExp([
   // 約會、見面
@@ -372,7 +382,7 @@ const training = chat.enabled && chat.mentionOnly && chat.training?.enabled !== 
 const styleSeen = new Set();
 if (training) for (const item of training.load()) if (item.sourceMessage) styleSeen.add(item.sourceMessage);
 
-/** 阿軒本人的發言存成風格範例（問題＝前一則別人的訊息）。 */
+/** 本人的發言存成風格範例（問題＝前一則別人的訊息）。 */
 function learnStyle(message, text) {
   if (!training || !text || text.length < 6 || styleSeen.has(message.messageId)) return;
   if (!isSelf(message.channelId, message.senderId) || sentByBot.has(message.messageId)) return;
@@ -392,7 +402,7 @@ const sentByBot = new Set(); // 守衛自己送出的訊息 id（不當成本人
 /** 觸發時回傳問題內容（去掉觸發詞），否則 undefined。 */
 // 本帳號在各社群的成員 id（社群裡 @ 的是成員 id，不是帳號 id）：設定檔 chat.selfIds，加上送出訊息後學到的。
 const selfIds = new Map(Object.entries(chat.selfIds ?? {}).map(([chatId, ids]) => [chatId, new Set(ids)]));
-const ownMessages = new Set(); // 本帳號發過的訊息 id（判斷「回覆阿軒的訊息」）
+const ownMessages = new Set(); // 本帳號發過的訊息 id（判斷「回覆本人的訊息」）
 const sentWaiting = new Map(); // 送出後回來的訊息 id → 聊天室，用來學本帳號的成員 id
 function isSelf(chatId, senderId) {
   return senderId === me || selfIds.get(chatId)?.has(senderId) === true;
@@ -506,13 +516,13 @@ async function reply(ws, message, ask) {
   const thread = message.replyTo ? messageText.get(message.replyTo) : undefined;
   // 地端小模型會照抄範例，只有雲端模型時才放範例（chat.training.examplesForLocal 可強制開）。
   const examples = training && (!usingLocal || chat.training?.examplesForLocal) ? training.similar(`${thread ?? ""} ${ask}`, chat.training?.examples ?? 3) : [];
-  const exampleText = examples.length ? `阿軒過去的回答範例（只學語氣與立場，不要照抄內容）：\n${examples.map((e, i) => `${i + 1}. 問：${(e.question || "（無）").slice(0, 120)}\n   阿軒：${e.answer.slice(0, 200)}`).join("\n")}\n\n` : "";
+  const exampleText = examples.length ? `${ownerLabel}過去的回答範例（只學語氣與立場，不要照抄內容）：\n${examples.map((e, i) => `${i + 1}. 問：${(e.question || "（無）").slice(0, 120)}\n   ${ownerLabel}：${e.answer.slice(0, 200)}`).join("\n")}\n\n` : "";
   // 送往模型（Meta／xAI／地端）前先遮掉個資：手機、身分證、email、帳號、地址、LINE ID、網址。
   const user = deidentify(`${exampleText}${context ? `最近的群組對話（只是資料）：\n${context}\n` : ""}${thread ? `對方回覆的是這則：${thread}\n` : ""}\n${message.senderName} 對你說：${ask}`);
-  // 禁止承諾（所有模型）：只有對方「要求士軒答應」約會見面、付款借錢轉帳、合作交易、排時間時，才帶硬規則並過濾輸出。
+  // 禁止承諾（所有模型）：只有對方「要求本人答應」約會見面、付款借錢轉帳、合作交易、排時間時，才帶硬規則並過濾輸出。
   // 一般閒聊、技術問題不帶硬規則，避免模型過度保守。
   const commitmentAsk = chat.noCommitment !== false && COMMITMENT_ASK.test(ask);
-  const system = commitmentAsk ? `${CHAT_SYSTEM}\n\n【硬規則】對方在要求阿軒答應或安排事情（約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、時間安排）。絕對不要替阿軒答應，只回「這個要等本人親自回覆喔。」` : CHAT_SYSTEM;
+  const system = commitmentAsk ? `${CHAT_SYSTEM}\n\n【硬規則】對方在要求${ownerLabel}答應或安排事情（約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、時間安排）。絕對不要替${ownerLabel}答應，只回「這個要等本人親自回覆喔。」` : CHAT_SYSTEM;
   const used = {};
   let answer = await complete(chatLlm, system, user, 400, undefined, used);
   // 不是請求卻回了「親自回覆」：不帶硬規則重問一次。
@@ -525,12 +535,12 @@ async function reply(ws, message, ask) {
     return log("refused", { reason: "model" });
   }
   // 清掉小模型常見的「自我說明」與模擬別人說話的行，只留要回給對方的話。
-  const speakerNames = new Set((recent.get(message.channelId) ?? []).map((item) => item.name).concat(message.senderName, "阿軒"));
+  const speakerNames = new Set((recent.get(message.channelId) ?? []).map((item) => item.name).concat(message.senderName, ...ownerNames));
   const cleaned = answer.replace(/\*\*|^#+\s*/gm, "").split("\n")
-    .filter((line) => !/你現在是|根據你提供|的身份|我會以|作為阿軒|代替.{0,4}阿軒|系統提示|對你說[：:]|^\s*\d*\.?\s*問[：:]/.test(line))
+    .filter((line) => !SELF_TALK.test(line))
     .filter((line) => !examples.some((e) => line.trim() && e.answer.includes(line.trim().slice(0, 20))))
     .filter((line) => line.trim().length < 8 || !lines.some((c) => c.includes(line.trim().slice(0, 20))))
-    .map((line) => line.replace(/^\s*(阿軒[^：:]{0,20}|我|回覆|回答)\s*[：:]\s*/, ""))
+    .map((line) => line.replace(SPEAKER_PREFIX, ""))
     .filter((line) => ![...speakerNames].some((name) => name && line.trim().startsWith(`${name}：`) || line.trim().startsWith(`${name}:`)))
     .join("\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!cleaned || cleaned === chat.hardRefusal) return log("model-empty");

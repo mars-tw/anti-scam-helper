@@ -1,6 +1,6 @@
-// 聊天應答學習資料庫（只存在本機，不上傳）：去識別化的 @阿軒 問答與阿軒本人發言範例，
+// 聊天應答學習資料庫（只存在本機，不上傳）：去識別化的 @本人 問答與本人發言範例，
 // 回應時用字元雙字組（bigram）相似度挑相近的好範例放進提示，讓語氣越來越像本人。
-// 檔案：<dir>/qa.jsonl（自動收集的問答）、<dir>/style.jsonl（阿軒本人歷史發言）。
+// 檔案：<dir>/qa.jsonl（自動收集的問答）、<dir>/style.jsonl（本人歷史發言）。
 // 人工標記：把某一行的 "label" 改成 "good" 或 "bad"（bad 不會被拿來當範例），"note" 可寫備註。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";

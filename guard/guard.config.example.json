@@ -18,9 +18,19 @@
     "capability": "text_fast",
     "timeoutMs": 120000
   },
+  "review": {
+    "backend": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "請填入覆核模型名稱",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxTokens": 2000,
+    "timeoutMs": 60000
+  },
+  "reviewScore": 3,
   "chat": {
     "enabled": true,
     "name": "小助手",
+    "ownerNames": [],
     "triggers": [
       "小助手"
     ],
@@ -48,6 +58,7 @@
     "enabled": true,
     "allow": []
   },
+  "linkAllow": [],
   "vision": {
     "enabled": false,
     "action": "report",
