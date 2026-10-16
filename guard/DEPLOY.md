@@ -5,7 +5,10 @@
 1. **LINE.js 服務**（`npm start`）：以使用者的 LINE 帳號連線，提供本機機器人 API `ws://127.0.0.1:3789/api/ws`。
 2. **反詐守衛＋小助手**（`npm run guard`）：連到上面的 API，判斷詐騙、踢人、回覆群組問題。
 
-雲端主機沒有本機 AI 派工器，所以模型要用 OpenAI 相容 API（GPT 或 Grok）。
+雲端主機沒有本機 AI 派工器，模型有兩種選擇：
+
+- **免費版**：在同一台主機上自己跑開源模型（例如 Qwen3-VL-2B，能看圖、懂中文），用 `guard/guard.config.cloud-free.example.json`。
+- **付費版**：OpenAI 相容 API（GPT 或 Grok），用 `guard/guard.config.cloud.example.json`。
 
 ## 主機需求
 
@@ -50,7 +53,7 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
    npm run cli -- login       # 用手機 LINE 掃描 QR，並在手機輸入畫面上的 PIN
    ```
 3. 產生機器人 Token（只顯示一次）：`npm run cli -- token`，存成環境變數 `LINEJS_TOKEN`。
-4. 守衛設定：
+4. 守衛設定（免費版看下一節；以下為付費版）：
    ```sh
    cp guard/guard.config.cloud.example.json guard/guard.config.json
    ```
@@ -60,6 +63,27 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
    - `dryRun: true` 時只記錄、不踢人；確認沒有誤判再改成 `false`。
    - 依社群修改 `chat.facts`（社群須知）、`chat.scope`（回答範圍）、`protectedMembers`（常被冒名的群主）。
    - `chat.dailyTotal`、`chat.dailyPerUser` 就是付費 API 的用量上限，依預算調整。
+
+## 免費版：在主機上自己跑模型
+
+守衛透過 OpenAI 相容介面連到主機上的模型，不需要 API 金鑰。建議用 llama.cpp 的 `llama-server`（需支援 Qwen3-VL 的新版）：
+
+```sh
+# 檔名依實際下載的量化版而定：主模型 .gguf ＋ 看圖用的 mmproj .gguf
+llama-server -m Qwen3-VL-2B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3-VL-2B-Instruct.gguf   --host 127.0.0.1 --port 8080 -c 8192
+```
+
+- `--host` 保持 `127.0.0.1`，不要對外開放。
+- 確認可用：`curl http://127.0.0.1:8080/v1/models` 有回應。
+- 守衛設定：
+  ```sh
+  cp guard/guard.config.cloud-free.example.json guard/guard.config.json
+  ```
+  `llm.baseUrl` 預設為 `http://127.0.0.1:8080/v1`；`apiKeyEnv` 為空字串（不帶金鑰）、`maxTokensField` 為 `max_tokens`。反詐判斷、小助手與看圖都用這個模型。
+- `llama-server` 也要常駐，可用 pm2 另外起一個程序：`pm2 start "llama-server ...同上參數" --name llm`。
+- 只有 CPU 時，看一張圖可能要數十秒。圖片會先縮到長邊 768 像素，並在背景佇列處理，不會卡住文字訊息的判斷；排隊超過 20 張就跳過最舊的。
+- 2B 小模型的判斷力有限，`vision.action` 預設 `report`：只記錄，並可用 `vision.alertChatId` 通知某個管理員群組（該群組 ID 也要列在 `config.yaml` 的 `api.chats`），不會自動移除。觀察準確度後再決定是否改成 `remove`。
+- 驗收：貼一張投資獲利截圖，日誌出現「【疑似詐騙圖片】」；貼一般風景照則不會。
 
 ## 常駐執行
 

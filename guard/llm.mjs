@@ -1,33 +1,46 @@
-// 語言模型介面：本機 AI 派工器（免費，只在這台電腦），或 OpenAI 相容 API（GPT、Grok 等，雲端可用、依用量計費）。
+// 語言模型介面：本機 AI 派工器（免費，只在這台電腦），或 OpenAI 相容 API。
+// OpenAI 相容 API 可以是付費服務（GPT、Grok），也可以是主機上自己跑的免費模型（llama.cpp 的 llama-server 等）。
 //
 // 設定範例：
 //   { "backend": "local", "url": "http://127.0.0.1:11440", "capability": "text_fast" }
 //   { "backend": "openai", "baseUrl": "https://api.openai.com/v1", "model": "<模型名稱>", "apiKeyEnv": "OPENAI_API_KEY" }
 //   { "backend": "openai", "baseUrl": "https://api.x.ai/v1", "model": "<模型名稱>", "apiKeyEnv": "XAI_API_KEY" }
+//   { "backend": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "model": "qwen3-vl-2b", "apiKeyEnv": "", "maxTokensField": "max_tokens" }
+// apiKeyEnv 設成空字串＝不帶金鑰（主機上自己跑的模型）。
 // 推理型模型會把一部分 token 花在思考上，回答被截斷時把 maxTokens 調高。
 
-/** 回傳模型的文字回答；連不上、逾時或格式不對時回 undefined（呼叫端自行退回保守處理）。 */
-export async function complete(llm, system, user, maxTokens) {
+/**
+ * 回傳模型的文字回答；連不上、逾時或格式不對時回 undefined（呼叫端自行退回保守處理）。
+ * `image`（選用）：{ mime, base64 }，給看得懂圖片的模型。
+ */
+export async function complete(llm, system, user, maxTokens, image) {
   try {
-    if ((llm.backend ?? "local") === "openai") return await openai(llm, system, user, maxTokens);
-    return await local(llm, system, user, maxTokens);
+    const answer = (llm.backend ?? "local") === "openai"
+      ? await openai(llm, system, user, maxTokens, image)
+      : await local(llm, system, user, maxTokens, image);
+    // Qwen3 等模型可能先輸出 <think>…</think> 的思考過程，只留最後的回答。
+    return answer?.replace(/<think>[\s\S]*?<\/think>/g, "").trim() || undefined;
   } catch (error) {
     console.error(`模型無法使用（${llm.backend ?? "local"}）：${error.message}`);
     return undefined;
   }
 }
 
-async function openai(llm, system, user, maxTokens) {
-  const key = process.env[llm.apiKeyEnv ?? "OPENAI_API_KEY"];
-  if (!key) throw new Error(`缺少環境變數 ${llm.apiKeyEnv ?? "OPENAI_API_KEY"}`);
+async function openai(llm, system, user, maxTokens, image) {
+  const keyEnv = llm.apiKeyEnv ?? "OPENAI_API_KEY";
+  const key = keyEnv ? process.env[keyEnv] : undefined;
+  if (keyEnv && !key) throw new Error(`缺少環境變數 ${keyEnv}`);
   if (!llm.model) throw new Error("設定檔缺少 model");
+  const content = image
+    ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: `data:${image.mime};base64,${image.base64}` } }]
+    : user;
   const response = await fetch(`${(llm.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
     body: JSON.stringify({
       model: llm.model,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-      // OpenAI 新模型只收 max_completion_tokens；其他相容服務若只認 max_tokens，可在設定改 maxTokensField。
+      messages: [{ role: "system", content: system }, { role: "user", content }],
+      // OpenAI 新模型只收 max_completion_tokens；llama-server 等其他相容服務用 max_tokens，可在設定改 maxTokensField。
       [llm.maxTokensField ?? "max_completion_tokens"]: llm.maxTokens ?? maxTokens,
     }),
     signal: AbortSignal.timeout(llm.timeoutMs ?? 60_000),
@@ -36,15 +49,16 @@ async function openai(llm, system, user, maxTokens) {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
   const text = data.choices?.[0]?.message?.content;
-  return typeof text === "string" ? text.trim() : undefined;
+  return typeof text === "string" ? text : undefined;
 }
 
-async function local(llm, system, user, maxTokens) {
+async function local(llm, system, user, maxTokens, image) {
   const url = llm.url ?? "http://127.0.0.1:11440";
+  const payload = { task: `${system}\n\n${user}`, max_tokens: maxTokens, allow_cloud: false, ...(image ? { image_url: `data:${image.mime};base64,${image.base64}` } : {}) };
   const created = await fetch(`${url}/v1/dispatch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ capability: llm.capability ?? "text_fast", payload: { task: `${system}\n\n${user}`, max_tokens: maxTokens, allow_cloud: false }, priority: 5 }),
+    body: JSON.stringify({ capability: llm.capability ?? (image ? "vision" : "text_fast"), payload, priority: 5 }),
     signal: AbortSignal.timeout(10_000),
   }).then((response) => response.json());
   const deadline = Date.now() + (llm.timeoutMs ?? 120_000);
@@ -52,7 +66,7 @@ async function local(llm, system, user, maxTokens) {
     const task = await fetch(`${url}/v1/tasks/${created.id}`, { signal: AbortSignal.timeout(10_000) }).then((response) => response.json());
     if (task.status === "completed") {
       const text = task.result?.output?.answer;
-      return typeof text === "string" ? text.trim() : undefined;
+      return typeof text === "string" ? text : undefined;
     }
     if (["failed", "cancelled", "rejected"].includes(task.status)) throw new Error(`任務 ${task.status}`);
     await new Promise((done) => setTimeout(done, 1000));

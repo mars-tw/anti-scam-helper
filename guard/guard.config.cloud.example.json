@@ -48,5 +48,12 @@
     "enabled": true,
     "allow": []
   },
+  "vision": {
+    "enabled": false,
+    "action": "report",
+    "alertChatId": "",
+    "maxQueue": 20,
+    "maxSide": 768
+  },
   "logDir": "logs"
 }

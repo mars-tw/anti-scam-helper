@@ -40,6 +40,30 @@ function half(image) {
   return { width, height, data };
 }
 
+/** 依比例縮小（scale < 1），每個新像素取原圖對應區塊的平均。 */
+function resize(image, scale) {
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const y0 = Math.floor(y / scale);
+    const y1 = Math.max(y0 + 1, Math.min(image.height, Math.floor((y + 1) / scale)));
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.floor(x / scale);
+      const x1 = Math.max(x0 + 1, Math.min(image.width, Math.floor((x + 1) / scale)));
+      const sum = [0, 0, 0, 0];
+      for (let sy = y0; sy < y1; sy += 1) {
+        for (let sx = x0; sx < x1; sx += 1) {
+          for (let c = 0; c < 4; c += 1) sum[c] += image.data[(sy * image.width + sx) * 4 + c];
+        }
+      }
+      const count = (y1 - y0) * (x1 - x0);
+      for (let c = 0; c < 4; c += 1) data[(y * width + x) * 4 + c] = sum[c] / count;
+    }
+  }
+  return { width, height, data };
+}
+
 /** 回傳圖片中 QR code 的文字內容；沒有或無法解讀時回 undefined。 */
 export function readQr(mime, bytes) {
   let image = decodeImage(mime, bytes);
@@ -53,6 +77,20 @@ export function readQr(mime, bytes) {
     image = half(image);
   }
   return undefined;
+}
+
+/**
+ * 縮成長邊不超過 maxSide 的 JPEG（base64），給看圖模型用：CPU 上的小模型看小圖快很多。
+ * 無法解讀時回 undefined。
+ */
+export function shrinkForModel(mime, bytes, maxSide = 768) {
+  let image = decodeImage(mime, bytes);
+  if (!image) return undefined;
+  // 先對半縮到兩倍以內（快），再精準縮到 maxSide：縮過頭的話，圖中小字模型就讀不出來。
+  while (Math.max(image.width, image.height) > maxSide * 2) image = half(image);
+  if (Math.max(image.width, image.height) > maxSide) image = resize(image, maxSide / Math.max(image.width, image.height));
+  const encoded = jpeg.encode({ data: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.length), width: image.width, height: image.height }, 85);
+  return { mime: "image/jpeg", base64: Buffer.from(encoded.data).toString("base64"), width: image.width, height: image.height };
 }
 
 const LINE_INVITE = /(^|\/\/|\.)(line\.me\/(R\/)?ti\/(g2?|p)\/|line\.me\/R\/(ti|nv|oaMessage)|lin\.ee\/|liff\.line\.me\/|qr-official\.line\.me\/|page\.line\.me\/)/i;

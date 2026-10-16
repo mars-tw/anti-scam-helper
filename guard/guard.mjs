@@ -1,6 +1,7 @@
 // 反詐守衛＋群組小助手：連到 LINE.js 機器人 API。
 // - 反詐：以規則＋語言模型判斷詐騙訊息，判定後移除發言者（社群另刪除該則訊息）。
-// - 圖片：在本機解讀 QR code，LINE 群組／社群邀請或加好友的 QR 視為引流詐騙。
+// - 圖片：在本機解讀 QR code，LINE 群組／社群邀請或加好友的 QR 視為引流詐騙；
+//   沒有 QR 的圖片可再交給看圖模型（選用），判斷是否為詐騙廣告或假獲利截圖。
 // - 小助手：訊息以觸發詞開頭或 @ 本帳號時，用語言模型回覆；只答範圍內的問題，並有每日上限。
 // 用法：node guard/guard.mjs [設定檔路徑]（預設 guard/guard.config.json）
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
@@ -8,7 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { complete } from "./llm.mjs";
-import { isLineInvite, readQr } from "./qr.mjs";
+import { isLineInvite, readQr, shrinkForModel } from "./qr.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
 process.on("unhandledRejection", (error) => {
@@ -57,6 +58,8 @@ const chat = {
   ...config.chat,
 };
 const qr = { enabled: true, allow: [], ...config.qr };
+// 看圖模型：預設關閉。action 為 "report"（只記錄，選用 alertChatId 通知）或 "remove"（判定詐騙就移除）。
+const vision = { enabled: false, action: "report", maxQueue: 20, maxSide: 768, ...config.vision };
 const chatLlm = { ...scamLlm, ...chat.llm };
 
 // ── 規則：每類命中加分，同一類只算一次 ──────────────────────────
@@ -358,7 +361,10 @@ async function checkImage(ws, message) {
   } catch (error) {
     return console.error(`圖片解讀失敗：${error.message}`);
   }
-  if (!content) return;
+  if (!content) {
+    if (vision.enabled) queueVision(ws, message, picture);
+    return;
+  }
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: `［圖片 QR code］${content.slice(0, 480)}` };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
   if (qr.allow.some((prefix) => content.startsWith(prefix))) return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
@@ -366,6 +372,61 @@ async function checkImage(ws, message) {
   const result = await decide(message, `圖片中的 QR code 內容：${content}`);
   if (result.kick) return remove(ws, message, { ...entry, ...result });
   record({ action: "none", ...entry, ...result });
+}
+
+// ── 看圖模型（沒有 QR code 的圖片） ─────────────────────────────
+const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成員貼出的這張圖片是不是詐騙或詐騙引流：
+投資、飆股、虛擬貨幣的獲利截圖或對帳單，老師帶單，加 LINE 或其他群組的廣告，博弈娛樂城，兼職刷單，假中獎，假客服或假公告，借貸廣告。
+一般生活照、風景、食物、寵物、迷因、新聞截圖、一般聊天截圖都算 OK；只是圖裡有數字或文字不代表是詐騙。
+第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行用 20 字內寫你在圖中看到的證據。`;
+
+const visionQueue = [];
+let visionBusy = false;
+
+function queueVision(ws, message, picture) {
+  // CPU 上看一張圖可能要數十秒；積太多就丟掉最舊的，避免越排越久。
+  if (visionQueue.length >= vision.maxQueue) {
+    const dropped = visionQueue.shift();
+    record({ action: "vision-skipped", chatId: dropped.message.channelId, messageId: dropped.message.messageId, senderName: dropped.message.senderName, reason: "queue-full" });
+  }
+  visionQueue.push({ ws, message, picture });
+  void drainVision();
+}
+
+async function drainVision() {
+  if (visionBusy) return;
+  visionBusy = true;
+  while (visionQueue.length > 0) {
+    const { ws, message, picture } = visionQueue.shift();
+    try {
+      await checkWithVision(ws, message, picture);
+    } catch (error) {
+      console.error(`看圖失敗：${error.message}`);
+    }
+  }
+  visionBusy = false;
+}
+
+async function checkWithVision(ws, message, picture) {
+  if (kicked.has(`${message.channelId} ${message.senderId}`)) return;
+  const small = shrinkForModel(picture.mime, Buffer.from(picture.data, "base64"), vision.maxSide);
+  if (!small) return;
+  const started = Date.now();
+  const answer = await complete(vision.llm ?? scamLlm, VISION_SYSTEM, "請判斷這張圖片。", 80, small);
+  const lines = String(answer ?? "").trim().split(/\n+/);
+  const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
+  const reason = (lines.slice(1).join(" ").trim() || lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60);
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: "［圖片］", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], seconds: Math.round((Date.now() - started) / 1000) };
+  if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
+  if (verdict === "SCAM" || verdict === "UNSURE") {
+    console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
+    record({ action: "vision-flag", ...entry });
+    if (vision.alertChatId) {
+      ws.send(JSON.stringify({ type: "message:send", requestId: `alert${++requestSeq}`, chatId: vision.alertChatId, text: `⚠️ 疑似詐騙圖片（${verdict === "SCAM" ? "模型判定詐騙" : "可疑"}）\n發送者：${message.senderName}\n理由：${reason || "（未說明）"}\n成員 ID：${message.senderId}` }));
+    }
+    return;
+  }
+  record({ action: "none", ...entry });
 }
 
 async function drain(ws) {
@@ -451,4 +512,5 @@ function connect() {
 for (const entry of protectedMembers) {
   if (entry.ids.size === 0) console.log(`提醒：受保護名字「${entry.name}」沒有填本人 ID，只在社群（靠管理員身分）偵測冒名。`);
 }
+if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "只記錄與通知，不移除"}）`);
 connect();

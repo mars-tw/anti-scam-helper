@@ -29,6 +29,9 @@
 - **沒有 QR code 的圖片**：不處理。
 - 社群自己的正式 QR（例如本社群的官方邀請）可加入 `qr.allow`，以網址開頭比對。
 - 管理員與白名單成員貼的圖片不檢查。
+- **沒有 QR code 的圖片**可再交給看圖模型（`vision`，預設關閉），判斷是不是投資獲利截圖、加 LINE 廣告、博弈、兼職刷單、假中獎等詐騙圖。圖片先縮到長邊 768 像素，在背景佇列處理，不會卡住文字判斷。
+  - `vision.action: "report"`（預設）：只記錄並在主控台提示，可用 `alertChatId` 通知管理員群組，不移除。
+  - `vision.action: "remove"`：模型判定 SCAM 就移除。小模型容易看錯，建議先用 `report` 觀察。
 
 ### 4. 小助手（回答問題）
 
@@ -64,7 +67,7 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 | backend | 說明 |
 |---|---|
 | `local` | 本機 AI 派工器，免費，只在這台電腦能用 |
-| `openai` | OpenAI 相容 API：GPT（`https://api.openai.com/v1`）或 Grok（`https://api.x.ai/v1`）。依用量計費，訊息會送到該服務 |
+| `openai` | OpenAI 相容 API：GPT（`https://api.openai.com/v1`）或 Grok（`https://api.x.ai/v1`），依用量計費、訊息會送到該服務；也可以是主機上自己跑的免費模型（llama.cpp 的 `llama-server`，`apiKeyEnv` 設空字串、`maxTokensField` 設 `max_tokens`），範本見 `guard.config.cloud-free.example.json` |
 
 例如反詐判斷用本機、聊天用 GPT：
 
@@ -106,6 +109,10 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 | `checkEveryMessage` | `true`＝沒命中規則的訊息也交給模型判斷（較慢、抓得較廣） |
 | `llm` | 反詐判斷用的模型（見「模型選擇」）；本機時 `capability` 可選 `text_fast`（CPU、約 5 秒）或 `text_review`（27B GPU，較準但會和產圖、影片排隊） |
 | `qr.enabled` / `qr.allow` | 圖片 QR 檢查開關／允許的 QR 內容（網址開頭） |
+| `vision.enabled` / `vision.action` | 看圖模型開關／`report`（只通知）或 `remove`（判定詐騙就移除） |
+| `vision.llm` | 看圖用的模型，必須看得懂圖片（省略則沿用 `llm`） |
+| `vision.alertChatId` | 疑似詐騙圖片要通知的聊天室 ID（須列在 `config.yaml` 的 `api.chats`；留空不通知） |
+| `vision.maxQueue` / `vision.maxSide` | 背景佇列上限／送給模型的圖片長邊像素 |
 | `chat.enabled` | 小助手開關 |
 | `chat.triggers` / `chat.onMention` | 觸發詞清單／@ 本帳號是否觸發 |
 | `chat.scope` | 小助手可以回答的範圍 |
