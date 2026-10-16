@@ -100,8 +100,9 @@ const RULES = [
 ];
 
 // 正常技術、地圖、影音、官方網站：不因為「有網址」加分（短網址、LINE 邀請另外計）。
-const BENIGN_DOMAINS = config.benignDomains ?? ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "docs.", "developer."];
-const BENIGN_URL = new RegExp(`(https?:\\/\\/)?([\\w-]+\\.)*(${BENIGN_DOMAINS.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})[^\\s，。）)」』]*`, "gi");
+const BENIGN_DOMAINS = config.benignDomains ?? ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "nvidia.com", "amd.com", "intel.com", "amazon.com", "aws.amazon.com", "cloudflare.com", "ibm.com", "oracle.com", "adobe.com", "samsung.com", "tsmc.com", "asus.com", "docker.com", "python.org", "nodejs.org", "mozilla.org", "kaggle.com", "arxiv.org", "mistral.ai", "deepseek.com", "perplexity.ai", "ollama.com", "openrouter.ai", "vercel.com", "azure.com", "bitbucket.org", "antigravity.google", "docs.", "developer."];
+// 網域前後要有邊界：fakenvidia.com、nvidia.com.evil.ru 這類仿冒不算一般網域（docs.／developer. 這類前綴除外）。
+const BENIGN_URL = new RegExp(`(?<![\\w.-])(https?:\\/\\/)?([\\w-]+\\.)*(${BENIGN_DOMAINS.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (d.endsWith(".") ? "" : "(?=$|[\\/?#:\\s，。）)」』])")).join("|")})[^\\s，。）)」』]*`, "gi");
 
 function textOf(message) {
   if (message.text) return message.text;
