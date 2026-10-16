@@ -23,6 +23,8 @@ const READ_RANGE_FRESH_MS = 10_000;
 const SCAM_CHECKS_PER_MINUTE = 10;
 // All bots together: removing people is the riskiest thing an account can automate, keep LINE's view of it calm.
 const REMOVALS_PER_MINUTE = 10;
+/** All bots together: OpenChat message deletions (moderation) per minute. */
+const DELETIONS_PER_MINUTE = 20;
 // Pictures for moderation bots (QR checks): bounded so a bot cannot turn this server into a bulk downloader.
 const BOT_MEDIA_PER_MINUTE = 30;
 const BOT_MEDIA_MAX_BYTES = 5 * 1024 * 1024;
@@ -90,6 +92,8 @@ const GENERIC = {
   MODERATION_UNAVAILABLE: "未啟用成員移除。",
   REMOVE_FAILED: "無法移除這位成員，請確認帳號有管理權限。",
   MEDIA_FAILED: "無法取得這張圖片。",
+  DELETE_UNSUPPORTED: "只有社群可以刪除他人訊息。",
+  MESSAGE_DELETE_FAILED: "無法刪除這則訊息，請確認帳號有管理權限。",
 } as const;
 
 function updateFrame(info: UpdateInfo): ServerFrame {
@@ -105,6 +109,7 @@ export function createHub(options: HubOptions): Hub {
   // Shared by every bot connection: several connections must not multiply the paid TypeSafe calls.
   const botScamLimiter = new SlidingWindowLimiter(SCAM_CHECKS_PER_MINUTE, 60_000);
   const botRemoveLimiter = new SlidingWindowLimiter(REMOVALS_PER_MINUTE, 60_000);
+  const botDeleteLimiter = new SlidingWindowLimiter(DELETIONS_PER_MINUTE, 60_000);
   const botMediaLimiter = new SlidingWindowLimiter(BOT_MEDIA_PER_MINUTE, 60_000);
   // "chat member" pairs already removed for this account: a second scam message from them must not ask LINE again.
   const removedMembers = new Set<string>();
@@ -465,6 +470,37 @@ export function createHub(options: HubOptions): Hub {
   }
 
   /**
+   * Deletes, for everyone, one message this server has shown in an OpenChat the bot may reach (this account must be a
+   * manager there). The sender stays. Never this account's own messages or an OpenChat manager's.
+   */
+  async function handleBotDelete(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseMessageRequest(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, messageId } = parsed.value;
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square") return fail(socket, "DELETE_UNSUPPORTED", requestId);
+    const message = store.get(messageId, chatId);
+    const mine = message !== undefined && (message.senderId === provider.getProfile().userId || message.senderId === ownSquareSenders.get(chatId));
+    if (!message || mine || message.contentType === "CHATEVENT" || message.senderRole !== undefined) return fail(socket, "INVALID_REQUEST", requestId);
+    if (message.unsent) return send(socket, { type: "message:deleted", requestId, chatId, messageId });
+    if (!botDeleteLimiter.allow()) return fail(socket, "RATE_LIMITED", requestId);
+    const account = generation;
+    try {
+      await provider.deleteMessage({ channelId: chatId, kind: channel.kind }, messageId);
+      if (account !== generation) return;
+      takeBack(chatId, messageId);
+      console.info(`MESSAGE_DELETED chat=${chatId} message=${messageId}`);
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("MESSAGE_DELETE_FAILED", error);
+      return fail(socket, "MESSAGE_DELETE_FAILED", requestId);
+    }
+    if (login.state === "ready") send(socket, { type: "message:deleted", requestId, chatId, messageId });
+  }
+
+  /**
    * Hands a moderation bot the picture of an image message this server has shown (PNG, JPEG or GIF by
    * content, at most 5 MB), so it can look for scam QR codes. Nothing else: no videos, files or stickers.
    */
@@ -705,6 +741,9 @@ export function createHub(options: HubOptions): Hub {
           return;
         case "media:fetch":
           void handleBotMedia(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "message:delete":
+          void handleBotDelete(socket, frame as Record<string, unknown>, botScope);
           return;
         default:
           fail(socket, "UNKNOWN_TYPE");

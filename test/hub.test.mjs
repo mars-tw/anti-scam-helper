@@ -1388,6 +1388,38 @@ test("a bot removes the sender of a shown message only with moderation on, never
   ]);
 });
 
+test("a bot deletes someone else's OpenChat message for everyone only with moderation on, never its own or a manager's", async (t) => {
+  const SQUARE = `m${"e".repeat(32)}`;
+  const env = await botEnv(t, { moderation: true, chats: [CHAT, SQUARE] });
+  env.provider.channels = [...env.provider.channels, { channelId: SQUARE, kind: "square", name: "社群" }];
+  env.page.socket.send(JSON.stringify({ type: "channels:refresh" }));
+  await env.page.until((frame) => frame.type === "channels" && frame.channels.some((channel) => channel.channelId === SQUARE));
+  const bot = await env.open();
+  const ask = async (frame) => {
+    bot.socket.send(JSON.stringify(frame));
+    return bot.until((reply) => reply.requestId === frame.requestId);
+  };
+  const base = { senderName: "問的人", contentType: "IMAGE", createdAt: 1 };
+  env.hub.handleMessage({ ...base, messageId: "2001", channelId: SQUARE, channelKind: "square", senderId: "p-ask" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "2002", channelId: SQUARE, channelKind: "square", senderId: "p-boss", senderRole: "admin" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "2003", channelId: CHAT, channelKind: "group", senderId: "u-ask" }, "new");
+  env.hub.handleMessage({ ...base, messageId: "2004", channelId: SQUARE, channelKind: "square", senderId: "p-ask" }, "new");
+  assert.deepEqual(await ask({ type: "message:delete", requestId: "d1", chatId: SQUARE, messageId: "2001" }), { type: "message:deleted", requestId: "d1", chatId: SQUARE, messageId: "2001" });
+  assert.equal((await bot.until((frame) => frame.type === "message:unsend" && frame.messageId === "2001")).chatId, SQUARE);
+  assert.equal((await ask({ type: "message:delete", requestId: "d2", chatId: SQUARE, messageId: "2002" })).code, "INVALID_REQUEST");
+  assert.equal((await ask({ type: "message:delete", requestId: "d3", chatId: CHAT, messageId: "2003" })).code, "DELETE_UNSUPPORTED");
+  env.provider.deleteError = new Error("not a manager");
+  assert.equal((await ask({ type: "message:delete", requestId: "d4", chatId: SQUARE, messageId: "2004" })).code, "MESSAGE_DELETE_FAILED");
+  assert.deepEqual(env.provider.calls.filter((call) => call[0] === "delete"), [
+    ["delete", { channelId: SQUARE, kind: "square" }, "2001"],
+    ["delete", { channelId: SQUARE, kind: "square" }, "2004"],
+  ]);
+  const off = await botEnv(t, { chats: [SQUARE] });
+  const plain = await off.open();
+  plain.socket.send(JSON.stringify({ type: "message:delete", requestId: "d5", chatId: SQUARE, messageId: "2001" }));
+  assert.equal((await plain.until((reply) => reply.requestId === "d5")).code, "MODERATION_UNAVAILABLE");
+});
+
 test("removal is refused without moderation, outside the bot's chats, and reported generically when LINE says no", async (t) => {
   const off = await botEnv(t);
   const plain = await off.open();

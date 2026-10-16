@@ -43,6 +43,8 @@ export type ServerFrame =
   | { type: "scam:result"; requestId: string; chatId: string; messageId: string; analysis: ScamAnalysis }
   /** Answer to a bot's `member:remove`: the sender is out; `messageDeleted` says whether their message went too. */
   | { type: "member:removed"; requestId: string; chatId: string; messageId: string; memberId: string; messageDeleted: boolean }
+  /** Answer to a bot's `message:delete`: the OpenChat message is gone for everyone. */
+  | { type: "message:deleted"; requestId: string; chatId: string; messageId: string }
   /** Answer to a bot's `media:fetch`: the picture of a received image message, base64. */
   | { type: "media"; requestId: string; chatId: string; messageId: string; mime: string; data: string }
   /** Answer to a client `ping`: lets the page tell a silent connection from a dead one. */
@@ -63,6 +65,8 @@ export type ClientFrame =
   | { type: "scam:check"; requestId: string; chatId: string; messageId: string }
   /** Bots only, with `api.moderation`: remove the sender of a message shown by this server (and, in OpenChat, delete it). */
   | { type: "member:remove"; requestId: string; chatId: string; messageId: string; deleteMessage?: boolean }
+  /** Bots only, with `api.moderation`: delete someone else's message for everyone (OpenChat, this account a manager). */
+  | { type: "message:delete"; requestId: string; chatId: string; messageId: string }
   /** Bots only, with `api.moderation`: the picture of an image message shown by this server (e.g. to read QR codes). */
   | { type: "media:fetch"; requestId: string; chatId: string; messageId: string }
   /** This account's own id, name and picture, on demand (pages and bots alike). */

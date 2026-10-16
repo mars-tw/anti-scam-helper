@@ -75,6 +75,24 @@ const chatLlm = { ...scamLlm, ...chat.llm };
 // 只會發到 notify.chats 列出的聊天室（留空＝不發）；試跑模式只記錄要發的內容，不送出。
 const notify = { enabled: false, chats: [], admins: {}, mentionLearned: true, cooldownSeconds: 30, ...config.notify };
 const notifyChats = new Set(notify.chats ?? []);
+// 詢問者遮蔽：有人「問是不是詐騙」，同時（前後 windowSeconds 內）貼了外部 LINE 群／加好友 QR 或 LINE ID／邀請連結，
+// 就把他這段時間含這些資訊的訊息（deleteAllImagesInWindow：連同這段時間他貼的所有圖片）對所有人刪除，並回一則提醒（不踢、不 @管理員）。
+// noDeleteChats：本帳號不是管理員、刪不了的聊天室，改成只提醒並 @群主；刪除失敗也一樣 @群主／管理員。
+const questionRedact = {
+  enabled: false,
+  windowSeconds: 120,
+  cooldownSeconds: 600,
+  qrGraceSeconds: 60,
+  deleteAllImagesInWindow: true,
+  noDeleteChats: [],
+  message: "（自動提醒）為避免其他人誤加，已先移除含 QR 碼／LINE 資訊的圖片或訊息。下次詢問詐騙時請先把 QR 碼與 LINE ID 碼掉再貼，謝謝！",
+  failedMessage: "（自動提醒）你貼的內容含 QR 碼／LINE 資訊，為避免其他人誤加，請先自行收回。下次詢問詐騙時請先把 QR 碼與 LINE ID 碼掉再貼，謝謝！",
+  failedAdminsSuffix: "請群主／管理員協助移除含 QR 碼／LINE 資訊的內容",
+  ...config.questionRedact,
+};
+
+// 詢問或提醒詐騙（「這是詐騙嗎」「是不是詐騙」「有人收到這個嗎」「這可信嗎」「小心詐騙」）：扣分，也是 questionRedact 認定「詢問者」的依據。
+const ASK_SCAM = /(這|那)(個|些|則|種)?(是|應該是|根本是|算)詐騙|是詐騙嗎|詐騙嗎|是不是(詐騙|詐團|騙人|騙局|假的)|是(真|假)的嗎|有(人|沒有人)(也)?收到(這|類似|一樣)|(這|那)(個|種|則)?.{0,4}(可信|能信|可以信|靠譜|安全)(嗎|不)|可信嗎|(不要|別|勿|千萬別)(點|加入|相信|匯款|上當|理)|冒充|假冒|165\s*(查證|反詐|專線)?|小心(詐騙|被騙|上當)|(有人|大家).{0,6}(被騙|遇過|知道.{0,6}(真假|詐騙))/;
 
 // ── 規則：每類命中加分，同一類只算一次 ──────────────────────────
 const RULES = [
@@ -96,7 +114,7 @@ const RULES = [
   { name: "愛情交友", score: 2, pattern: /(軍醫|戰地|聯合國|維和).{0,8}(醫生|軍官|官員|部隊)?.{0,15}(包裹|禮物|關稅|匯|投資)|(包裹|禮物).{0,8}(海關|關稅)|結婚基金/ },
   { name: "盜帳號／收帳戶", score: 3, pattern: /(幫忙|幫我)投票.{0,15}(網址|連結|登入|https?:)|(傳|給|提供).{0,6}(簡訊)?(驗證碼|認證碼)|(驗證碼|認證碼).{0,10}(傳給我|給我|告訴我|截圖給我)|收購.{0,4}(帳戶|帳號|存摺)|(出租|租借|提供)(帳戶|存摺|提款卡)|出國.{0,4}(打工|工作).{0,6}高薪/ },
   // 提醒或詢問詐騙（「這是詐騙嗎」「不要點」「有人冒充管理員」）：扣分，避免把好心提醒的人踢掉。
-  { name: "提醒／詢問詐騙", score: -4, pattern: /(這|那)(個)?(是|應該是|根本是)詐騙|是詐騙嗎|詐騙嗎|(不要|別|勿|千萬別)(點|加入|相信|匯款|上當|理)|冒充|假冒|165\s*(查證|反詐|專線)?|小心(詐騙|被騙)/ },
+  { name: "提醒／詢問詐騙", score: -4, pattern: ASK_SCAM },
 ];
 
 // 正常技術、地圖、影音、官方網站：不因為「有網址」加分（短網址、LINE 邀請另外計）。
@@ -420,7 +438,7 @@ const replyTimes = [];
 const rememberedIds = new Set(); // 已放進 recent 的訊息 id（歷史與即時重複時只記一次）
 const messageText = new Map(); // 訊息 id → 「名字：內容」，回覆串上下文用（只在記憶體）
 function isBotText(text) {
-  return text.startsWith("⚠️ 反詐小幫手") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text === chat.hardRefusal;
+  return text.startsWith("⚠️ 反詐小幫手") || text.includes("（自動提醒）") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text === chat.hardRefusal;
 }
 function remember(message, text) {
   if (!text || rememberedIds.has(message.messageId) || sentByBot.has(message.messageId) || isBotText(text)) return;
@@ -707,7 +725,12 @@ async function handle(ws, message) {
   }
   const trusted = message.senderRole || whitelist.has(message.senderId);
   if (!text) {
-    if (message.contentType === "IMAGE" && !trusted && qr.enabled) await checkImage(ws, message);
+    if (message.contentType === "IMAGE" && !trusted) {
+      if (questionRedact.enabled && !isStaff(message)) noteAsker(message, { kind: "image", risky: false });
+      if (qr.enabled) await checkImage(ws, message);
+      // 這位詢問者剛被遮蔽過（同一段時間內）：之後補貼的圖片也一併刪除（deleteAllImagesInWindow）。
+      if (questionRedact.enabled && !isStaff(message) && !kicked.has(key)) await redactIfAsker(ws, message);
+    }
     return;
   }
   if (!trusted) {
@@ -717,6 +740,12 @@ async function handle(ws, message) {
       remove(ws, message, entry);
       // 詐騙訊息不進對話上下文，也不回覆。
       return;
+    }
+    // 詢問者遮蔽：問句＋外部 QR／LINE 資訊 → 刪那些內容並提醒，不走後面的通知。
+    if (questionRedact.enabled && !isStaff(message)) {
+      const asked = ASK_SCAM.test(sanitizeLinks(text).text);
+      noteAsker(message, { kind: "text", risky: hasLineInfo(text), question: asked });
+      if (await redactIfAsker(ws, message)) return;
     }
     // 日誌只記訊息的短雜湊與字數，不記文字（被踢的詐騙訊息也一樣）。
     // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
@@ -780,13 +809,29 @@ async function checkImage(ws, message) {
   if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
   // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
+    // 詢問者遮蔽：這張是外部 LINE 邀請 QR。發的人前後有問「是不是詐騙」就刪圖＋提醒，不送覆核、不踢。
+    if (questionRedact.enabled && !isStaff(message)) {
+      noteAsker(message, { kind: "image", risky: true });
+      if (await redactIfAsker(ws, message)) return record({ action: "qr-asker", ...entry, verdict: "QR_LINE_INVITE" });
+    }
     // 沒設 review（舊設定檔）：沿用舊流程，LINE 邀請／加好友 QR code 直接移除。
     if (!reviewLlm) return remove(ws, message, { ...entry, verdict: "QR_LINE_INVITE", names: ["LINE 邀請／加好友 QR code"] });
     const review = await metaReview(`［成員貼出的截圖，QR code 解碼內容］${content}`, "一般成員（非管理員）在本社群貼出一張截圖，截圖裡的 QR code 實際解碼後是外部 LINE 群組／社群／加好友邀請連結，不是本社群自己的連結。請判斷這是否為引流詐騙。");
     const flagged = { ...entry, verdict: "QR_LINE_INVITE", names: ["外部 LINE 群組／好友 QR code"], review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model };
     if (review.verdict === "SCAM") {
       // 預設只通知不踢（qr.kickOnConfirmed: true 才會踢）；寧可漏判也不誤踢。
-      if (qr.kickOnConfirmed === true) return remove(ws, message, flagged);
+      if (qr.kickOnConfirmed === true) {
+        // 給 qrGraceSeconds 等看看他是不是接著問「這是詐騙嗎」：是就交給詢問者遮蔽，不踢。
+        if (questionRedact.enabled && questionRedact.qrGraceSeconds > 0) {
+          record({ action: "qr-grace", ...flagged, seconds: questionRedact.qrGraceSeconds });
+          setTimeout(() => {
+            if (askerAround(message) || redactHandled.has(message.messageId)) return record({ action: "qr-grace-asker", ...flagged });
+            remove(ws, message, flagged);
+          }, questionRedact.qrGraceSeconds * 1000).unref?.();
+          return;
+        }
+        return remove(ws, message, flagged);
+      }
       record({ action: "qr-flag", ...flagged });
       return notifyAdmins(ws, flagged, "qr");
     }
@@ -853,6 +898,111 @@ async function checkWithVision(ws, message, picture) {
     return;
   }
   record({ action: "none", ...entry });
+}
+
+// ── 詢問者遮蔽（questionRedact） ─────────────────────────────────
+const askerLog = new Map(); // 「聊天室 成員」→ { questions: 時間[], items: Map(訊息 id → { at, kind, risky }) }（只在記憶體）
+const redactHandled = new Set(); // 已刪除或已處理過的訊息 id
+const lastRedactReminder = new Map(); // 「聊天室 成員」→ 上次提醒時間
+const noDeleteChats = new Set(questionRedact.noDeleteChats ?? []);
+// 文字裡的外部 LINE 資訊：不在 linkAllow 的 LINE 邀請／加好友連結，或寫出來的 LINE ID。
+const LINE_ID_TEXT = /(line|賴)\s*(id|ＩＤ)?\s*[:：]\s*@?[\w.-]{3,}|(line|賴)\s*(id|ＩＤ)\s*@?[\w.-]{3,}|加\s*(我\s*)?(賴|line)\s*[:：]?\s*@?[a-z0-9][\w.-]{2,}/i;
+
+/** 群主、管理員、白名單、自己：不處理。 */
+function isStaff(message) {
+  if (message.senderRole || whitelist.has(message.senderId) || isSelf(message.channelId, message.senderId)) return true;
+  if (chatAdmins.get(message.channelId)?.has(message.senderId)) return true;
+  return (notify.admins?.[message.channelId] ?? []).some((admin) => admin?.id === message.senderId);
+}
+
+function hasLineInfo(text) {
+  const { text: cleaned } = sanitizeLinks(text);
+  const external = (cleaned.match(LINE_URL) ?? []).some((url) => LINE_INVITE_PATH.test(normalizeUrl(url)));
+  return external || LINE_ID_TEXT.test(cleaned);
+}
+
+function noteAsker(message, { kind, risky, question: asked = false }) {
+  const key = `${message.channelId} ${message.senderId}`;
+  const now = Date.now();
+  const at = Math.min(now, message.createdAt ?? now);
+  const keep = questionRedact.windowSeconds * 2000;
+  const log = askerLog.get(key) ?? { questions: [], items: new Map() };
+  log.questions = log.questions.filter((t) => now - t < keep);
+  for (const [id, item] of log.items) if (now - item.at >= keep) log.items.delete(id);
+  if (asked) log.questions.push(at);
+  const before = log.items.get(message.messageId);
+  log.items.set(message.messageId, { at, kind, risky: risky || before?.risky === true });
+  askerLog.set(key, log);
+  if (askerLog.size > 2000) askerLog.delete(askerLog.keys().next().value);
+}
+
+/** 這位成員在這則訊息前後 windowSeconds 內有沒有問過詐騙。 */
+function askerAround(message) {
+  const log = askerLog.get(`${message.channelId} ${message.senderId}`);
+  const at = log?.items.get(message.messageId)?.at ?? message.createdAt ?? Date.now();
+  return Boolean(log?.questions.some((t) => Math.abs(t - at) <= questionRedact.windowSeconds * 1000));
+}
+
+/** 詢問者貼了外部 QR／LINE 資訊：刪除並提醒。有處理回 true。 */
+async function redactIfAsker(ws, message) {
+  const key = `${message.channelId} ${message.senderId}`;
+  const log = askerLog.get(key);
+  if (!log || log.questions.length === 0) return false;
+  const near = (item) => log.questions.some((t) => Math.abs(t - item.at) <= questionRedact.windowSeconds * 1000);
+  const items = [...log.items].filter(([, item]) => near(item));
+  if (!items.some(([, item]) => item.risky)) return false;
+  const targets = items.filter(([id, item]) => !redactHandled.has(id) && (item.risky || (questionRedact.deleteAllImagesInWindow && item.kind === "image"))).map(([id]) => id);
+  if (targets.length === 0) return true;
+  for (const id of targets) redactHandled.add(id);
+  if (redactHandled.size > 5000) redactHandled.delete(redactHandled.values().next().value);
+  const base = { chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, messages: targets.length };
+  let deleted = 0;
+  let failed = 0;
+  if (noDeleteChats.has(message.channelId)) failed = targets.length;
+  else if (config.dryRun) deleted = targets.length;
+  else {
+    for (const messageId of targets) {
+      const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId });
+      if (answer.type === "message:deleted") deleted++;
+      else { failed++; recordError("delete", answer.code); }
+    }
+  }
+  record({ action: config.dryRun ? "asker-redact-dry-run" : "asker-redact", ...base, deleted, failed, noDelete: noDeleteChats.has(message.channelId) || undefined });
+  await remindAsker(ws, message, failed > 0);
+  return true;
+}
+
+async function remindAsker(ws, message, failed) {
+  const key = `${message.channelId} ${message.senderId}`;
+  const now = Date.now();
+  if (now - (lastRedactReminder.get(key) ?? 0) < questionRedact.cooldownSeconds * 1000) return record({ action: "asker-remind-skipped", reason: "cooldown", chatId: message.channelId, senderId: message.senderId });
+  lastRedactReminder.set(key, now);
+  const label = `@${message.senderName || "你"}`;
+  let text = `${label} `;
+  const mentions = [{ userId: message.senderId, start: 0, end: label.length }];
+  text += failed ? questionRedact.failedMessage : questionRedact.message;
+  if (failed) {
+    const admins = adminsOf(message.channelId).filter(([id]) => id !== message.senderId).slice(0, 19);
+    if (admins.length) {
+      text += "\n";
+      for (const [id, admin] of admins) {
+        const tag = `@${admin.name}`;
+        mentions.push({ userId: id, start: text.length, end: text.length + tag.length });
+        text += `${tag} `;
+      }
+      text += questionRedact.failedAdminsSuffix;
+    }
+  }
+  if (chat.signature) text += ` ${chat.signature}`;
+  if (config.dryRun) {
+    console.log(`【試跑，未發提醒】${text.replace(/\n/g, " ")}`);
+    return record({ action: "asker-remind-dry-run", chatId: message.channelId, senderId: message.senderId, failed, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
+  }
+  if (!notifyChats.has(message.channelId)) return record({ action: "asker-remind-skipped", reason: "chat-not-allowed", chatId: message.channelId });
+  let answer = await call(ws, { type: "message:send", chatId: message.channelId, text, mentions, replyTo: message.messageId });
+  if (answer.type === "error") answer = await call(ws, { type: "message:send", chatId: message.channelId, text });
+  if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
+  record({ action: answer.type === "sent" ? "asker-reminded" : "asker-remind-failed", chatId: message.channelId, senderId: message.senderId, failed, code: answer.code, mentions: mentions.map((m) => m.userId) });
 }
 
 // ── 通知群主與管理員 ─────────────────────────────────────────
@@ -1025,6 +1175,7 @@ function connect() {
 for (const entry of protectedMembers) {
   if (entry.ids.size === 0) console.log(`提醒：受保護名字「${entry.name}」沒有填本人 ID，只在社群（靠管理員身分）偵測冒名。`);
 }
+if (questionRedact.enabled) console.log(`詢問者遮蔽已啟用：問詐騙＋前後 ${questionRedact.windowSeconds} 秒內貼外部 QR／LINE 資訊 → 刪除並提醒（不踢）`);
 if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "沒有 QR 的截圖只記錄，不通知、不移除"}）`);
 if (!reviewLlm) console.log("提醒：設定檔沒有 review（覆核模型），沿用分層巡邏之前的舊流程：不經覆核，依模型判定與規則分數踢人（kickPolicy 預設：模型判 SCAM 就踢；strict：還要規則分數達 strongScore），冒名與 LINE 邀請 QR 直接移除。要改成覆核才踢，請加上 review 區段，見 guard/README.md〈分層巡邏〉。");
 if (!scamLlmLocal) console.log("提醒：llm 的端點不在本機（127.0.0.1／localhost／::1 以外，含 fallback），訊息送出前一律先去識別化（網址只留網域，手機／email／帳號／LINE ID 換成代號）。");
