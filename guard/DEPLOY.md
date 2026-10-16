@@ -70,6 +70,7 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
 讓 LINE 看到代理的 IP，而不是雲端機房的 IP。把代理商給的那一行（`主機:埠:帳號:密碼`，或 `http://帳號:密碼@主機:埠`）存成專案根目錄的 `proxy.txt`：
 
 ```sh
+cp proxy.example.txt proxy.txt   # 再把內容改成自己的代理
 chmod 600 proxy.txt        # 只有這台主機有，已列入 .gitignore
 npm start                  # 啟動訊息出現「對外連線經代理：http://主機:埠」即生效
 ```
