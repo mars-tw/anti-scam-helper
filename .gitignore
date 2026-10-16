@@ -18,3 +18,22 @@ guard/node_modules/
 
 # 聊天應答學習資料庫（本機，不進 git）
 data/
+
+# 本機部署檔（範本：ecosystem.config.example.cjs、scripts/*.example.sh、scripts/env.example）
+ecosystem.config.cjs
+run-server.sh
+run-guard.sh
+.env
+.env.*
+env
+*.env
+# 登入時暫存的 QR 與 PIN（scripts/login-qr-png.mjs）
+line-login-qr.png
+line-login-pin.txt
+# 備份
+backups/
+*.bak
+*.backup
+config.yaml.*
+guard/guard.config.json.*
+guard/token.txt.*

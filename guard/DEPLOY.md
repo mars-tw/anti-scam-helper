@@ -12,7 +12,7 @@
 
 ## 主機需求
 
-- 要一直開著的主機：VPS、Railway、Render、Fly.io 等皆可，Node.js ≥ 22。
+- 要一直開著的主機：VPS、Railway、Render、Fly.io 等皆可，Node.js ≥ 22。系統內建的 `node` 太舊（例如 v20）時，另裝 Node 22，並在 pm2 啟動腳本用 `NODE_BIN` 指定（見〈常駐執行〉）。先 `node -v` 確認。
 - 需要**持久化磁碟**保存 `session.json`（LINE 登入憑證）。沒有的話每次重啟都要重新掃碼。
 - ChatGPT 對話裡的程式執行環境是暫時性的，對話結束一段時間後就會關閉，**不能**當 24 小時主機。
 
@@ -53,7 +53,8 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
    npm start &                # 先啟動服務
    npm run cli -- login       # 用手機 LINE 掃描 QR，並在手機輸入畫面上的 PIN
    ```
-3. 產生機器人 Token（只顯示一次）：`npm run cli -- token`，存成環境變數 `LINEJS_TOKEN`。
+   終端機畫不出 QR、或要把 QR 傳到手機時，可改用 `node scripts/login-qr-png.mjs`：QR 存成 PNG、PIN 存成權限 600 的文字檔（`LOGIN_QR_DIR` 指定位置），登入完成、失敗或 3 分鐘逾時後自動刪除。QR 與 PIN 等同登入憑證，只傳給自己的手機。
+3. 產生機器人 Token（只顯示一次）：`npm run -s cli -- token --yes`（非互動環境要加 `--yes`），存成環境變數 `LINEJS_TOKEN`（建議放進權限 600 的 env 檔，見〈常駐執行〉）。
 4. 守衛設定（免費版看下一節；以下為付費版）：
    ```sh
    cp guard/guard.config.cloud.example.json guard/guard.config.json
@@ -61,7 +62,8 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
    - `llm.model` 改成要用的模型名稱。
    - 用 GPT：`baseUrl` 為 `https://api.openai.com/v1`，環境變數 `OPENAI_API_KEY`。
    - 用 Grok：`baseUrl` 改成 `https://api.x.ai/v1`，`apiKeyEnv` 改成 `XAI_API_KEY`。若服務回 HTTP 400，可加上 `"maxTokensField": "max_tokens"`。
-   - `dryRun: true` 時只記錄、不踢人；確認沒有誤判再改成 `false`。
+   - `dryRun: true` 時只記錄、不踢人、不發通知；**建議先試跑幾天**，看 `guard/logs/` 確認沒有誤判再改成 `false`。
+   - 進階設定（分層巡邏 `review`、自家群連結白名單 `linkAllow`、依群分開的管理員通知 `notify`、只回 @ 的 `chat.mentionOnly`）見 [README.md](README.md)。
    - 依社群修改 `chat.facts`（社群須知）、`chat.scope`（回答範圍）、`protectedMembers`（常被冒名的群主）。
    - `chat.dailyTotal`、`chat.dailyPerUser` 就是付費 API 的用量上限，依預算調整。
 
@@ -100,6 +102,10 @@ llama-server -m Qwen3-VL-2B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3-VL-2B-Ins
 - 2B 小模型的判斷力有限，`vision.action` 預設 `report`：只記錄，並可用 `vision.alertChatId` 通知某個管理員群組（該群組 ID 也要列在 `config.yaml` 的 `api.chats`），不會自動移除。觀察準確度後再決定是否改成 `remove`。
 - 驗收：貼一張投資獲利截圖，日誌出現「【疑似詐騙圖片】」；貼一般風景照則不會。
 
+## 分層巡邏（省 token、少誤踢）
+
+想用付費模型又怕費用與誤踢時：`llm` 設成主機上的地端模型（上一節）負責初篩所有訊息，另設 `review` 指向 OpenAI 相容（`backend: "openai"`）或 Responses 格式（`backend: "responses"`）的雲端端點，只有可疑訊息才送覆核；踢人需要規則分數、地端、覆核三者都判詐騙，覆核連不上就只記錄。設定方式見 [README.md〈分層巡邏〉](README.md#分層巡邏地端初篩雲端覆核)。
+
 ## 常駐執行
 
 最簡單：內建看門狗，一個指令同時看顧 LINE.js 服務與守衛，任何一個當掉都會自動重啟。
@@ -115,6 +121,26 @@ npm install -g pm2
 LINEJS_TOKEN=... OPENAI_API_KEY=... pm2 start "npm run guard:all" --name line-guard
 pm2 save && pm2 startup
 ```
+
+`pm2 save` 會記下目前在跑的程序；`pm2 startup` 會印出一行要用 sudo 執行的指令，照著執行後，主機重開機就會自動還原。之後每次新增或改名 pm2 程序都要再 `pm2 save`。
+
+### 用範本拆成兩個程序（建議）
+
+專案附了不含秘密的範本，把秘密集中在專案外一個權限 600 的 env 檔：
+
+```sh
+mkdir -p ~/.config/anti-scam-helper
+cp scripts/env.example ~/.config/anti-scam-helper/env && chmod 600 ~/.config/anti-scam-helper/env   # 填入 Token 與金鑰
+cp ecosystem.config.example.cjs ecosystem.config.cjs
+cp scripts/run-server.example.sh run-server.sh && cp scripts/run-guard.example.sh run-guard.sh && chmod +x run-*.sh
+pm2 start ecosystem.config.cjs
+pm2 save && pm2 startup
+```
+
+- `run-*.sh` 啟動前載入 env 檔（位置可用 `ANTI_SCAM_ENV_FILE` 改），用 `NODE_BIN` 指定 Node 22 執行檔（預設 PATH 裡的 `node`）。
+- `ecosystem.config.cjs`、`run-*.sh`、env 檔都已列入 `.gitignore`，不要提交。
+- 地端模型 `llama-server` 可在 `ecosystem.config.cjs` 取消第三個程序的註解一起常駐。
+- 主機沒有 systemd（`pm2 startup` 不能用）時，可用 `scripts/pm2-boot.example.sh`：從 `~/.bashrc` 觸發 `pm2 resurrect`（使用方式見檔頭註解）。這個方式要有人（或排程）開啟 shell 才會觸發，請自行確認主機重開後真的有還原。
 
 ## 驗收
 

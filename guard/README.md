@@ -11,6 +11,7 @@
 1. **規則篩選**（免費）：假搬家（移至新群、重新加入、統一核准）、LINE 邀請連結、加賴／ID、短網址、飆股帶單、兼職日領、私我、博弈貸款、假中獎客服、在群組分享聯絡人卡片等，每類命中加分。沒命中任何規則的訊息直接放行，不耗模型。
 2. **模型複核**：命中規則的訊息交給模型，回答 SCAM／UNSURE／OK。模型只判斷「發言者本人是不是在行騙」，所以有人問「這個連結是詐騙嗎？」不會被踢。
 3. **處置**：模型判定 SCAM 就移除。模型不確定或連不上時，規則分數達 `strongScore`（預設 6）才移除。模型判定 OK 一律不動。
+4. **設定了 `review`（覆核模型）時改用更嚴的分層巡邏**，見下方〈分層巡邏〉。
 
 ### 2. 冒名群主／管理員
 
@@ -51,6 +52,75 @@
 - 模型可能把細節講錯（例如 LINE 的選單位置）。重要規則請寫進 `facts`。
 - 回覆以**登入的 LINE 帳號**發出，群組成員看到的是你在說話。社群裡 @ 不會觸發（成員 ID 與帳號不同），請用觸發詞。
 
+## 分層巡邏（地端初篩＋雲端覆核）
+
+每則訊息都丟給付費模型很耗 token，也容易誤踢。設定 `review` 後改成兩層：
+
+1. **第一層（所有訊息）**：規則分數＋`llm`（建議用主機上自己跑的地端模型，例如 llama.cpp `llama-server`，訊息不出這台主機）。正常訊息到此為止，不送雲端。訊息積壓超過 `localBacklog`（預設 5）則時，規則 0 分的先略過；`localScreenAll: false` 則規則 0 分一律不送模型。
+2. **第二層（只有可疑的）**：規則分數 ≥ `reviewScore`（預設 3），或地端判 SCAM 且規則至少 `reviewLocalScamMinScore`（預設 1）分，才送 `review` 覆核。送出前去識別化：網址只留網域、手機／email／帳號／LINE ID 換成代號。
+3. **踢人**：規則分數 ≥ `strongScore` **且**地端判 SCAM **且**覆核也判 SCAM。覆核模型連不上就只記錄、不踢。
+
+`review` 可以是：
+
+| backend | 說明 |
+|---|---|
+| `openai` | OpenAI 相容的 Chat Completions 端點（`<baseUrl>/chat/completions`），例如 GPT、Grok |
+| `responses` | OpenAI Responses 格式的端點（`<baseUrl>/responses`） |
+
+```json
+"llm":    { "backend": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "model": "qwen3-vl-2b", "apiKeyEnv": "", "maxTokensField": "max_tokens" },
+"review": { "backend": "responses", "baseUrl": "https://<服務網址>/v1", "model": "<模型名稱>", "apiKeyEnv": "MODEL_API_KEY", "timeoutMs": 60000 },
+"reviewScore": 3
+```
+
+任何模型設定都可加 `fallback`（另一組模型設定，可再有 `fallback`）：主模型連不上、沒金鑰或答非所問時依序改用備援。金鑰只放環境變數（`apiKeyEnv` 填變數名稱），不要寫進設定檔。
+
+> 注意：設定了 `review` 之後，文字詐騙一定要覆核模型也判 SCAM 才會踢；覆核模型不可用時守衛只記錄。
+
+## 自家群連結白名單 `linkAllow`
+
+好心成員常會貼「本群」的邀請連結，若沒列白名單會被當成 LINE 邀請引流而加分。把自己社群的邀請網址列進 `linkAllow`（字串，或 `{ "url": "…" }`），貼這些連結不計分、不踢、不刪：
+
+```json
+"linkAllow": [ "https://line.me/ti/g2/<本群邀請碼>", { "url": "https://openchat.line.me/tw/cover/<本群代碼>" } ]
+```
+
+比對時會去掉 `https://`、`www.`、查詢參數與結尾斜線，以網址開頭比對。LINE 官方網站的一般頁面（不是邀請或加好友連結）也不當成可疑網址。圖片裡的 QR 另用 `qr.allow`。
+
+## 通知管理員（依群分開）
+
+踢人、踢人失敗或看圖確認可疑時，在**同一個**聊天室發一則提醒並 @ 群主與管理員：
+
+```json
+"notify": {
+  "enabled": true,
+  "chats": ["<要發通知的聊天室 ID>"],
+  "admins": { "<聊天室 ID>": [ { "id": "<該群裡的成員 ID>", "name": "群主", "role": "admin" } ] },
+  "mentionLearned": true,
+  "cooldownSeconds": 30
+}
+```
+
+- 只會發到 `notify.chats` 列出的聊天室；留空＝不發。同一聊天室有冷卻時間。試跑模式只記錄要發的內容，不送出。
+- **管理員名單要依群分開**：社群的成員 ID 每個群都不一樣，同一個人在 A 群與 B 群是不同 ID，所以 `notify.admins` 以聊天室 ID 為鍵。`role` 為 `admin`（群主）或 `coAdmin`（共同管理員）。
+- `mentionLearned: true` 會再加上從社群訊息自動學到的管理員（同樣依群分開）。只認得「有發言過」的管理員；沒發言的請手動填。
+- 可用 `LINEJS_TOKEN=... node guard/audit-admins.mjs > 稽核.json` 往回翻各守護聊天室的歷史訊息（唯讀），列出各群有發言的群主與共同管理員，核對後再填進設定。稽核結果含成員 ID，不要提交。
+
+## 只回 @（`chat.mentionOnly`）
+
+`chat.mentionOnly: true` 時，小助手不再看觸發詞，只回「@ 本帳號」或「回覆本帳號訊息」的那一則，並以你的帳號、你的口吻回答（`chat.systemPrompt`）。
+
+- **社群裡 @ 的是成員 ID，不是帳號 ID**，每個社群都不同。守衛會在本帳號發言後自動記住該群的成員 ID；也可在 `chat.selfIds`（`{ "<聊天室 ID>": ["<成員 ID>"] }`）預先填好。還不知道時，用 `chat.selfNames`（你在群裡的暱稱）比對 @ 的文字當備援。守衛重啟或剛學到 ID 時，會補回 `chat.catchUpMinutes`（預設 10）分鐘內漏掉的 @。
+- `chat.chats`：只在這些聊天室回應（省略＝`api.chats` 全部）。`chat.perChatPerHour`：每群每小時回覆上限。
+- 索取個資、要求洩露設定或機密、要求逆向工程時，固定回 `chat.hardRefusal`。
+- `chat.noCommitment`（預設開）：對方要求你答應約會、見面、付款、借錢、合作或排時間時，不替你答應，改回「這個要等本人親自回覆」。
+- `chat.signature`：附在每則自動回覆後面的標記（例如「（自動回覆）」），讓大家知道不是本人即時回答。
+- 被判定為詐騙者的人 @ 你時不回。
+
+## 先試跑再開踢人
+
+新設定一律先 `dryRun: true` 跑幾天：只記錄「會踢誰」與「會發的通知」，不真的踢、不發通知。看 `guard/logs/guard-日期.jsonl` 確認沒有誤判（特別是管理員、貼本群連結的人、問「這是詐騙嗎」的人）後再改成 `false`。看圖模型（尤其 2B 這類小模型）容易誤判，建議維持 `vision.action: "report"`。
+
 ## 自動運行
 
 ```sh
@@ -80,6 +150,7 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 
 ## 第一次設定（本機）
 
+0. 確認 Node.js ≥ 22：`node -v`。
 1. 安裝守衛的套件：`npm install --prefix guard`。
 2. 啟動服務並登入：`.\linejs.ps1 start`，開 <http://127.0.0.1:3789>，用手機 LINE 掃 QR 並輸入 PIN。
 3. 取得聊天室 ID：在左側聊天清單對要守護的群組／社群按右鍵 →「顯示頻道 ID」→ 複製。
