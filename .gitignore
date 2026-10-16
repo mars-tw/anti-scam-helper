@@ -15,3 +15,6 @@ guard/guard.config.json
 guard/token.txt
 guard/logs/
 guard/node_modules/
+
+# 聊天應答學習資料庫（本機，不進 git）
+data/
