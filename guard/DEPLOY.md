@@ -21,7 +21,7 @@
 - `config.yaml` 的 `server.host` 保持 `127.0.0.1`。**絕對不要**把 3789 埠開放到公網：網頁沒有帳號密碼，連得到的人就能操作這個 LINE 帳號。
 - `session.json` 含 LINE 憑證與加密金鑰，權限 600，不可提交到 git、不可貼到任何地方。
 - 機器人 Token、OpenAI／xAI API 金鑰一律用環境變數或平台的 Secret 功能，不寫進程式或 git。
-- `guard/logs/` 含群組成員的訊息原文，只留在主機上。
+- `guard/logs/` 不記訊息文字（只有短雜湊與字數），但含成員 ID、暱稱與判定結果，只留在主機上。聊天應答學習資料庫（`chat.training`）預設關閉，開啟會把去識別化後的聊天內容寫進硬碟，開啟前先看 [README.md〈聊天應答學習資料庫〉](README.md#聊天應答學習資料庫chattraining預設關閉)的隱私警告。
 - 代理（VPN）帳密檔 `proxy.txt` 不可提交到 git、不可貼到任何地方。
 
 ## 安裝
@@ -53,7 +53,7 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
    npm start &                # 先啟動服務
    npm run cli -- login       # 用手機 LINE 掃描 QR，並在手機輸入畫面上的 PIN
    ```
-   終端機畫不出 QR、或要把 QR 傳到手機時，可改用 `node scripts/login-qr-png.mjs`：QR 存成 PNG、PIN 存成權限 600 的文字檔（`LOGIN_QR_DIR` 指定位置），登入完成、失敗或 3 分鐘逾時後自動刪除。QR 與 PIN 等同登入憑證，只傳給自己的手機。
+   QR 與 PIN 只顯示在終端機，一次性、不寫進日誌或檔案，等同登入憑證，不要截圖、轉貼或存成圖檔。終端機畫不出 QR 時，改用網頁登入：先用 SSH 通道把主機的 3789 埠轉到自己的電腦（`ssh -L 3789:127.0.0.1:3789 <使用者>@<主機>`；本機 3789 已被占用就改別的埠），再用瀏覽器開 <http://127.0.0.1:3789>，按「產生登入 QR code」。不要為了登入把 3789 埠開放到公網。
 3. 產生機器人 Token（只顯示一次）：`npm run -s cli -- token --yes`（非互動環境要加 `--yes`），存成環境變數 `LINEJS_TOKEN`（建議放進權限 600 的 env 檔，見〈常駐執行〉）。
 4. 守衛設定（免費版看下一節；以下為付費版）：
    ```sh

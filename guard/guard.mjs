@@ -4,6 +4,7 @@
 //   沒有 QR 的圖片可再交給看圖模型（選用），判斷是否為詐騙廣告或假獲利截圖。
 // - 小助手：訊息以觸發詞開頭或 @ 本帳號時，用語言模型回覆；只答範圍內的問題，並有每日上限。
 // 用法：node guard/guard.mjs [設定檔路徑]（預設 guard/guard.config.json）
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,13 @@ const whitelist = new Set(config.whitelist ?? []);
 const logDir = resolve(dirname(configPath), config.logDir ?? "logs");
 mkdirSync(logDir, { recursive: true });
 const scamLlm = { backend: "local", ...config.llm };
+// 覆核模型（選用）。省略＝沿用分層巡邏之前的舊流程（見 decide／handle／checkImage 的 !reviewLlm 分支）；
+// 寫了但格式不對就在啟動時明確報錯，免得默默變成「永遠不踢人」。
+const reviewLlm = config.review || undefined;
+if (reviewLlm && (typeof reviewLlm !== "object" || Array.isArray(reviewLlm))) {
+  console.error('設定檔的 review 必須是模型設定物件，例如 {"backend": "openai", "baseUrl": "…", "model": "…", "apiKeyEnv": "…"}；不想用覆核請整段刪掉 review。');
+  process.exit(1);
+}
 const chat = {
   enabled: false,
   triggers: ["小助手"],
@@ -158,6 +166,18 @@ function hasCloudModel(llm) {
   }
   return false;
 }
+
+/** 這條模型鏈（含 fallback）的端點是不是全都在本機（127.0.0.1／localhost／::1）；只要有一個不是，或網址讀不懂，就當雲端。 */
+function isLocalModel(llm) {
+  for (let node = llm; node; node = node.fallback) {
+    const remote = node.backend === "openai" || node.backend === "responses";
+    const endpoint = remote ? (node.baseUrl ?? "https://api.openai.com/v1") : (node.url ?? "http://127.0.0.1:11440");
+    let host;
+    try { host = new URL(endpoint).hostname.toLowerCase(); } catch { return false; }
+    if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(host)) return false;
+  }
+  return true;
+}
 const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
 
 function learnAdmin(message) {
@@ -209,19 +229,21 @@ function scamModelText(text) {
 }
 
 /** 回傳 { verdict: "SCAM" | "UNSURE" | "OK" | undefined, model, ms }；模型不可用或答非所問時 verdict 為 undefined。 */
-// 分層巡邏：第一層＝規則＋地端模型（config.llm，所有訊息）；只有可疑的才送第二層 Meta 覆核（config.review）。
+// 分層巡邏：第一層＝規則＋地端模型（config.llm）；只有可疑的才送第二層 Meta 覆核（config.review）。
+const scamLlmLocal = isLocalModel(scamLlm);
 async function llmJudge(text) {
   const used = {};
   const started = Date.now();
-  // 地端模型在本機，不出這台電腦，給原文判斷。
+  // 端點在本機（127.0.0.1／localhost／::1）的模型不出這台電腦，給原文判斷；
+  // 端點不在本機（或 fallback 鏈裡有雲端模型）一律先過 scamModelText 去識別化再送出。
+  const modelText = scamLlmLocal ? String(text) : scamModelText(text);
   // 地端小模型：短範例 2 則（1 詐騙＋1 正常），避免提示太長。
   const shots = patterns ? patterns.fewShot(text, 1, 1, 60) : "";
-  const answer = await complete(scamLlm, SCAM_SYSTEM, `${shots}訊息：「${String(text).slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
+  const answer = await complete(scamLlm, SCAM_SYSTEM, `${shots}訊息：「${modelText.slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
   const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase().replace(/[^A-Z]/g, "");
   return { verdict: ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word)), model: used.model ?? "none", ms: Date.now() - started };
 }
 
-const reviewLlm = config.review;
 // 詐騙話術範例庫（data/scam-patterns，本機）：few-shot 範例與 Meta 確認詐騙的累積。
 const patterns = config.patterns?.enabled === false ? undefined : new ScamPatterns(resolve(here, "..", config.patterns?.dir ?? "data/scam-patterns"));
 const reviewScore = config.reviewScore ?? 3;
@@ -245,6 +267,8 @@ async function llmVerdict(text) {
 }
 
 const strongScore = config.strongScore ?? 6;
+// 規則 0 分的訊息要不要也交給模型：localScreenAll（新名）→ checkEveryMessage（舊名，舊設定檔照樣有效）→ 預設不交。
+const localScreenAll = config.localScreenAll ?? config.checkEveryMessage ?? false;
 
 // ── 自家社群官方連結白名單與 LINE 官方網域 ──────────────────────
 // linkAllow：自家群的邀請網址（line.me/ti/g2/…、openchat.line.me/…/cover/…）。貼這些連結不計分、不踢、不刪。
@@ -270,11 +294,20 @@ async function decide(message, rawText) {
   const { text, official } = sanitizeLinks(rawText);
   const { score, names } = ruleScore(message, text);
   if (official && score < strongScore) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: "OFFICIAL_LINK" };
-  // 地端篩全部訊息（config.localScreenAll，預設開）；訊息積壓時規則 0 分的先略過，避免地端模型拖慢。
-  if (score === 0 && (config.localScreenAll === false || queue.length > (config.localBacklog ?? 5))) return { kick: false, score, names, verdict: "SKIP" };
+  // 規則 0 分的訊息只在 localScreenAll 開啟時才交給模型（預設不交）；訊息積壓時一律先略過，避免模型拖慢。
+  if (score === 0 && (!localScreenAll || queue.length > (config.localBacklog ?? 5))) return { kick: false, score, names, verdict: "SKIP" };
   // 第一層：地端模型（正常訊息到此為止，不送雲端）。
   const { verdict, model, ms } = await llmJudge(text);
   if (official) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: `OFFICIAL_LINK_${verdict ?? "UNAVAILABLE"}`, model, modelMs: ms };
+  // 沒設 review（舊設定檔）：沿用分層巡邏之前的流程，不覆核，只看規則分數與模型判定。
+  // kickPolicy "strict"（寧可漏判）：規則分數達 strongScore「而且」模型判定 SCAM 才踢；
+  // "default"：模型說詐騙就踢，模型不確定或不通時規則分數夠高才踢。
+  if (!reviewLlm) {
+    const kick = (config.kickPolicy ?? "default") === "strict"
+      ? verdict === "SCAM" && score >= strongScore
+      : verdict === "SCAM" || ((verdict === "UNSURE" || verdict === undefined) && score >= strongScore);
+    return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
+  }
   // 可疑＝規則分數 ≥ reviewScore，或地端判 SCAM 且規則至少有 reviewLocalScamMinScore 分（地端小模型對 0 分訊息誤判多，不送雲端）。
   const suspicious = score >= reviewScore || (verdict === "SCAM" && score >= (config.reviewLocalScamMinScore ?? 1));
   if (!suspicious) return { kick: false, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
@@ -402,9 +435,12 @@ function remember(message, text) {
 }
 
 // ── 聊天應答學習資料庫（本機、去識別化） ─────────────────────────
-const training = chat.enabled && chat.mentionOnly && chat.training?.enabled !== false
+// 會把去識別化後的問答與本人發言寫進硬碟（data/chat-training/*.jsonl），違背「訊息不落盤」的預設，
+// 所以預設關閉，必須 chat.training.enabled: true 明確開啟（隱私警告見 guard/README.md）。
+const training = chat.enabled && chat.mentionOnly && chat.training?.enabled === true
   ? new TrainingStore(resolve(here, "..", chat.training?.dir ?? "data/chat-training"))
   : undefined;
+if (training) console.warn(`⚠️ chat.training 已開啟：去識別化後的問答與本人發言會寫進硬碟（${training.dir}）。隱私風險見 guard/README.md。`);
 const styleSeen = new Set();
 if (training) for (const item of training.load()) if (item.sourceMessage) styleSeen.add(item.sourceMessage);
 
@@ -494,6 +530,7 @@ function allowedToReply(senderKey) {
 function send(ws, message, text) {
   if (chat.chats && !chat.chats.includes(message.channelId)) return;
   if (config.dryRun) {
+    // 要回的內容只在試跑時顯示在主控台，供檢視；日誌檔只記字數。
     console.log(`【試跑，未回覆】${message.senderName}：${text.replace(/\n/g, " ").slice(0, 120)}`);
     return record({ action: "reply-dry-run", chatId: message.channelId, messageId: message.messageId, replyChars: text.length });
   }
@@ -518,8 +555,8 @@ async function reply(ws, message, ask) {
   markReplied(message.messageId);
   const senderKey = `${message.channelId} ${message.senderId}`;
   if (!allowedToReply(senderKey)) return;
-  // 日誌不記完整對話：只留問題開頭 30 字與長度。
-  const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, preview: ask.slice(0, 30), askChars: ask.length, ...extra });
+  // 日誌不記訊息文字：問題只留短雜湊與長度。
+  const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(ask, "ask"), ...extra });
   if (!withinDailyQuota(senderKey)) return log("quota-exceeded");
   if (ask.length > chat.maxQuestionChars) {
     send(ws, message, `問題有點長，可以濃縮在 ${chat.maxQuestionChars} 字內再問我嗎？`);
@@ -593,6 +630,14 @@ async function reply(ws, message, ask) {
 }
 
 // ── 紀錄 ─────────────────────────────────────────────────────
+// 日誌（含主控台輸出）不記訊息文字，也不記開頭幾個字：只留內容的短雜湊（SHA-256 前 12 碼，可比對同一則訊息）與字數。
+function contentRef(text, key = "text") {
+  const raw = String(text ?? "");
+  return { [`${key}Hash`]: createHash("sha256").update(raw).digest("hex").slice(0, 12), [`${key}Chars`]: raw.length };
+}
+/** 主控台用的內容摘要（字數與短雜湊）；沒有就回空字串。 */
+const refLabel = (entry) => (entry?.textHash ? `${entry.textChars} 字，#${entry.textHash}` : "");
+
 // 錯誤也寫進每日稽核紀錄（只記類別與摘要，不記對話內容）。
 function recordError(kind, detail) {
   try { record({ action: "error", kind, detail: String(detail ?? "").slice(0, 120) }); } catch {}
@@ -626,7 +671,7 @@ function remove(ws, message, entry) {
   // 先標記：不論之後踢人成功與否，紀錄裡都有這筆詐騙判定。
   record({ action: "flagged", ...entry });
   if (config.dryRun) {
-    console.log(`【試跑，未踢】${message.senderName}：${entry.text.slice(0, 60)}（${entry.verdict}${entry.names?.length ? `，${entry.names.join("、")}` : ""}）`);
+    console.log(`【試跑，未踢】${message.senderName}（${[entry.verdict, entry.names?.join("、"), refLabel(entry)].filter(Boolean).join("，")}）`);
     record({ action: "dry-run", ...entry });
     notifyAdmins(ws, entry, "removed");
     return;
@@ -650,11 +695,13 @@ async function handle(ws, message) {
   // 冒名不看內容：連貼圖、圖片也算，先處理。
   const victim = impersonated(message);
   if (victim) {
-    const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: (text || `［${message.contentType}］`).slice(0, 500), verdict: "IMPERSONATION", names: [`冒用「${victim}」`] };
+    const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "IMPERSONATION", names: [`冒用「${victim}」`] };
+    // 沒設 review（舊設定檔）：沿用舊流程，冒名直接移除。
+    if (!reviewLlm) return remove(ws, message, entry);
     // 冒名也要 Meta 覆核確認才踢；不可用或不確定就只記錄。
     const review = await metaReview(text || `［${message.contentType}］`, `發言者暱稱「${message.senderName}」和管理員「${victim}」幾乎一樣，但不是同一人（疑似冒名）。冒名加上任何引流、要求私聊、轉帳就是 SCAM。`);
     if (review.verdict === "SCAM") remove(ws, message, { ...entry, review: review.verdict, reviewModel: review.model });
-    else record({ action: "impersonation-flag", ...entry, text: undefined, preview: entry.text.slice(0, 30), review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
+    else record({ action: "impersonation-flag", ...entry, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
     return;
   }
   const trusted = message.senderRole || whitelist.has(message.senderId);
@@ -664,15 +711,15 @@ async function handle(ws, message) {
   }
   if (!trusted) {
     const result = await decide(message, text);
-    const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: text.slice(0, 500), ...result };
+    const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
     if (result.kick) {
       remove(ws, message, entry);
       // 詐騙訊息不進對話上下文，也不回覆。
       return;
     }
-    // 正常訊息只記開頭 30 字與長度（不記完整內容）；被踢的詐騙訊息才保留證據文字。
+    // 日誌只記訊息的短雜湊與字數，不記文字（被踢的詐騙訊息也一樣）。
     // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
-    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry, text: undefined, preview: text.slice(0, 30), textChars: text.length });
+    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry });
     // 沒到踢人門檻，但規則 ≥ notifyScore（預設 3）且 Meta 覆核判 SCAM：只通知該群群主與管理員確認，不踢。
     if (result.review === "SCAM" && result.score >= (config.notifyScore ?? 3)) {
       record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
@@ -695,7 +742,7 @@ async function handle(ws, message) {
     const { score } = ruleScore(message, sanitizeLinks(text).text);
     // 小模型常把「在問詐騙」誤判成詐騙：要有規則訊號（≥ chat.scamSkipScore，預設 2）＋模型判 SCAM，或規則分數已達 strongScore，才當詐騙者不回。
     const scammer = (verdict === "SCAM" && score >= (chat.scamSkipScore ?? 2)) || score >= strongScore;
-    if (scammer) return record({ action: "reply-skipped", reason: `scam-check-${verdict}-score${score}`, model: judged.model, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, preview: text.slice(0, 30) });
+    if (scammer) return record({ action: "reply-skipped", reason: `scam-check-${verdict}-score${score}`, model: judged.model, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text) });
   }
   await reply(ws, message, ask);
 }
@@ -726,11 +773,14 @@ async function checkImage(ws, message) {
     if (vision.enabled) queueVision(ws, message, picture);
     return;
   }
-  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: `［圖片 QR code］${content.slice(0, 480)}` };
+  // 日誌只記 QR 內容的短雜湊與字數，不記解碼出來的內容。
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE_QR", ...contentRef(content) };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
   if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
   // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
+    // 沒設 review（舊設定檔）：沿用舊流程，LINE 邀請／加好友 QR code 直接移除。
+    if (!reviewLlm) return remove(ws, message, { ...entry, verdict: "QR_LINE_INVITE", names: ["LINE 邀請／加好友 QR code"] });
     const review = await metaReview(`［成員貼出的截圖，QR code 解碼內容］${content}`, "一般成員（非管理員）在本社群貼出一張截圖，截圖裡的 QR code 實際解碼後是外部 LINE 群組／社群／加好友邀請連結，不是本社群自己的連結。請判斷這是否為引流詐騙。");
     const flagged = { ...entry, verdict: "QR_LINE_INVITE", names: ["外部 LINE 群組／好友 QR code"], review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model };
     if (review.verdict === "SCAM") {
@@ -741,9 +791,9 @@ async function checkImage(ws, message) {
     }
     return record({ action: "qr-flag", ...flagged });
   }
-  // 其他 QR（一般網址、Wi-Fi 等）一律只記錄（只記網域，不記完整內容）。
-  const host = (content.match(/^[a-z]+:\/\/([^/?#\s]+)/i) ?? [])[1] ?? content.slice(0, 20);
-  record({ action: "none", ...entry, text: undefined, verdict: "QR_OTHER", qrHost: host });
+  // 其他 QR（一般網址、Wi-Fi 等）一律只記錄（網址只記網域、去掉帳密；不是網址就不記內容）。
+  const host = (content.match(/^[a-z]+:\/\/([^/?#\s]+)/i) ?? [])[1]?.replace(/^.*@/, "") ?? "（非網址）";
+  record({ action: "none", ...entry, verdict: "QR_OTHER", qrHost: host });
 }
 
 // ── 看圖模型（沒有 QR code 的圖片） ─────────────────────────────
@@ -790,7 +840,7 @@ async function checkWithVision(ws, message, picture) {
   const lines = String(answer ?? "").trim().split(/\n+/);
   const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
   const reason = (lines.slice(1).join(" ").trim() || lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60);
-  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: "［圖片］", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
@@ -862,8 +912,9 @@ async function notifyAdmins(ws, entry, kind) {
   const admins = adminsOf(entry.chatId);
   const { text, mentions } = buildNotice(entry, kind, admins);
   if (config.dryRun) {
+    // 通知內容只在試跑時顯示在主控台，供檢視；日誌只記字數。
     console.log(`【試跑，未發通知】${text.replace(/\n/g, " ")}`);
-    return record({ action: "notify-dry-run", kind, chatId: entry.chatId, text, mentions: mentions.map((m) => m.userId) });
+    return record({ action: "notify-dry-run", kind, chatId: entry.chatId, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
   }
   let reply = await call(ws, { type: "message:send", chatId: entry.chatId, text, ...(mentions.length ? { mentions } : {}) });
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
@@ -941,7 +992,7 @@ function connect() {
       case "member:removed": {
         const entry = pending.get(frame.requestId);
         pending.delete(frame.requestId);
-        console.log(`已移除 ${entry?.senderName ?? frame.memberId}${frame.messageDeleted ? "，並刪除訊息" : ""}：${entry?.text.slice(0, 60) ?? ""}`);
+        console.log(`已移除 ${entry?.senderName ?? frame.memberId}${frame.messageDeleted ? "，並刪除訊息" : ""}${refLabel(entry) ? `（${refLabel(entry)}）` : ""}`);
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
         if (entry) notifyAdmins(ws, entry, "removed");
         return;
@@ -974,4 +1025,6 @@ for (const entry of protectedMembers) {
   if (entry.ids.size === 0) console.log(`提醒：受保護名字「${entry.name}」沒有填本人 ID，只在社群（靠管理員身分）偵測冒名。`);
 }
 if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "沒有 QR 的截圖只記錄，不通知、不移除"}）`);
+if (!reviewLlm) console.log("提醒：設定檔沒有 review（覆核模型），沿用分層巡邏之前的舊流程：不經覆核，依模型判定與規則分數踢人（kickPolicy 預設：模型判 SCAM 就踢；strict：還要規則分數達 strongScore），冒名與 LINE 邀請 QR 直接移除。要改成覆核才踢，請加上 review 區段，見 guard/README.md〈分層巡邏〉。");
+if (!scamLlmLocal) console.log("提醒：llm 的端點不在本機（127.0.0.1／localhost／::1 以外，含 fallback），訊息送出前一律先去識別化（網址只留網域，手機／email／帳號／LINE ID 換成代號）。");
 connect();

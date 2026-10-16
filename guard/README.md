@@ -8,16 +8,16 @@
 
 ### 1. 文字詐騙
 
-1. **規則篩選**（免費）：假搬家（移至新群、重新加入、統一核准）、LINE 邀請連結、加賴／ID、短網址、飆股帶單、兼職日領、私我、博弈貸款、假中獎客服、在群組分享聯絡人卡片等，每類命中加分。沒命中任何規則的訊息直接放行，不耗模型。
+1. **規則篩選**（免費）：假搬家（移至新群、重新加入、統一核准）、LINE 邀請連結、加賴／ID、短網址、飆股帶單、兼職日領、私我、博弈貸款、假中獎客服、在群組分享聯絡人卡片等，每類命中加分。沒命中任何規則的訊息直接放行，不耗模型（想讓模型也看這些訊息，設 `localScreenAll: true`）。
 2. **模型複核**：命中規則的訊息交給模型，回答 SCAM／UNSURE／OK。模型只判斷「發言者本人是不是在行騙」，所以有人問「這個連結是詐騙嗎？」不會被踢。
 3. **處置**：模型判定 SCAM 就移除。模型不確定或連不上時，規則分數達 `strongScore`（預設 6）才移除。模型判定 OK 一律不動。
-4. **設定了 `review`（覆核模型）時改用更嚴的分層巡邏**，見下方〈分層巡邏〉。
+4. **設定了 `review`（覆核模型）時改用更嚴的分層巡邏**，見下方〈分層巡邏〉。沒設 `review` 就維持上面 1～3 的流程。
 
 ### 2. 冒名群主／管理員
 
 詐騙者常把暱稱改成跟群主一樣，再發「請移至新 2 群」「所有成員重新➕一下」之類的假搬家公告。
 
-- **社群**：自動記住真正管理員的名字（啟動時讀最近 100 則訊息，之後持續學習）。沒有管理員身分、名字卻相同或極相似的人，不論發什麼（文字、貼圖、圖片）都直接移除。
+- **社群**：自動記住真正管理員的名字（啟動時讀最近 100 則訊息，之後持續學習）。沒有管理員身分、名字卻相同或極相似的人，不論發什麼（文字、貼圖、圖片）都直接移除（設了 `review` 時要覆核也判 SCAM 才移除，見〈分層巡邏〉）。
 - **一般群組**：LINE 群組沒有管理員標記，請在 `protectedMembers` 填名字和本人的成員 ID；沒填 ID 時，一般群組不靠名字判斷，以免踢到本人。
 - 比對前會去掉空白、符號、表情與看不見的字元，並把全形轉半形，所以以群主「好鄰居社群 -Kevin」為例，「好鄰居社群－Kevin 🥰」「好鄰居社群 -Kevin 官方」「好鄰居社群-Kevim」都會被認出。只取原名一小段的名字（例如只叫「Kevin」）不算冒名。
 
@@ -25,8 +25,8 @@
 
 成員貼圖片時，守衛在本機解讀圖片裡的 QR code（免費，圖片不會送出去）：
 
-- **LINE 群組／社群邀請、加好友、官方帳號連結**：直接移除。在社群裡貼別的群的 QR 就是引流。
-- **其他網址或文字**：當成文字訊息，交給規則＋模型判斷。
+- **LINE 群組／社群邀請、加好友、官方帳號連結**：直接移除。在社群裡貼別的群的 QR 就是引流（設了 `review` 時改成覆核判 SCAM 後只通知管理員，見〈分層巡邏〉）。
+- **其他網址或文字**：只記錄網域，不處理。
 - **沒有 QR code 的圖片**：不處理。
 - 社群自己的正式 QR（例如本社群的官方邀請）可加入 `qr.allow`，以網址開頭比對。
 - 管理員與白名單成員貼的圖片不檢查。
@@ -56,7 +56,7 @@
 
 每則訊息都丟給付費模型很耗 token，也容易誤踢。設定 `review` 後改成兩層：
 
-1. **第一層（所有訊息）**：規則分數＋`llm`（建議用主機上自己跑的地端模型，例如 llama.cpp `llama-server`，訊息不出這台主機）。正常訊息到此為止，不送雲端。訊息積壓超過 `localBacklog`（預設 5）則時，規則 0 分的先略過；`localScreenAll: false` 則規則 0 分一律不送模型。
+1. **第一層**：規則分數＋`llm`（建議用主機上自己跑的地端模型，例如 llama.cpp `llama-server`，訊息不出這台主機）。正常訊息到此為止，不送雲端。預設（`localScreenAll: false`）規則 0 分的訊息直接放行、不送模型；`localScreenAll: true` 則規則 0 分的也交給 `llm`，但訊息積壓超過 `localBacklog`（預設 5）則時，規則 0 分的先略過。舊名 `checkEveryMessage` 仍有效。`llm` 的端點不在本機（`127.0.0.1`／`localhost`／`::1` 以外，`fallback` 也算）時，訊息一律先去識別化再送出。
 2. **第二層（只有可疑的）**：規則分數 ≥ `reviewScore`（預設 3），或地端判 SCAM 且規則至少 `reviewLocalScamMinScore`（預設 1）分，才送 `review` 覆核。送出前去識別化：網址只留網域、手機／email／帳號／LINE ID 換成代號。
 3. **踢人**：規則分數 ≥ `strongScore` **且**地端判 SCAM **且**覆核也判 SCAM。覆核模型連不上就只記錄、不踢。
 
@@ -75,7 +75,15 @@
 
 任何模型設定都可加 `fallback`（另一組模型設定，可再有 `fallback`）：主模型連不上、沒金鑰或答非所問時依序改用備援。金鑰只放環境變數（`apiKeyEnv` 填變數名稱），不要寫進設定檔。
 
-> 注意：設定了 `review` 之後，文字詐騙一定要覆核模型也判 SCAM 才會踢；覆核模型不可用時守衛只記錄。
+有沒有設 `review`，處置會不一樣：
+
+| | 沒設 `review`（舊流程） | 設了 `review`（分層巡邏） |
+|---|---|---|
+| 文字詐騙 | 模型判 SCAM 就踢；模型不確定或連不上時，規則分數 ≥ `strongScore` 才踢。`kickPolicy: "strict"`：模型判 SCAM **且**規則分數 ≥ `strongScore` 才踢 | 規則分數 ≥ `strongScore` **且**地端判 SCAM **且**覆核判 SCAM 才踢；覆核連不上只記錄 |
+| 冒名群主／管理員 | 直接移除 | 覆核判 SCAM 才移除，否則只記錄 |
+| 外部 LINE 邀請／加好友 QR | 直接移除 | 覆核判 SCAM 才處理：預設只通知管理員，`qr.kickOnConfirmed: true` 才移除 |
+
+> 注意：設定了 `review` 之後，文字詐騙一定要覆核模型也判 SCAM 才會踢；覆核模型不可用時守衛只記錄。沒設 `review` 的舊設定檔照舊流程運作（啟動時會印提醒）；`review` 寫了但不是物件則拒絕啟動並說明原因。
 
 ## 自家群連結白名單 `linkAllow`
 
@@ -101,7 +109,7 @@
 }
 ```
 
-- 只會發到 `notify.chats` 列出的聊天室；留空＝不發。同一聊天室有冷卻時間。試跑模式只記錄要發的內容，不送出。
+- 只會發到 `notify.chats` 列出的聊天室；留空＝不發。同一聊天室有冷卻時間。試跑模式不送出，只在主控台顯示要發的內容（日誌只記字數）。
 - **管理員名單要依群分開**：社群的成員 ID 每個群都不一樣，同一個人在 A 群與 B 群是不同 ID，所以 `notify.admins` 以聊天室 ID 為鍵。`role` 為 `admin`（群主）或 `coAdmin`（共同管理員）。
 - `mentionLearned: true` 會再加上從社群訊息自動學到的管理員（同樣依群分開）。只認得「有發言過」的管理員；沒發言的請手動填。
 - 可用 `LINEJS_TOKEN=... node guard/audit-admins.mjs > 稽核.json` 往回翻各守護聊天室的歷史訊息（唯讀），列出各群有發言的群主與共同管理員，核對後再填進設定。稽核結果含成員 ID，不要提交。
@@ -118,9 +126,18 @@
 - `chat.signature`：附在每則自動回覆後面的標記（例如「（自動回覆）」），讓大家知道不是本人即時回答。
 - 被判定為詐騙者的人 @ 你時不回。
 
+## 聊天應答學習資料庫（`chat.training`，預設關閉）
+
+> ⚠️ **隱私警告：這個功能會把聊天內容寫進硬碟。** 同時設定 `chat.enabled`、`chat.mentionOnly` 與 `chat.training.enabled: true` 才會啟用。啟用後，守衛會把「@ 你的問答」與「你本人的歷史發言」（去識別化後）存進 `data/chat-training/qa.jsonl`、`style.jsonl`，回覆時挑相近的舊問答當語氣範例。這違背本專案「訊息不落盤」的預設原則：
+> - 去識別化只是規則式遮罩（手機、身分證、email、帳號、地址、LINE ID、網址、已知暱稱），**不保證乾淨**，檔案裡仍可能留有可辨識的個資與他人的發言。
+> - 被存下來的是群組裡其他人的話，他們並不知情。請只在自己的社群、告知成員並取得同意後使用，並自行評估個資法與社群規範。
+> - 檔案只在本機（權限 600），`data/` 已列入 `.gitignore`；不要提交、同步或分享。要清除就刪掉 `data/chat-training/` 資料夾。
+
+預設不啟用，也不會建立 `data/chat-training/`。啟用時守衛啟動會印出警告。其他欄位：`chat.training.dir`（存放位置，預設 `data/chat-training`）、`chat.training.examples`（每次最多放幾則範例，預設 3）、`chat.training.examplesForLocal`（`true`＝地端模型也放範例，預設不放）。
+
 ## 先試跑再開踢人
 
-新設定一律先 `dryRun: true` 跑幾天：只記錄「會踢誰」與「會發的通知」，不真的踢、不發通知。看 `guard/logs/guard-日期.jsonl` 確認沒有誤判（特別是管理員、貼本群連結的人、問「這是詐騙嗎」的人）後再改成 `false`。看圖模型（尤其 2B 這類小模型）容易誤判，建議維持 `vision.action: "report"`。
+新設定一律先 `dryRun: true` 跑幾天：只記錄「會踢誰」，並在主控台顯示「會發的通知」與「會回的內容」，不真的踢、不發通知、不回覆。看 `guard/logs/guard-日期.jsonl`（誰被判定、為什麼）確認沒有誤判（特別是管理員、貼本群連結的人、問「這是詐騙嗎」的人）後再改成 `false`。看圖模型（尤其 2B 這類小模型）容易誤判，建議維持 `vision.action: "report"`。
 
 ## 自動運行
 
@@ -138,7 +155,7 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 | backend | 說明 |
 |---|---|
 | `local` | 本機 AI 派工器，免費，只在這台電腦能用 |
-| `openai` | OpenAI 相容 API：GPT（`https://api.openai.com/v1`）或 Grok（`https://api.x.ai/v1`），依用量計費、訊息會送到該服務；也可以是主機上自己跑的免費模型（llama.cpp 的 `llama-server`，`apiKeyEnv` 設空字串、`maxTokensField` 設 `max_tokens`），範本見 `guard.config.cloud-free.example.json` |
+| `openai` | OpenAI 相容 API：GPT（`https://api.openai.com/v1`）或 Grok（`https://api.x.ai/v1`），依用量計費、訊息會送到該服務（`llm` 端點不在本機時，送出前一律先去識別化）；也可以是主機上自己跑的免費模型（llama.cpp 的 `llama-server`，`apiKeyEnv` 設空字串、`maxTokensField` 設 `max_tokens`），範本見 `guard.config.cloud-free.example.json` |
 
 例如反詐判斷用本機、聊天用 GPT：
 
@@ -175,11 +192,12 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 |---|---|
 | `dryRun` | `true`＝試跑：只記錄「會踢誰」、不真的踢。確認誤判少了再改成 `false` |
 | `deleteMessage` | 社群裡同時刪除該則詐騙訊息（一般群組 LINE 不允許刪別人的訊息） |
-| `strongScore` | 模型不確定或不可用時，規則分數要多高才踢（越高越保守） |
+| `strongScore` | 規則分數門檻，預設 6（越高越保守）。沒設 `review`：模型不確定或不可用時，分數達此值才踢。設了 `review`：分數達此值，且地端、覆核都判 SCAM 才踢 |
 | `whitelist` | 永不處理的成員 ID（在網頁訊息上按右鍵 →「顯示寄件者 ID」取得） |
 | `protectedMembers` | 常被冒名的人：`[{ "name": "群主暱稱", "ids": ["本人成員 ID"] }]`。社群可不填 ID（靠管理員身分辨別） |
-| `checkEveryMessage` | `true`＝沒命中規則的訊息也交給模型判斷（較慢、抓得較廣） |
+| `localScreenAll` | `true`＝規則 0 分的訊息也交給 `llm` 判斷（較慢、抓得較廣）；預設 `false`＝規則 0 分直接放行。舊名 `checkEveryMessage` 仍有效，兩個都寫時以 `localScreenAll` 為準。訊息積壓超過 `localBacklog`（預設 5）則時，規則 0 分的一律先略過 |
 | `llm` | 反詐判斷用的模型（見「模型選擇」）；本機時 `capability` 可選 `text_fast`（CPU、約 5 秒）或 `text_review`（27B GPU，較準但會和產圖、影片排隊） |
+| `review` / `reviewScore` | 覆核模型設定（省略＝不覆核，沿用舊流程）／規則分數 ≥ `reviewScore`（預設 3）的訊息才送覆核，見〈分層巡邏〉 |
 | `qr.enabled` / `qr.allow` | 圖片 QR 檢查開關／允許的 QR 內容（網址開頭） |
 | `vision.enabled` / `vision.action` | 看圖模型開關／`report`（只通知）或 `remove`（判定詐騙就移除） |
 | `vision.llm` | 看圖用的模型，必須看得懂圖片（省略則沿用 `llm`） |
@@ -195,10 +213,13 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 | `chat.dailyPerUser` / `chat.dailyTotal` | 每人每天／全部每天最多回覆幾次 |
 | `chat.userCooldownSeconds` / `chat.repliesPerMinute` | 防洗版上限 |
 | `chat.allowedLinkDomains` | 回覆中允許保留的網址網域 |
+| `chat.training.enabled` | 預設 `false`。`true` 才會把去識別化後的問答與本人發言寫進 `data/chat-training/`（⚠️ 隱私警告見〈聊天應答學習資料庫〉） |
 
 ## 紀錄
 
-每個判斷都寫進 `guard/logs/guard-日期.jsonl`，內容含原文、規則命中項、模型判定與處置（`removed`／`dry-run`／`failed`／`none`／`replied`／`refused`／`quota-exceeded`）。誤踢時用這份紀錄找人，再請對方重新加入。紀錄含成員訊息原文，只留在本機。
+每個判斷都寫進 `guard/logs/guard-日期.jsonl`，內容含發言者（成員 ID、暱稱）、規則命中項、模型判定與處置（`removed`／`dry-run`／`failed`／`none`／`replied`／`refused`／`quota-exceeded`）。**日誌不記訊息文字**（沒有 `text`、`preview` 之類欄位，被踢的詐騙訊息也一樣；圖片裡的 QR 內容同樣只留雜湊，一般網址型 QR 另記網域 `qrHost`）：訊息只留 `textHash`（內容的 SHA-256 前 12 碼，用來比對是不是同一則）與 `textChars`（字數）；@ 問題同理，欄位是 `askHash`／`askChars`。雜湊無法還原內容，但很短、很常見的句子仍可能被猜中，所以日誌照樣只留本機。誤踢時用這份紀錄找人（成員 ID、時間、聊天室與訊息 ID），再請對方重新加入。
+
+試跑模式（`dryRun: true`）才會在主控台顯示要回的內容與要發的通知，供檢視，不寫進日誌檔。使用 pm2 時主控台輸出由 pm2 另外保存，試跑完可用 `pm2 flush` 清掉。
 
 ## 權限
 

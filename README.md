@@ -26,7 +26,7 @@ LINE 群組與社群的反詐騙機器人，以 LINE.js 為基礎修改。
 **反詐守衛快速上手**（完整步驟見 [guard/DEPLOY.md](guard/DEPLOY.md)、設定見 [guard/README.md](guard/README.md)）：
 1. Node.js **≥ 22**（`node -v`；系統 node 太舊請另裝 Node 22）、一個 LINE **次要帳號**；要踢社群成員，該帳號須是社群管理員或共同管理員。
 2. `git clone https://github.com/mars-tw/anti-scam-helper.git && cd anti-scam-helper && npm install && npm run build && npm install --prefix guard`。
-3. 要用代理的話**登入前**先設好；`npm start` 後 `npm run cli -- login` 掃碼並輸入 PIN（或 `node scripts/login-qr-png.mjs` 存成 PNG）。
+3. 要用代理的話**登入前**先設好；`npm start` 後 `npm run cli -- login`，用手機掃終端機上的 QR 並輸入 PIN（QR 與 PIN 只顯示在終端機，不寫入檔案；終端機畫不出 QR 時改用網頁登入，見 [guard/DEPLOY.md](guard/DEPLOY.md)）。
 4. `config.yaml` 設 `api.enabled: true`、`api.chats`、`api.moderation: true`，重啟後 `npm run -s cli -- token --yes` 產生 Token。
 5. 複製 `guard/guard.config.*.example.json` 成 `guard/guard.config.json`；可設分層巡邏（地端模型初篩＋OpenAI 相容／Responses 端點覆核）、`linkAllow` 自家群連結白名單、依群分開的管理員通知、只回 @。
 6. **先 `dryRun: true` 試跑**，確認沒有誤判再開踢人；用 `ecosystem.config.example.cjs` 交給 pm2 常駐，`pm2 save && pm2 startup` 開機自動啟動。

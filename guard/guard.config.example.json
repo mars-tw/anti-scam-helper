@@ -4,7 +4,7 @@
   "dryRun": true,
   "deleteMessage": true,
   "strongScore": 6,
-  "checkEveryMessage": false,
+  "localScreenAll": false,
   "whitelist": [],
   "protectedMembers": [
     {

@@ -27,9 +27,6 @@ run-guard.sh
 .env.*
 env
 *.env
-# 登入時暫存的 QR 與 PIN（scripts/login-qr-png.mjs）
-line-login-qr.png
-line-login-pin.txt
 # 備份
 backups/
 *.bak
