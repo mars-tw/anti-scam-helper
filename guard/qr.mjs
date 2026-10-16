@@ -93,7 +93,7 @@ export function shrinkForModel(mime, bytes, maxSide = 768) {
   return { mime: "image/jpeg", base64: Buffer.from(encoded.data).toString("base64"), width: image.width, height: image.height };
 }
 
-const LINE_INVITE = /(^|\/\/|\.)(line\.me\/(R\/)?ti\/(g2?|p)\/|line\.me\/R\/(ti|nv|oaMessage)|lin\.ee\/|liff\.line\.me\/|qr-official\.line\.me\/|page\.line\.me\/)/i;
+const LINE_INVITE = /(^|\/\/|\.)(line\.me\/(R\/)?ti\/(g2?|p)\/|line\.me\/R\/(ti|nv|oaMessage)|lin\.ee\/|liff\.line\.me\/|qr-official\.line\.me\/|page\.line\.me\/|openchat\.line\.me\/[a-z]{2}\/(cover|join)|square\.line\.me\/)|^line:\/\/(ti|nv|msg)\//i;
 
 /** QR 內容是 LINE 群組、社群、好友或官方帳號的邀請連結。 */
 export function isLineInvite(text) {

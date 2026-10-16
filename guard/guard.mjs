@@ -11,6 +11,7 @@ import WebSocket from "ws";
 import { complete, onModelError } from "./llm.mjs";
 import { isLineInvite, readQr, shrinkForModel } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
+import { ScamPatterns } from "./scam-patterns.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
 process.on("unhandledRejection", (error) => {
@@ -71,15 +72,28 @@ const notifyChats = new Set(notify.chats ?? []);
 const RULES = [
   { name: "LINE 邀請／加好友", score: 3, pattern: /line\.me\/(ti|R\/ti)|lin\.ee\/|加\s*(我\s*)?(賴|line|LINE|Line)|(line|LINE|賴)\s*(id|ID)\s*[:：]?|ID\s*[:：]\s*@?\w{3,}/ },
   { name: "短網址", score: 3, pattern: /\b(bit\.ly|reurl\.cc|tinyurl\.com|pse\.is|lihi\d?\.(cc|com|me)|ppt\.cc|is\.gd|t\.co|shorturl\.at|cutt\.ly)\//i },
-  { name: "網址", score: 1, pattern: /https?:\/\/|www\./i },
-  { name: "投資帶單", score: 2, pattern: /飆股|帶單|老師帶|投顧|穩賺|保證(獲利|賺)|勝率|漲停|主力|內線|虛擬貨幣|加密貨幣|USDT|泰達幣|出金|入金|翻倍|獲利\s*\d+\s*%/ },
-  { name: "兼職刷單", score: 2, pattern: /兼職|日領|日結|刷單|在家(工作|賺)|輕鬆賺|躺賺|零經驗.{0,6}(月入|日入)|月入\s*\d+萬|按讚.{0,4}賺/ },
-  { name: "私下聯繫", score: 2, pattern: /私我|私聊|私訊我|密我|加我|單獨聯繫|私下聯繫|找我拿/ },
-  { name: "貸款博弈", score: 2, pattern: /免審|快速撥款|小額貸|借貸|代辦|博弈|娛樂城|百家樂|運彩|老虎機|首儲|儲值送/ },
+  // 一般網址只加 1 分；常見技術、地圖、影音網站（benignDomains）先拿掉再判斷，不加分。
+  { name: "網址", score: 1, pattern: /https?:\/\/|www\./i, onBenignStripped: true },
+  { name: "投資帶單", score: 2, pattern: /飆股|帶單|老師帶|投顧老師|穩賺|保證(獲利|賺)|勝率\s*\d|漲停板?.{0,6}(分享|帶|跟)|主力.{0,4}(進場|拉抬)|內線(消息)?|出金|入金|翻倍|獲利\s*\d+\s*%|報(明)?牌/ },
+  // 虛擬貨幣本身是正常話題；要配上收益、帶單、入金等字眼才算。
+  { name: "虛幣引流", score: 2, pattern: /(虛擬貨幣|加密貨幣|虛幣|USDT|泰達幣|新幣|幣圈).{0,12}(帶單|保證|穩賺|翻倍|收益|日收|月收|套利|搬磚|出金|入金|認購|錢包地址|分紅)|(搬磚|套利).{0,8}(USDT|泰達幣|虛幣)/i },
+  { name: "假冒名人報牌", score: 2, pattern: /(退休|離職|資深)(的)?(半導體|台積電|鴻海)?(工程師|經理|主管).{0,15}(報股|報牌|明牌|內幕|內線|飆股)|訂單(已經)?接到\s*20\d\d|(財經|股市)(名人|大師).{0,10}(帶|群|分享|免費)/ },
+  { name: "假投資平台", score: 2, pattern: /下載.{0,6}(app|APP|App).{0,10}(投資|交易|入金|註冊)|(投資|交易)平台.{0,8}(註冊|入金|邀請碼)|洗碼量|(繳|付).{0,4}保證金.{0,6}(出金|提領|解凍)|IP\s*異常|帳號.{0,4}凍結.{0,8}(出金|客服)/i },
+  { name: "兼職刷單", score: 2, pattern: /兼職.{0,10}(日領|日結|月入|輕鬆|在家|加)|日領|日結|刷單|在家(工作|賺)|輕鬆賺|躺賺|零經驗.{0,6}(月入|日入|日領)|月入\s*\d+萬|按讚.{0,6}(賺|領)|墊付.{0,6}返(佣|傭)|領任務/ },
+  { name: "私下聯繫", score: 2, pattern: /私我|私聊|私訊我|密我|加我好友|單獨聯繫|私下聯繫|找我拿|點我頭像|頭像加|加好友.{0,6}(領|拿|送|詳談)/ },
+  { name: "貸款博弈", score: 2, pattern: /免審|免照會|快速撥款|當日撥款|小額貸|借貸|代辦貸款|(信用|聯徵)(瑕疵|不良).{0,6}(可貸|也能貸)|博弈|娛樂城|百家樂|運彩.{0,6}(帶|老師|穩)|老虎機|首儲|儲值送/ },
   // 假搬家：冒充管理員要成員移到「新群」，新群裡才是投資詐騙或釣魚。真正的社群管理員不受守衛處理。
-  { name: "群組搬家", score: 6, pattern: /(移|搬|轉|遷)(至|到|往|去)\s*(新|備用|另一?個)?\s*\d*\s*(號)?\s*(群|社群)|新\s*\d+\s*(號)?\s*(群|社群)|重新\s*(➕|＋|\+|加入|加一下|入群|進群)|統一\s*(核准|核準|審核|通過)|舊群.{0,6}(解散|關閉|停用)|(群組|社群)\s*(搬家|遷移)|備用群/ },
-  { name: "中獎客服", score: 2, pattern: /恭喜.{0,8}中獎|領取獎(金|品)|解除分期|客服通知|帳戶(異常|凍結)|驗證身分.{0,6}連結/ },
+  { name: "群組搬家", score: 6, pattern: /(移|搬|轉|遷)(至|到|往|去)\s*(新|備用|另一?個)?\s*\d*\s*(號)?\s*(群|社群)|新\s*\d+\s*(號)?\s*(群|社群)|重新\s*(➕|＋|\+|加入|加一下|入群|進群)|統一\s*(核准|核準|審核|通過)|舊群.{0,6}(解散|關閉|停用)|(群組|社群)\s*(搬家|遷移)|備用群|(另外|重新)(成立|建立?|開)(了)?(新)?(群|社群)|(機器人|廣告)(太多|很多|洗版).{0,15}(新群|新社群)|開啟新專案/ },
+  { name: "中獎客服", score: 2, pattern: /恭喜.{0,8}(中獎|抽中)|領取獎(金|品)|解除分期|誤設.{0,4}分期|重複扣款|客服通知|帳戶(異常|凍結)|驗證身分.{0,6}連結|實名驗證|開通金流|ATM.{0,6}(操作|解除)|無卡提款|遊戲點數/i },
+  { name: "愛情交友", score: 2, pattern: /(軍醫|戰地|聯合國|維和).{0,8}(醫生|軍官|官員|部隊)?.{0,15}(包裹|禮物|關稅|匯|投資)|(包裹|禮物).{0,8}(海關|關稅)|結婚基金/ },
+  { name: "盜帳號／收帳戶", score: 3, pattern: /(幫忙|幫我)投票.{0,15}(網址|連結|登入|https?:)|(傳|給|提供).{0,6}(簡訊)?(驗證碼|認證碼)|(驗證碼|認證碼).{0,10}(傳給我|給我|告訴我|截圖給我)|收購.{0,4}(帳戶|帳號|存摺)|(出租|租借|提供)(帳戶|存摺|提款卡)|出國.{0,4}(打工|工作).{0,6}高薪/ },
+  // 提醒或詢問詐騙（「這是詐騙嗎」「不要點」「有人冒充管理員」）：扣分，避免把好心提醒的人踢掉。
+  { name: "提醒／詢問詐騙", score: -4, pattern: /(這|那)(個)?(是|應該是|根本是)詐騙|是詐騙嗎|詐騙嗎|(不要|別|勿|千萬別)(點|加入|相信|匯款|上當|理)|冒充|假冒|165\s*(查證|反詐|專線)?|小心(詐騙|被騙)/ },
 ];
+
+// 正常技術、地圖、影音、官方網站：不因為「有網址」加分（短網址、LINE 邀請另外計）。
+const BENIGN_DOMAINS = config.benignDomains ?? ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "docs.", "developer."];
+const BENIGN_URL = new RegExp(`(https?:\\/\\/)?([\\w-]+\\.)*(${BENIGN_DOMAINS.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})[^\\s，。）)」』]*`, "gi");
 
 function textOf(message) {
   if (message.text) return message.text;
@@ -90,8 +104,9 @@ function textOf(message) {
 }
 
 function ruleScore(message, text) {
-  const hits = RULES.filter((rule) => rule.pattern.test(text));
-  let score = hits.reduce((sum, rule) => sum + rule.score, 0);
+  const stripped = text.replace(BENIGN_URL, "［一般網站］");
+  const hits = RULES.filter((rule) => rule.pattern.test(rule.onBenignStripped ? stripped : text));
+  let score = Math.max(0, hits.reduce((sum, rule) => sum + rule.score, 0));
   const names = hits.map((rule) => rule.name);
   // 在群組裡丟聯絡人卡片，是常見的引流手法。
   if (message.card?.kind === "contact") {
@@ -189,7 +204,8 @@ function scamModelText(text) {
     const invite = LINE_INVITE_PATH.test(`${host}${path ?? ""}`.replace(/^www\./i, "")) ? "，LINE 邀請／加好友連結" : "";
     return `［連結：${host.toLowerCase()}${invite}］`;
   });
-  return deidentify(marked);
+  // 「加賴 xxx」「加 LINE xxx」後面的帳號也遮掉。
+  return deidentify(marked.replace(/(加\s*(我\s*)?(賴|line|LINE|Line)\s*[:：]?\s*)@?[\w.-]{3,}/g, "$1［LINE ID］"));
 }
 
 /** 回傳 { verdict: "SCAM" | "UNSURE" | "OK" | undefined, model, ms }；模型不可用或答非所問時 verdict 為 undefined。 */
@@ -198,12 +214,16 @@ async function llmJudge(text) {
   const used = {};
   const started = Date.now();
   // 地端模型在本機，不出這台電腦，給原文判斷。
-  const answer = await complete(scamLlm, SCAM_SYSTEM, `訊息：「${String(text).slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
+  // 地端小模型：短範例 2 則（1 詐騙＋1 正常），避免提示太長。
+  const shots = patterns ? patterns.fewShot(text, 1, 1, 60) : "";
+  const answer = await complete(scamLlm, SCAM_SYSTEM, `${shots}訊息：「${String(text).slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
   const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase().replace(/[^A-Z]/g, "");
   return { verdict: ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word)), model: used.model ?? "none", ms: Date.now() - started };
 }
 
 const reviewLlm = config.review;
+// 詐騙話術範例庫（data/scam-patterns，本機）：few-shot 範例與 Meta 確認詐騙的累積。
+const patterns = config.patterns?.enabled === false ? undefined : new ScamPatterns(resolve(here, "..", config.patterns?.dir ?? "data/scam-patterns"));
 const reviewScore = config.reviewScore ?? 3;
 let cloudCalls = { day: "", count: 0 };
 /** Meta 覆核（只有 Meta，不退回地端）；送出前去識別化。不可用時 verdict 為 undefined。 */
@@ -214,7 +234,9 @@ async function metaReview(text, hint = "") {
   const day = localDay();
   if (cloudCalls.day !== day) cloudCalls = { day, count: 0 };
   cloudCalls.count++;
-  const answer = await complete(reviewLlm, SCAM_SYSTEM, `${hint ? `${hint}\n` : ""}訊息：「${scamModelText(text).slice(0, 1500)}」`, reviewLlm.verdictTokens ?? 60, undefined, used);
+  // Meta：範例 3 則詐騙＋2 則正常（範例本身不含個資）。
+  const shots = patterns ? patterns.fewShot(text, 3, 2, 90) : "";
+  const answer = await complete(reviewLlm, SCAM_SYSTEM, `${shots}${hint ? `${hint}\n` : ""}訊息：「${scamModelText(text).slice(0, 1500)}」`, reviewLlm.verdictTokens ?? 60, undefined, used);
   const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase().replace(/[^A-Z]/g, "");
   return { verdict: ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word)), model: used.model ?? "none", ms: Date.now() - started, cloudToday: cloudCalls.count };
 }
@@ -259,6 +281,10 @@ async function decide(message, rawText) {
   // 第二層：Meta 覆核。踢人＝規則分數 ≥ strongScore 且地端判 SCAM 且 Meta 也判 SCAM；Meta 不可用就不踢、只記錄。
   const review = await metaReview(text);
   const kick = score >= strongScore && verdict === "SCAM" && review.verdict === "SCAM";
+  // Meta 確認詐騙：去識別化後累積到範例庫（只存訊息本身，不存發言者）。
+  if (review.verdict === "SCAM" && patterns) {
+    try { if (patterns.addConfirmed(scamModelText(text), names.join("、") || "Meta 確認", { score, reviewModel: review.model })) record({ action: "pattern-learned", score }); } catch (error) { recordError("patterns", error.message); }
+  }
   return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
 }
 
@@ -697,14 +723,21 @@ async function checkImage(ws, message) {
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: `［圖片 QR code］${content.slice(0, 480)}` };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
   if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
+  // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
-    const review = await metaReview(`［圖片中的 LINE 邀請／加好友 QR code］${content}`);
-    if (review.verdict === "SCAM") return remove(ws, message, { ...entry, verdict: "QR_LINE_INVITE", names: ["LINE 邀請／加好友 QR code"], review: review.verdict, reviewModel: review.model });
-    return record({ action: "qr-flag", ...entry, verdict: "QR_LINE_INVITE", review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
+    const review = await metaReview(`［成員貼出的截圖，QR code 解碼內容］${content}`, "一般成員（非管理員）在本社群貼出一張截圖，截圖裡的 QR code 實際解碼後是外部 LINE 群組／社群／加好友邀請連結，不是本社群自己的連結。請判斷這是否為引流詐騙。");
+    const flagged = { ...entry, verdict: "QR_LINE_INVITE", names: ["外部 LINE 群組／好友 QR code"], review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model };
+    if (review.verdict === "SCAM") {
+      // 預設只通知不踢（qr.kickOnConfirmed: true 才會踢）；寧可漏判也不誤踢。
+      if (qr.kickOnConfirmed === true) return remove(ws, message, flagged);
+      record({ action: "qr-flag", ...flagged });
+      return notifyAdmins(ws, flagged, "qr");
+    }
+    return record({ action: "qr-flag", ...flagged });
   }
-  const result = await decide(message, `圖片中的 QR code 內容：${content}`);
-  if (result.kick) return remove(ws, message, { ...entry, ...result });
-  record({ action: "none", ...entry, ...result });
+  // 其他 QR（一般網址、Wi-Fi 等）一律只記錄（只記網域，不記完整內容）。
+  const host = (content.match(/^[a-z]+:\/\/([^/?#\s]+)/i) ?? [])[1] ?? content.slice(0, 20);
+  record({ action: "none", ...entry, text: undefined, verdict: "QR_OTHER", qrHost: host });
 }
 
 // ── 看圖模型（沒有 QR code 的圖片） ─────────────────────────────
@@ -712,18 +745,6 @@ const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成
 投資、飆股、虛擬貨幣的獲利截圖或對帳單，老師帶單，加 LINE 或其他群組的廣告，博弈娛樂城，兼職刷單，假中獎，假客服或假公告，借貸廣告。
 一般生活照、風景、食物、寵物、迷因、新聞截圖、一般聊天截圖都算 OK；只是圖裡有數字或文字不代表是詐騙。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行用 20 字內寫你在圖中看到的證據。`;
-
-// Meta 複核（不退回地端小模型）：理由要是 30 字內、以句號或完整詞結尾的句子才算完整。
-async function visionReview(image) {
-  const reviewer = vision.reviewLlm;
-  if (!reviewer) return { verdict: undefined, model: "none", complete: false };
-  const used = {};
-  const answer = await complete(reviewer, `${VISION_SYSTEM}\n只有圖片中明確出現詐騙引流（加 LINE、帶單、保證獲利、博弈、借貸、假客服）的證據才判 SCAM；只是出現產品或模型名稱一律 OK。`, "請複核這張圖片。", 80, image, used);
-  const lines = String(answer ?? "").trim().split(/\n+/);
-  const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
-  const reason = lines.slice(1).join(" ").trim().replace(/[。.]$/, "");
-  return { verdict, model: used.model ?? "none", reason, complete: reason.length > 0 && reason.length <= 30 && !/[，、,：:（(「]$/.test(reason) };
-}
 
 const visionQueue = [];
 let visionBusy = false;
@@ -768,13 +789,7 @@ async function checkWithVision(ws, message, picture) {
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
     record({ action: "vision-flag", ...entry });
-    // 看圖預設只記錄、不發通知（vision.notify 預設 false）。
-    // 開啟時也要：模型判 SCAM、Meta 複核也判 SCAM、而且複核理由是完整短句，才發通知。
-    if (verdict === "SCAM" && vision.notify === true) {
-      const review = await visionReview(small);
-      record({ action: "vision-review", chatId: message.channelId, messageId: message.messageId, verdict: review.verdict ?? "UNAVAILABLE", model: review.model, complete: review.complete });
-      if (review.verdict === "SCAM" && review.complete) notifyAdmins(ws, { ...entry, names: [review.reason] }, "vision");
-    }
+    // 沒有 QR 的截圖一律只記錄：不送 Meta、不發通知（模型會把 AI 模型名稱等誤認成詐騙）。
     if (vision.alertChatId) {
       ws.send(JSON.stringify({ type: "message:send", requestId: `alert${++requestSeq}`, chatId: vision.alertChatId, text: `⚠️ 疑似詐騙圖片（${verdict === "SCAM" ? "模型判定詐騙" : "可疑"}）\n發送者：${message.senderName}\n理由：${reason || "（未說明）"}\n成員 ID：${message.senderId}` }));
     }
@@ -813,7 +828,9 @@ function buildNotice(entry, kind, admins) {
     ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群${reason}。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
-      : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙${reason}，請管理員確認。`;
+      : kind === "qr"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的截圖含外部 LINE 群組／好友 QR code，疑似引流，請管理員確認。`
+        : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙${reason}，請管理員確認。`;
   let text = `${head}\n請大家不要點陌生連結、不要加對方 LINE、不要匯款。`;
   const mentions = [];
   if (admins.length > 0) {
@@ -948,5 +965,5 @@ function connect() {
 for (const entry of protectedMembers) {
   if (entry.ids.size === 0) console.log(`提醒：受保護名字「${entry.name}」沒有填本人 ID，只在社群（靠管理員身分）偵測冒名。`);
 }
-if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : (vision.notify === true ? "只記錄，Meta 複核確認才通知，不移除" : "只記錄，不通知、不移除")}）`);
+if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "沒有 QR 的截圖只記錄，不通知、不移除"}）`);
 connect();
