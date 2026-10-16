@@ -8,7 +8,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { complete } from "./llm.mjs";
+import { complete, onModelError } from "./llm.mjs";
 import { isLineInvite, readQr, shrinkForModel } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
 
@@ -182,11 +182,26 @@ const SCAM_SYSTEM = `你是 LINE 群組的反詐騙審查員。判斷使用者�
 判斷的是「發言者本人是不是在行騙或引流」：如果發言者是在詢問、轉述或提醒別人某段內容是不是詐騙（例如「這個連結是詐騙嗎」「大家小心這種訊息」），算 OK。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行寫 15 字內理由。`;
 
-/** 回傳 "SCAM" | "UNSURE" | "OK"；模型不可用或答非所問時回 undefined。 */
+// 送往雲端模型前去識別化：網址只留網域（邀請連結另標記），手機、email、帳號、LINE ID 等換代號。
+function scamModelText(text) {
+  const marked = String(text ?? "").replace(/(https?:\/\/)?((?:[\w-]+\.)+[a-z]{2,})(\/[^\s，。）)」』]*)?/gi, (url, _scheme, host, path) => {
+    if (!_scheme && !path && !/\.(com|net|org|tw|me|ee|cc|io|xyz|top|vip|info|app|link|ly|gl|co|gov)$/i.test(host)) return url;
+    const invite = LINE_INVITE_PATH.test(`${host}${path ?? ""}`.replace(/^www\./i, "")) ? "，LINE 邀請／加好友連結" : "";
+    return `［連結：${host.toLowerCase()}${invite}］`;
+  });
+  return deidentify(marked);
+}
+
+/** 回傳 { verdict: "SCAM" | "UNSURE" | "OK" | undefined, model, ms }；模型不可用或答非所問時 verdict 為 undefined。 */
+async function llmJudge(text) {
+  const used = {};
+  const started = Date.now();
+  const answer = await complete(scamLlm, SCAM_SYSTEM, `訊息：「${scamModelText(text).slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
+  const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase().replace(/[^A-Z]/g, "");
+  return { verdict: ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word)), model: used.model ?? "none", ms: Date.now() - started };
+}
 async function llmVerdict(text) {
-  const answer = await complete(scamLlm, SCAM_SYSTEM, `訊息：「${text.slice(0, 1500)}」`, 60);
-  const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase();
-  return ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word));
+  return (await llmJudge(text)).verdict;
 }
 
 const strongScore = config.strongScore ?? 6;
@@ -216,14 +231,14 @@ async function decide(message, rawText) {
   const { score, names } = ruleScore(message, text);
   if (official && score < strongScore) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: "OFFICIAL_LINK" };
   if (score === 0 && !config.checkEveryMessage) return { kick: false, score, names, verdict: "SKIP" };
-  const verdict = await llmVerdict(text);
+  const { verdict, model, ms } = await llmJudge(text);
   // kickPolicy "strict"（寧可漏判）：規則分數達 strongScore「而且」模型判定 SCAM 才踢；
   // 原本的 "default"：模型說詐騙就踢，模型不確定或不通時規則分數夠高才踢。
   const kick = (config.kickPolicy ?? "default") === "strict"
     ? verdict === "SCAM" && score >= strongScore
     : verdict === "SCAM" || ((verdict === "UNSURE" || verdict === undefined) && score >= strongScore);
-  if (official) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: `OFFICIAL_LINK_${verdict ?? "UNAVAILABLE"}` };
-  return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE" };
+  if (official) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: `OFFICIAL_LINK_${verdict ?? "UNAVAILABLE"}`, model, modelMs: ms };
+  return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
 }
 
 // ── 小助手 ───────────────────────────────────────────────────
@@ -267,8 +282,20 @@ const COMMITMENT = new RegExp([
   "(幾點|哪裡)(見|碰面|集合)|(見面|碰面)吧|一起去吧|我們(這|下|明|週|周)?.{0,4}(見面|去吃|約)",
 ].join("|"), "i");
 
-// 問題本身像邀約或請求（約、見面、借錢、付款、交易、合作、加入、時間安排）。
-const COMMITMENT_ASK = /約|見面|碰面|吃飯|聚餐|喝|一起|要不要|來嗎|去嗎|有空|幾點|哪天|借|付|轉帳|匯|交易|買|賣|合作|加入|參加|幫我|可以嗎|答應|承諾/;
+// 問題本身是「要求士軒答應」：約會／見面、付款借錢轉帳、合作交易、排時間。
+// 只有這類請求才套用承諾硬規則與輸出過濾；一般閒聊、技術問題（例如「有沒有導入模型」）照常回答。
+const COMMITMENT_ASK = new RegExp([
+  // 約會、見面
+  "約(會|你|一下|個|出來|吃|喝|見)|見(個)?面|碰(個)?面|出來(吃|喝|玩|聊|見)|一起(去|吃|喝|玩|來|出去|聚)|(吃|請你吃|喝)(個)?(飯|火鍋|咖啡|酒|一杯|宵夜|早午餐|晚餐|午餐)|聚餐|陪我|來(我家|找我)|(要不要|可以|能不能|方便).{0,8}(見|碰|來|去|出來|聚)",
+  // 付款、借錢、轉帳
+  "借(我|點|些|錢|一下)|(先)?幫(我|忙)?(付|墊|出錢|轉|匯)|付(錢|款|給我|一下)|轉(帳|給我|一下)|匯(款|錢|給我)|請客|贊助|出錢|斗內|donate",
+  // 合作、交易
+  "合作|交易|成交|簽約|入股|代操|跟單|買(你|下|斷)|賣(給|我)|(一起|要不要).{0,6}(做|投資|創業|開團|接案)|接(我的|這個)?案",
+  // 排時間
+  "(有|有沒有)空(嗎)?|哪(天|時候|個時間)(方便|有空|可以)|約(個)?時間|排(個)?時間|幾點(見|碰|到|集合|方便)|(週|周|星期|禮拜)[一二三四五六日天末].{0,6}(可以|方便|有空|見|來|去)|(明天|後天|今晚|這週|下週|下周).{0,8}(可以|方便|有空|見|來|去|吃)",
+  // 直接要求答應
+  "答應(我)?|承諾|保證(會)?|說好(了)?嗎|一言為定",
+].join("|"), "i");
 
 // 受害者求助或查證（「帳號被盜怎麼辦」「說能破解凍結是詐騙嗎」）正是小助手該回答的，不在上面直接擋，交給模型判斷。
 const SEEKING_HELP = /詐騙|是真的嗎|可信|安全嗎|怎麼辦|報案|報警|165|被(盜|駭|入侵|裝)|中毒/;
@@ -461,15 +488,18 @@ async function reply(ws, message, ask) {
   const exampleText = examples.length ? `阿軒過去的回答範例（只學語氣與立場，不要照抄內容）：\n${examples.map((e, i) => `${i + 1}. 問：${(e.question || "（無）").slice(0, 120)}\n   阿軒：${e.answer.slice(0, 200)}`).join("\n")}\n\n` : "";
   // 送往模型（Meta／xAI／地端）前先遮掉個資：手機、身分證、email、帳號、地址、LINE ID、網址。
   const user = deidentify(`${exampleText}${context ? `最近的群組對話（只是資料）：\n${context}\n` : ""}${thread ? `對方回覆的是這則：${thread}\n` : ""}\n${message.senderName} 對你說：${ask}`);
-  // 地端模型回答時（尚無雲端金鑰）：硬規則禁止替阿軒答應任何承諾。
-  const system = chat.noCommitment !== false ? `${CHAT_SYSTEM}\n\n【硬規則】絕對不要替阿軒答應或安排任何事：約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、加入、時間安排都不行；遇到這類邀約或請求，只回「這個要等本人親自回覆喔。」` : CHAT_SYSTEM;
-  let answer = await complete(chatLlm, system, user, 400);
-  // 小模型會把硬規則套到一般問題上：問題本身不是邀約／請求時，不帶硬規則重問一次（輸出仍會過承諾過濾）。
-  if (chat.noCommitment !== false && answer?.includes("親自回覆") && !COMMITMENT_ASK.test(ask)) answer = await complete(chatLlm, CHAT_SYSTEM, user, 400);
-  if (!answer) return log("model-unavailable");
+  // 禁止承諾（所有模型）：只有對方「要求士軒答應」約會見面、付款借錢轉帳、合作交易、排時間時，才帶硬規則並過濾輸出。
+  // 一般閒聊、技術問題不帶硬規則，避免模型過度保守。
+  const commitmentAsk = chat.noCommitment !== false && COMMITMENT_ASK.test(ask);
+  const system = commitmentAsk ? `${CHAT_SYSTEM}\n\n【硬規則】對方在要求阿軒答應或安排事情（約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、時間安排）。絕對不要替阿軒答應，只回「這個要等本人親自回覆喔。」` : CHAT_SYSTEM;
+  const used = {};
+  let answer = await complete(chatLlm, system, user, 400, undefined, used);
+  // 不是請求卻回了「親自回覆」：不帶硬規則重問一次。
+  if (!commitmentAsk && answer?.includes("親自回覆")) answer = await complete(chatLlm, CHAT_SYSTEM, user, 400, undefined, used);
+  if (!answer) return log("model-unavailable", { model: used.model ?? "none" });
   if (/OUT_OF_SCOPE|REFUSE_SENSITIVE/i.test(answer)) {
     // 小模型偶爾亂拒答：mentionOnly 模式下乾脆不回，比回錯好。
-    if (chat.mentionOnly) return log("model-refused-no-reply");
+    if (chat.mentionOnly) return log("model-refused-no-reply", { model: used.model });
     send(ws, message, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
     return log("refused", { reason: "model" });
   }
@@ -489,14 +519,14 @@ async function reply(ws, message, ask) {
     const end = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"), cut.lastIndexOf("\n"));
     body = end > chat.maxReplyChars * 0.5 ? cut.slice(0, end + 1) : cut;
   }
-  // 輸出後過濾：地端模型若仍寫出承諾語句，整段改成固定句。
-  if (chat.noCommitment !== false && COMMITMENT.test(body)) {
+  // 輸出後過濾：對方在要求承諾，而且回覆真的在答應（或模型已回固定句）時，整段改成固定句。
+  if (commitmentAsk && (COMMITMENT.test(body) || body.includes("親自回覆"))) {
     send(ws, message, chat.commitmentReply ?? "這個要等本人親自回覆喔。（自動回覆）");
-    return log("commitment-blocked");
+    return log("commitment-blocked", { model: used.model });
   }
   const text = `${body}${chat.signature ? ` ${chat.signature}` : ""}`;
   send(ws, message, text);
-  log("replied", { replyChars: text.length, examples: examples.length, contextChars: context.length });
+  log("replied", { model: used.model, replyChars: text.length, examples: examples.length, contextChars: context.length });
   if (training) {
     const names = (recent.get(message.channelId) ?? []).map((item) => item.name).concat(message.senderName);
     const summary = lines.slice(-3).map((line) => line.slice(0, 60)).join(" / ");
@@ -506,8 +536,18 @@ async function reply(ws, message, ask) {
 }
 
 // ── 紀錄 ─────────────────────────────────────────────────────
+// 錯誤也寫進每日稽核紀錄（只記類別與摘要，不記對話內容）。
+function recordError(kind, detail) {
+  try { record({ action: "error", kind, detail: String(detail ?? "").slice(0, 120) }); } catch {}
+}
+onModelError(({ model, error }) => recordError("model", `${model}：${error}`));
+
+function localDay() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
 function record(entry) {
-  const day = new Date().toISOString().slice(0, 10);
+  const day = localDay();
   appendFileSync(join(logDir, `guard-${day}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
 }
 
@@ -569,7 +609,8 @@ async function handle(ws, message) {
       // 詐騙訊息不進對話上下文，也不回覆。
       return;
     }
-    if (result.verdict !== "SKIP") record({ action: "none", ...entry });
+    // 正常訊息只記開頭 30 字與長度（不記完整內容）；被踢的詐騙訊息才保留證據文字。
+    if (result.verdict !== "SKIP") record({ action: "none", ...entry, text: undefined, preview: text.slice(0, 30), textChars: text.length });
     if (result.verdict !== "SKIP" && result.verdict !== "MODEL_UNAVAILABLE") {
       if (lastVerdict.size > 2000) lastVerdict.clear();
       lastVerdict.set(message.messageId, result.verdict);
@@ -580,11 +621,13 @@ async function handle(ws, message) {
   if (!ask) return;
   // 回覆前先過詐騙判斷：規則沒命中也要問一次模型；SCAM 或 UNSURE 一律不回。
   if (!trusted) {
-    const verdict = lastVerdict.get(message.messageId) ?? await llmVerdict(text);
+    const cached = lastVerdict.get(message.messageId);
+    const judged = cached ? { verdict: cached, model: "cached" } : await llmJudge(text);
+    const verdict = judged.verdict;
     const { score } = ruleScore(message, sanitizeLinks(text).text);
     // 小模型常把「在問詐騙」誤判成詐騙：要有規則訊號（≥ chat.scamSkipScore，預設 2）＋模型判 SCAM，或規則分數已達 strongScore，才當詐騙者不回。
     const scammer = (verdict === "SCAM" && score >= (chat.scamSkipScore ?? 2)) || score >= strongScore;
-    if (scammer) return record({ action: "reply-skipped", reason: `scam-check-${verdict}-score${score}`, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, preview: text.slice(0, 30) });
+    if (scammer) return record({ action: "reply-skipped", reason: `scam-check-${verdict}-score${score}`, model: judged.model, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, preview: text.slice(0, 30) });
   }
   await reply(ws, message, ask);
 }
@@ -603,11 +646,12 @@ function call(ws, frame) {
 
 async function checkImage(ws, message) {
   const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
-  if (picture.type !== "media") return console.error(`無法取得圖片（${picture.code}）`);
+  if (picture.type !== "media") { recordError("media", picture.code); return console.error(`無法取得圖片（${picture.code}）`); }
   let content;
   try {
     content = readQr(picture.mime, Buffer.from(picture.data, "base64"));
   } catch (error) {
+    recordError("image", error.message);
     return console.error(`圖片解讀失敗：${error.message}`);
   }
   if (!content) {
@@ -628,6 +672,18 @@ const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成
 投資、飆股、虛擬貨幣的獲利截圖或對帳單，老師帶單，加 LINE 或其他群組的廣告，博弈娛樂城，兼職刷單，假中獎，假客服或假公告，借貸廣告。
 一般生活照、風景、食物、寵物、迷因、新聞截圖、一般聊天截圖都算 OK；只是圖裡有數字或文字不代表是詐騙。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行用 20 字內寫你在圖中看到的證據。`;
+
+// Meta 複核（不退回地端小模型）：理由要是 30 字內、以句號或完整詞結尾的句子才算完整。
+async function visionReview(image) {
+  const reviewer = vision.reviewLlm;
+  if (!reviewer) return { verdict: undefined, model: "none", complete: false };
+  const used = {};
+  const answer = await complete({ ...reviewer, fallback: undefined }, `${VISION_SYSTEM}\n只有圖片中明確出現詐騙引流（加 LINE、帶單、保證獲利、博弈、借貸、假客服）的證據才判 SCAM；只是出現產品或模型名稱一律 OK。`, "請複核這張圖片。", 80, image, used);
+  const lines = String(answer ?? "").trim().split(/\n+/);
+  const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
+  const reason = lines.slice(1).join(" ").trim().replace(/[。.]$/, "");
+  return { verdict, model: used.model ?? "none", reason, complete: reason.length > 0 && reason.length <= 30 && !/[，、,：:（(「]$/.test(reason) };
+}
 
 const visionQueue = [];
 let visionBusy = false;
@@ -651,6 +707,7 @@ async function drainVision() {
       await checkWithVision(ws, message, picture);
     } catch (error) {
       console.error(`看圖失敗：${error.message}`);
+      recordError("vision", error.message);
     }
   }
   visionBusy = false;
@@ -661,17 +718,23 @@ async function checkWithVision(ws, message, picture) {
   const small = shrinkForModel(picture.mime, Buffer.from(picture.data, "base64"), vision.maxSide);
   if (!small) return;
   const started = Date.now();
-  const answer = await complete(vision.llm ?? scamLlm, VISION_SYSTEM, "請判斷這張圖片。", 80, small);
+  const usedVision = {};
+  const answer = await complete(vision.llm ?? scamLlm, VISION_SYSTEM, "請判斷這張圖片。", vision.llm?.verdictTokens ?? 80, small, usedVision);
   const lines = String(answer ?? "").trim().split(/\n+/);
   const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
   const reason = (lines.slice(1).join(" ").trim() || lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60);
-  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: "［圖片］", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], seconds: Math.round((Date.now() - started) / 1000) };
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: "［圖片］", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
     record({ action: "vision-flag", ...entry });
-    // 看圖只在模型「確定詐騙」時通知，不確定的只記錄，以免洗版。
-    if (verdict === "SCAM") notifyAdmins(ws, entry, "vision");
+    // 看圖預設只記錄、不發通知（vision.notify 預設 false）。
+    // 開啟時也要：模型判 SCAM、Meta 複核也判 SCAM、而且複核理由是完整短句，才發通知。
+    if (verdict === "SCAM" && vision.notify === true) {
+      const review = await visionReview(small);
+      record({ action: "vision-review", chatId: message.channelId, messageId: message.messageId, verdict: review.verdict ?? "UNAVAILABLE", model: review.model, complete: review.complete });
+      if (review.verdict === "SCAM" && review.complete) notifyAdmins(ws, { ...entry, names: [review.reason] }, "vision");
+    }
     if (vision.alertChatId) {
       ws.send(JSON.stringify({ type: "message:send", requestId: `alert${++requestSeq}`, chatId: vision.alertChatId, text: `⚠️ 疑似詐騙圖片（${verdict === "SCAM" ? "模型判定詐騙" : "可疑"}）\n發送者：${message.senderName}\n理由：${reason || "（未說明）"}\n成員 ID：${message.senderId}` }));
     }
@@ -692,13 +755,25 @@ function adminsOf(chatId) {
   return [...list].sort((a, b) => (a[1].role === "admin" ? 0 : 1) - (b[1].role === "admin" ? 0 : 1)).slice(0, 20);
 }
 
+// 通知理由：只放完整的項目（不截斷句子）；放不下或是模型長句就不帶理由。
+function noticeReason(entry) {
+  const items = [];
+  for (const item of entry.names ?? []) {
+    const text = String(item ?? "").trim();
+    if (!text || text.length > 30) continue;
+    if ([...items, text].join("、").length > 60) break;
+    items.push(text);
+  }
+  return items.length ? `（${items.join("、")}）` : "";
+}
+
 function buildNotice(entry, kind, admins) {
-  const reason = (entry.names?.length ? entry.names.join("、") : entry.verdict ?? "").slice(0, 60);
+  const reason = noticeReason(entry);
   const head = kind === "removed"
-    ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群（${reason}）。`
+    ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群${reason}。`
     : kind === "failed"
-      ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙（${reason}），但本帳號無法移除，請管理員處理。`
-      : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙（${reason}），請管理員確認。`;
+      ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
+      : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙${reason}，請管理員確認。`;
   let text = `${head}\n請大家不要點陌生連結、不要加對方 LINE、不要匯款。`;
   const mentions = [];
   if (admins.length > 0) {
@@ -739,6 +814,7 @@ async function drain(ws) {
       await handle(ws, queue.shift());
     } catch (error) {
       console.error(`處理訊息失敗：${error.message}`);
+      recordError("handle", error.message);
     }
   }
   busy = false;
@@ -809,18 +885,19 @@ function connect() {
         return;
       case "error": {
         const entry = pending.get(frame.requestId);
-        if (!entry) return console.error(`錯誤：${frame.code} ${frame.message}`);
+        if (!entry) { recordError("server", `${frame.code} ${frame.message ?? ""}`); return console.error(`錯誤：${frame.code} ${frame.message}`); }
         pending.delete(frame.requestId);
         // 沒踢成功就允許之後再試。
         kicked.delete(`${entry.chatId} ${entry.senderId}`);
         console.error(`移除 ${entry.senderName} 失敗：${frame.message}（${frame.code}）`);
+        recordError("kick", `${entry.senderName}：${frame.code}`);
         record({ action: "failed", code: frame.code, ...entry });
         notifyAdmins(ws, entry, "failed");
       }
     }
   });
   ws.on("unexpected-response", (_, response) => console.error(`機器人 API 拒絕連線（HTTP ${response.statusCode}）：請確認 config.yaml 已啟用 api，且 Token 正確。`));
-  ws.on("error", (error) => console.error(`連線錯誤：${error.message}`));
+  ws.on("error", (error) => { console.error(`連線錯誤：${error.message}`); recordError("connection", error.message); });
   ws.on("close", () => {
     console.log(`連線中斷，${backoff / 1000} 秒後重連。`);
     setTimeout(connect, backoff);
@@ -831,5 +908,5 @@ function connect() {
 for (const entry of protectedMembers) {
   if (entry.ids.size === 0) console.log(`提醒：受保護名字「${entry.name}」沒有填本人 ID，只在社群（靠管理員身分）偵測冒名。`);
 }
-if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "只記錄與通知，不移除"}）`);
+if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : (vision.notify === true ? "只記錄，Meta 複核確認才通知，不移除" : "只記錄，不通知、不移除")}）`);
 connect();

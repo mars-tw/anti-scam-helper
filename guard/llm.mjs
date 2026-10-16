@@ -13,18 +13,34 @@
  * 回傳模型的文字回答；連不上、逾時或格式不對時回 undefined（呼叫端自行退回保守處理）。
  * `image`（選用）：{ mime, base64 }，給看得懂圖片的模型。
  */
-export async function complete(llm, system, user, maxTokens, image) {
+// 錯誤回報（給守衛寫進每日稽核紀錄）；只帶模型名稱與錯誤摘要，不帶內容。
+let errorSink = () => {};
+export function onModelError(fn) { errorSink = fn; }
+
+/** `used`（選用）：呼叫後 used.model 會是實際回答的模型 ID。 */
+export async function complete(llm, system, user, maxTokens, image, used) {
   const answer = await completeOne(llm, system, user, maxTokens, image);
+  if (answer !== undefined && used) used.model = modelName(llm);
   // 備援：主模型連不上、沒金鑰或答非所問時，改問 llm.fallback（例如主機上的 llama-server）。
+  if (answer === undefined && !lastFailureThrown) { try { errorSink({ model: modelName(llm), error: "empty-or-unusable-answer" }); } catch {} }
   if (answer === undefined && llm.fallback) {
-    console.error(`模型 ${llm.model ?? llm.backend ?? "local"} 無法使用，改用備援模型（${llm.fallback.model ?? llm.fallback.backend ?? "local"}）`);
-    // 備援可以再有備援（例如 Meta → xAI → 地端）。
-    return complete(llm.fallback, system, user, maxTokens, image);
+    console.error(`模型 ${modelName(llm)} 無法使用，改用備援模型（${modelName(llm.fallback)}）`);
+    // 備援可以再有備援（例如 Meta → muse-wonder → 地端）。
+    return complete(llm.fallback, system, user, maxTokens, image, used);
   }
   return answer;
 }
 
+function modelName(llm) {
+  return llm.model ?? llm.capability ?? llm.backend ?? "local";
+}
+
+let lastFailureThrown = false;
 async function completeOne(llm, system, user, maxTokens, image) {
+  lastFailureThrown = true;
+  // 沒設金鑰的雲端模型直接跳過，不送請求、不等逾時。
+  if ((llm.backend === "openai" || llm.backend === "responses") && llm.apiKeyEnv && !process.env[llm.apiKeyEnv]) return undefined;
+  lastFailureThrown = false;
   try {
     const backend = llm.backend ?? "local";
     const answer = backend === "openai"
@@ -35,7 +51,9 @@ async function completeOne(llm, system, user, maxTokens, image) {
     // Qwen3 等模型可能先輸出 <think>…</think> 的思考過程，只留最後的回答。
     return answer?.replace(/<think>[\s\S]*?<\/think>/g, "").trim() || undefined;
   } catch (error) {
-    console.error(`模型無法使用（${llm.backend ?? "local"}）：${error.message}`);
+    console.error(`模型無法使用（${modelName(llm)}）：${error.message}`);
+    lastFailureThrown = true;
+    try { errorSink({ model: modelName(llm), error: String(error.message).slice(0, 80) }); } catch {}
     return undefined;
   }
 }
