@@ -193,12 +193,30 @@ function scamModelText(text) {
 }
 
 /** 回傳 { verdict: "SCAM" | "UNSURE" | "OK" | undefined, model, ms }；模型不可用或答非所問時 verdict 為 undefined。 */
+// 分層巡邏：第一層＝規則＋地端模型（config.llm，所有訊息）；只有可疑的才送第二層 Meta 覆核（config.review）。
 async function llmJudge(text) {
   const used = {};
   const started = Date.now();
-  const answer = await complete(scamLlm, SCAM_SYSTEM, `訊息：「${scamModelText(text).slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
+  // 地端模型在本機，不出這台電腦，給原文判斷。
+  const answer = await complete(scamLlm, SCAM_SYSTEM, `訊息：「${String(text).slice(0, 1500)}」`, scamLlm.verdictTokens ?? 60, undefined, used);
   const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase().replace(/[^A-Z]/g, "");
   return { verdict: ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word)), model: used.model ?? "none", ms: Date.now() - started };
+}
+
+const reviewLlm = config.review;
+const reviewScore = config.reviewScore ?? 3;
+let cloudCalls = { day: "", count: 0 };
+/** Meta 覆核（只有 Meta，不退回地端）；送出前去識別化。不可用時 verdict 為 undefined。 */
+async function metaReview(text, hint = "") {
+  if (!reviewLlm) return { verdict: undefined, model: "none", ms: 0 };
+  const used = {};
+  const started = Date.now();
+  const day = localDay();
+  if (cloudCalls.day !== day) cloudCalls = { day, count: 0 };
+  cloudCalls.count++;
+  const answer = await complete(reviewLlm, SCAM_SYSTEM, `${hint ? `${hint}\n` : ""}訊息：「${scamModelText(text).slice(0, 1500)}」`, reviewLlm.verdictTokens ?? 60, undefined, used);
+  const first = String(answer ?? "").trim().split(/\s/)[0].toUpperCase().replace(/[^A-Z]/g, "");
+  return { verdict: ["SCAM", "UNSURE", "OK"].find((word) => first.startsWith(word)), model: used.model ?? "none", ms: Date.now() - started, cloudToday: cloudCalls.count };
 }
 async function llmVerdict(text) {
   return (await llmJudge(text)).verdict;
@@ -230,15 +248,18 @@ async function decide(message, rawText) {
   const { text, official } = sanitizeLinks(rawText);
   const { score, names } = ruleScore(message, text);
   if (official && score < strongScore) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: "OFFICIAL_LINK" };
-  if (score === 0 && !config.checkEveryMessage) return { kick: false, score, names, verdict: "SKIP" };
+  // 地端篩全部訊息（config.localScreenAll，預設開）；訊息積壓時規則 0 分的先略過，避免地端模型拖慢。
+  if (score === 0 && (config.localScreenAll === false || queue.length > (config.localBacklog ?? 5))) return { kick: false, score, names, verdict: "SKIP" };
+  // 第一層：地端模型（正常訊息到此為止，不送雲端）。
   const { verdict, model, ms } = await llmJudge(text);
-  // kickPolicy "strict"（寧可漏判）：規則分數達 strongScore「而且」模型判定 SCAM 才踢；
-  // 原本的 "default"：模型說詐騙就踢，模型不確定或不通時規則分數夠高才踢。
-  const kick = (config.kickPolicy ?? "default") === "strict"
-    ? verdict === "SCAM" && score >= strongScore
-    : verdict === "SCAM" || ((verdict === "UNSURE" || verdict === undefined) && score >= strongScore);
   if (official) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: `OFFICIAL_LINK_${verdict ?? "UNAVAILABLE"}`, model, modelMs: ms };
-  return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
+  // 可疑＝規則分數 ≥ reviewScore，或地端判 SCAM 且規則至少有 reviewLocalScamMinScore 分（地端小模型對 0 分訊息誤判多，不送雲端）。
+  const suspicious = score >= reviewScore || (verdict === "SCAM" && score >= (config.reviewLocalScamMinScore ?? 1));
+  if (!suspicious) return { kick: false, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
+  // 第二層：Meta 覆核。踢人＝規則分數 ≥ strongScore 且地端判 SCAM 且 Meta 也判 SCAM；Meta 不可用就不踢、只記錄。
+  const review = await metaReview(text);
+  const kick = score >= strongScore && verdict === "SCAM" && review.verdict === "SCAM";
+  return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
 }
 
 // ── 小助手 ───────────────────────────────────────────────────
@@ -593,7 +614,11 @@ async function handle(ws, message) {
   // 冒名不看內容：連貼圖、圖片也算，先處理。
   const victim = impersonated(message);
   if (victim) {
-    remove(ws, message, { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: (text || `［${message.contentType}］`).slice(0, 500), verdict: "IMPERSONATION", names: [`冒用「${victim}」`] });
+    const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: (text || `［${message.contentType}］`).slice(0, 500), verdict: "IMPERSONATION", names: [`冒用「${victim}」`] };
+    // 冒名也要 Meta 覆核確認才踢；不可用或不確定就只記錄。
+    const review = await metaReview(text || `［${message.contentType}］`, `發言者暱稱「${message.senderName}」和管理員「${victim}」幾乎一樣，但不是同一人（疑似冒名）。冒名加上任何引流、要求私聊、轉帳就是 SCAM。`);
+    if (review.verdict === "SCAM") remove(ws, message, { ...entry, review: review.verdict, reviewModel: review.model });
+    else record({ action: "impersonation-flag", ...entry, text: undefined, preview: entry.text.slice(0, 30), review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
     return;
   }
   const trusted = message.senderRole || whitelist.has(message.senderId);
@@ -610,7 +635,8 @@ async function handle(ws, message) {
       return;
     }
     // 正常訊息只記開頭 30 字與長度（不記完整內容）；被踢的詐騙訊息才保留證據文字。
-    if (result.verdict !== "SKIP") record({ action: "none", ...entry, text: undefined, preview: text.slice(0, 30), textChars: text.length });
+    // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
+    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry, text: undefined, preview: text.slice(0, 30), textChars: text.length });
     if (result.verdict !== "SKIP" && result.verdict !== "MODEL_UNAVAILABLE") {
       if (lastVerdict.size > 2000) lastVerdict.clear();
       lastVerdict.set(message.messageId, result.verdict);
@@ -661,7 +687,11 @@ async function checkImage(ws, message) {
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, text: `［圖片 QR code］${content.slice(0, 480)}` };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
   if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
-  if (isLineInvite(content)) return remove(ws, message, { ...entry, verdict: "QR_LINE_INVITE", names: ["LINE 邀請／加好友 QR code"] });
+  if (isLineInvite(content)) {
+    const review = await metaReview(`［圖片中的 LINE 邀請／加好友 QR code］${content}`);
+    if (review.verdict === "SCAM") return remove(ws, message, { ...entry, verdict: "QR_LINE_INVITE", names: ["LINE 邀請／加好友 QR code"], review: review.verdict, reviewModel: review.model });
+    return record({ action: "qr-flag", ...entry, verdict: "QR_LINE_INVITE", review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
+  }
   const result = await decide(message, `圖片中的 QR code 內容：${content}`);
   if (result.kick) return remove(ws, message, { ...entry, ...result });
   record({ action: "none", ...entry, ...result });
@@ -678,7 +708,7 @@ async function visionReview(image) {
   const reviewer = vision.reviewLlm;
   if (!reviewer) return { verdict: undefined, model: "none", complete: false };
   const used = {};
-  const answer = await complete({ ...reviewer, fallback: undefined }, `${VISION_SYSTEM}\n只有圖片中明確出現詐騙引流（加 LINE、帶單、保證獲利、博弈、借貸、假客服）的證據才判 SCAM；只是出現產品或模型名稱一律 OK。`, "請複核這張圖片。", 80, image, used);
+  const answer = await complete(reviewer, `${VISION_SYSTEM}\n只有圖片中明確出現詐騙引流（加 LINE、帶單、保證獲利、博弈、借貸、假客服）的證據才判 SCAM；只是出現產品或模型名稱一律 OK。`, "請複核這張圖片。", 80, image, used);
   const lines = String(answer ?? "").trim().split(/\n+/);
   const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
   const reason = lines.slice(1).join(" ").trim().replace(/[。.]$/, "");
