@@ -14,6 +14,16 @@
  * `image`（選用）：{ mime, base64 }，給看得懂圖片的模型。
  */
 export async function complete(llm, system, user, maxTokens, image) {
+  const answer = await completeOne(llm, system, user, maxTokens, image);
+  // 備援：主模型連不上、沒金鑰或答非所問時，改問 llm.fallback（例如主機上的 llama-server）。
+  if (answer === undefined && llm.fallback) {
+    console.error(`主模型無法使用，改用備援模型（${llm.fallback.model ?? llm.fallback.backend ?? "local"}）`);
+    return completeOne(llm.fallback, system, user, maxTokens, image);
+  }
+  return answer;
+}
+
+async function completeOne(llm, system, user, maxTokens, image) {
   try {
     const answer = (llm.backend ?? "local") === "openai"
       ? await openai(llm, system, user, maxTokens, image)

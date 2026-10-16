@@ -61,6 +61,10 @@ const qr = { enabled: true, allow: [], ...config.qr };
 // 看圖模型：預設關閉。action 為 "report"（只記錄，選用 alertChatId 通知）或 "remove"（判定詐騙就移除）。
 const vision = { enabled: false, action: "report", maxQueue: 20, maxSide: 768, ...config.vision };
 const chatLlm = { ...scamLlm, ...chat.llm };
+// 通知管理員：踢人（或踢人失敗、看圖判定可疑）後，在「同一個」聊天室發一則訊息並 @ 群主與管理員。
+// 只會發到 notify.chats 列出的聊天室（留空＝不發）；試跑模式只記錄要發的內容，不送出。
+const notify = { enabled: false, chats: [], admins: {}, mentionLearned: true, cooldownSeconds: 30, ...config.notify };
+const notifyChats = new Set(notify.chats ?? []);
 
 // ── 規則：每類命中加分，同一類只算一次 ──────────────────────────
 const RULES = [
@@ -131,8 +135,16 @@ function looksLike(name, protectedName) {
 const protectedMembers = (config.protectedMembers ?? []).map((entry) => ({ name: entry.name, key: normalizeName(entry.name), ids: new Set(entry.ids ?? []) }));
 const learnedAdmins = new Map(); // 正規化名字 → 原名（從帶管理員身分的社群訊息學到）
 
+const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
+
 function learnAdmin(message) {
   if (!message.senderRole) return;
+  if (message.channelId && message.senderId) {
+    if (!chatAdmins.has(message.channelId)) chatAdmins.set(message.channelId, new Map());
+    const admins = chatAdmins.get(message.channelId);
+    if (!admins.has(message.senderId)) record({ action: "admin-seen", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, role: message.senderRole });
+    admins.set(message.senderId, { name: message.senderName, role: message.senderRole });
+  }
   const key = normalizeName(message.senderName);
   if (key.length >= 2 && !learnedAdmins.has(key)) {
     learnedAdmins.set(key, message.senderName);
@@ -299,9 +311,12 @@ let backoff = 1000;
 
 function remove(ws, message, entry) {
   kicked.add(`${message.channelId} ${message.senderId}`);
+  // 先標記：不論之後踢人成功與否，紀錄裡都有這筆詐騙判定。
+  record({ action: "flagged", ...entry });
   if (config.dryRun) {
     console.log(`【試跑，未踢】${message.senderName}：${entry.text.slice(0, 60)}（${entry.verdict}${entry.names?.length ? `，${entry.names.join("、")}` : ""}）`);
     record({ action: "dry-run", ...entry });
+    notifyAdmins(ws, entry, "removed");
     return;
   }
   const requestId = `kick${++requestSeq}`;
@@ -421,12 +436,63 @@ async function checkWithVision(ws, message, picture) {
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
     record({ action: "vision-flag", ...entry });
+    notifyAdmins(ws, entry, "vision");
     if (vision.alertChatId) {
       ws.send(JSON.stringify({ type: "message:send", requestId: `alert${++requestSeq}`, chatId: vision.alertChatId, text: `⚠️ 疑似詐騙圖片（${verdict === "SCAM" ? "模型判定詐騙" : "可疑"}）\n發送者：${message.senderName}\n理由：${reason || "（未說明）"}\n成員 ID：${message.senderId}` }));
     }
     return;
   }
   record({ action: "none", ...entry });
+}
+
+// ── 通知群主與管理員 ─────────────────────────────────────────
+const lastNotified = new Map(); // 聊天室 id → 上次通知時間
+
+function adminsOf(chatId) {
+  const list = new Map();
+  for (const admin of notify.admins?.[chatId] ?? []) if (admin?.id) list.set(admin.id, { name: admin.name ?? "管理員", role: admin.role ?? "coAdmin" });
+  if (notify.mentionLearned) for (const [id, admin] of chatAdmins.get(chatId) ?? []) if (!list.has(id)) list.set(id, admin);
+  // 群主排前面，最多 20 位（伺服器上限）。
+  return [...list].sort((a, b) => (a[1].role === "admin" ? 0 : 1) - (b[1].role === "admin" ? 0 : 1)).slice(0, 20);
+}
+
+function buildNotice(entry, kind, admins) {
+  const reason = (entry.names?.length ? entry.names.join("、") : entry.verdict ?? "").slice(0, 60);
+  const head = kind === "removed"
+    ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群（${reason}）。`
+    : kind === "failed"
+      ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙（${reason}），但本帳號無法移除，請管理員處理。`
+      : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙（${reason}），請管理員確認。`;
+  let text = `${head}\n請大家不要點陌生連結、不要加對方 LINE、不要匯款。`;
+  const mentions = [];
+  if (admins.length > 0) {
+    text += "\n";
+    for (const [id, admin] of admins) {
+      const label = `@${admin.name}`;
+      mentions.push({ userId: id, start: text.length, end: text.length + label.length });
+      text += `${label} `;
+    }
+    text += admins.some(([, a]) => a.role === "admin") ? "請群主與管理員留意" : "請管理員留意";
+  }
+  return { text, mentions };
+}
+
+async function notifyAdmins(ws, entry, kind) {
+  if (!notify.enabled || !entry?.chatId) return;
+  if (!notifyChats.has(entry.chatId)) return record({ action: "notify-skipped", reason: "chat-not-allowed", chatId: entry.chatId });
+  const now = Date.now();
+  if (now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) return record({ action: "notify-skipped", reason: "cooldown", chatId: entry.chatId, senderName: entry.senderName });
+  lastNotified.set(entry.chatId, now);
+  const admins = adminsOf(entry.chatId);
+  const { text, mentions } = buildNotice(entry, kind, admins);
+  if (config.dryRun) {
+    console.log(`【試跑，未發通知】${text.replace(/\n/g, " ")}`);
+    return record({ action: "notify-dry-run", kind, chatId: entry.chatId, text, mentions: mentions.map((m) => m.userId) });
+  }
+  let reply = await call(ws, { type: "message:send", chatId: entry.chatId, text, ...(mentions.length ? { mentions } : {}) });
+  // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
+  if (reply.type === "error" && mentions.length) reply = await call(ws, { type: "message:send", chatId: entry.chatId, text });
+  record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, code: reply.code, mentions: mentions.map((m) => m.userId) });
 }
 
 async function drain(ws) {
@@ -485,6 +551,7 @@ function connect() {
         pending.delete(frame.requestId);
         console.log(`已移除 ${entry?.senderName ?? frame.memberId}${frame.messageDeleted ? "，並刪除訊息" : ""}：${entry?.text.slice(0, 60) ?? ""}`);
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
+        if (entry) notifyAdmins(ws, entry, "removed");
         return;
       }
       case "sent":
@@ -497,6 +564,7 @@ function connect() {
         kicked.delete(`${entry.chatId} ${entry.senderId}`);
         console.error(`移除 ${entry.senderName} 失敗：${frame.message}（${frame.code}）`);
         record({ action: "failed", code: frame.code, ...entry });
+        notifyAdmins(ws, entry, "failed");
       }
     }
   });
