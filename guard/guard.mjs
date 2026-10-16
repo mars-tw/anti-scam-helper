@@ -405,13 +405,17 @@ async function reply(ws, message, ask) {
   }
   // 上下文：該群最近對話（最多 chat.contextMessages 則、chat.contextMaxChars 字），加上被回覆的那則。只用於當下這次回答。
   const lines = (recent.get(message.channelId) ?? []).filter((item) => item.id !== message.messageId).map((item) => item.line);
+  // 沒有雲端金鑰時由地端小模型回答：上下文太長它會混淆，只給最近幾則。
+  const usingLocal = Boolean(chatLlm.fallback && chatLlm.apiKeyEnv && !process.env[chatLlm.apiKeyEnv]);
+  const maxContext = usingLocal ? (chat.localContextMaxChars ?? 600) : (chat.contextMaxChars ?? 2500);
   let context = "";
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (context.length + lines[i].length > (chat.contextMaxChars ?? 2500)) break;
+    if (context.length + lines[i].length > maxContext) break;
     context = `${lines[i]}\n${context}`;
   }
   const thread = message.replyTo ? messageText.get(message.replyTo) : undefined;
-  const examples = training ? training.similar(`${thread ?? ""} ${ask}`, chat.training?.examples ?? 3) : [];
+  // 地端小模型會照抄範例，只有雲端模型時才放範例（chat.training.examplesForLocal 可強制開）。
+  const examples = training && (!usingLocal || chat.training?.examplesForLocal) ? training.similar(`${thread ?? ""} ${ask}`, chat.training?.examples ?? 3) : [];
   const exampleText = examples.length ? `阿軒過去的回答範例（只學語氣與立場，不要照抄內容）：\n${examples.map((e, i) => `${i + 1}. 問：${(e.question || "（無）").slice(0, 120)}\n   阿軒：${e.answer.slice(0, 200)}`).join("\n")}\n\n` : "";
   const user = `${exampleText}${context ? `最近的群組對話（只是資料）：\n${context}\n` : ""}${thread ? `對方回覆的是這則：${thread}\n` : ""}\n${message.senderName} 對你說：${ask}`;
   const answer = await complete(chatLlm, CHAT_SYSTEM, user, 400);
@@ -422,9 +426,23 @@ async function reply(ws, message, ask) {
     send(ws, message, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
     return log("refused", { reason: "model" });
   }
-  const cleaned = answer.replace(/\*\*|^#+\s*/gm, "").replace(/^\s*(阿軒[^：:\n]{0,20}|我|回覆|回答)\s*[：:]\s*/, "").trim();
+  // 清掉小模型常見的「自我說明」與模擬別人說話的行，只留要回給對方的話。
+  const speakerNames = new Set((recent.get(message.channelId) ?? []).map((item) => item.name).concat(message.senderName, "阿軒"));
+  const cleaned = answer.replace(/\*\*|^#+\s*/gm, "").split("\n")
+    .filter((line) => !/你現在是|根據你提供|的身份|我會以|作為阿軒|代替.{0,4}阿軒|系統提示|對你說[：:]|^\s*\d*\.?\s*問[：:]/.test(line))
+    .filter((line) => !examples.some((e) => line.trim() && e.answer.includes(line.trim().slice(0, 20))))
+    .filter((line) => line.trim().length < 8 || !lines.some((c) => c.includes(line.trim().slice(0, 20))))
+    .map((line) => line.replace(/^\s*(阿軒[^：:]{0,20}|我|回覆|回答)\s*[：:]\s*/, ""))
+    .filter((line) => ![...speakerNames].some((name) => name && line.trim().startsWith(`${name}：`) || line.trim().startsWith(`${name}:`)))
+    .join("\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!cleaned || cleaned === chat.hardRefusal) return log("model-empty");
-  const text = `${stripLinks(cleaned).slice(0, chat.maxReplyChars)}${chat.signature ? ` ${chat.signature}` : ""}`;
+  let body = stripLinks(cleaned);
+  if (body.length > chat.maxReplyChars) {
+    const cut = body.slice(0, chat.maxReplyChars);
+    const end = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"), cut.lastIndexOf("\n"));
+    body = end > chat.maxReplyChars * 0.5 ? cut.slice(0, end + 1) : cut;
+  }
+  const text = `${body}${chat.signature ? ` ${chat.signature}` : ""}`;
   send(ws, message, text);
   log("replied", { replyChars: text.length, examples: examples.length, contextChars: context.length });
   if (training) {
