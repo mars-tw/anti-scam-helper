@@ -673,6 +673,12 @@ async function handle(ws, message) {
     // 正常訊息只記開頭 30 字與長度（不記完整內容）；被踢的詐騙訊息才保留證據文字。
     // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
     if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry, text: undefined, preview: text.slice(0, 30), textChars: text.length });
+    // 沒到踢人門檻，但規則 ≥ notifyScore（預設 3）且 Meta 覆核判 SCAM：只通知該群群主與管理員確認，不踢。
+    if (result.review === "SCAM" && result.score >= (config.notifyScore ?? 3)) {
+      record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
+      notifyAdmins(ws, entry, "suspect");
+      return;
+    }
     if (result.verdict !== "SKIP" && result.verdict !== "MODEL_UNAVAILABLE") {
       if (lastVerdict.size > 2000) lastVerdict.clear();
       lastVerdict.set(message.messageId, result.verdict);
@@ -828,6 +834,8 @@ function buildNotice(entry, kind, admins) {
     ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群${reason}。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
+      : kind === "suspect"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」的訊息疑似詐騙${reason}，請管理員確認。`
       : kind === "qr"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的截圖含外部 LINE 群組／好友 QR code，疑似引流，請管理員確認。`
         : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙${reason}，請管理員確認。`;
