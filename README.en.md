@@ -1,6 +1,8 @@
 [繁體中文](README.md) ｜ **English** ｜ [日本語](README.ja.md)
 
-# LINE.js
+# 反詐小幫手 (Anti-Scam Helper)
+
+An anti-scam bot for LINE groups and OpenChat, built on LINE.js.
 
 A local TypeScript LINE web client that connects to LINE using the pinned [@evex/linejs v3.4.2](https://github.com/evex-dev/linejs/tree/v3.4.2), synchronizes channels and messages over WebSocket, and serves the web interface over HTTP on the same port.
 

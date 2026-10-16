@@ -1,6 +1,8 @@
 **繁體中文** ｜ [English](README.en.md) ｜ [日本語](README.ja.md)
 
-# LINE.js
+# 反詐小幫手
+
+LINE 群組與社群的反詐騙機器人，以 LINE.js 為基礎修改。
 
 > **本版本為修改版（fork）**，由 **TW_MARS（阿軒割割）** 修改自 [JS-PACKAGE/LINE.js](https://github.com/JS-PACKAGE/LINE.js)（Apache-2.0），新增 LINE 群組／社群的**反詐守衛與小助手**。原作者不為本修改版負責。
 >

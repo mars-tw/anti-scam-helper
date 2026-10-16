@@ -1,6 +1,8 @@
 [繁體中文](README.md) ｜ [English](README.en.md) ｜ **日本語**
 
-# LINE.js
+# 反詐小幫手（詐欺対策ヘルパー）
+
+LINE.js をもとに改変した、LINE グループとオープンチャット向けの詐欺対策ボットです。
 
 ローカルで動作する TypeScript 製 LINE Web クライアントです。バージョンを固定した [@evex/linejs v3.4.2](https://github.com/evex-dev/linejs/tree/v3.4.2) で LINE に接続し、WebSocket でチャンネルとメッセージを同期し、同じポートの HTTP で Web ページを配信します。
 
