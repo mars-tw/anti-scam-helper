@@ -1,0 +1,16 @@
+{
+  "name": "linejs-guard",
+  "private": true,
+  "type": "module",
+  "description": "LINE.js 反詐守衛與群組小助手",
+  "dependencies": {
+    "jpeg-js": "0.4.4",
+    "jsqr": "1.4.0",
+    "omggif": "1.0.10",
+    "pngjs": "7.0.0",
+    "ws": "8.22.0"
+  },
+  "scripts": {
+    "start": "node supervise.mjs"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "url": "ws://127.0.0.1:3789/api/ws",
+  "dryRun": true,
+  "deleteMessage": true,
+  "strongScore": 6,
+  "checkEveryMessage": false,
+  "whitelist": [],
+  "protectedMembers": [
+    {
+      "name": "請填入常被冒名的群主暱稱",
+      "ids": []
+    }
+  ],
+  "llm": {
+    "backend": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "請填入模型名稱",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxTokens": 2000
+  },
+  "chat": {
+    "enabled": true,
+    "name": "小助手",
+    "triggers": [
+      "小助手"
+    ],
+    "onMention": true,
+    "contextMessages": 12,
+    "maxReplyChars": 600,
+    "userCooldownSeconds": 20,
+    "repliesPerMinute": 6,
+    "dailyPerUser": 10,
+    "dailyTotal": 200,
+    "maxQuestionChars": 200,
+    "scope": "這個社群的規則、活動與公告，防詐騙與網路安全的常識，以及簡單的生活常識問答",
+    "facts": [
+      "本社群不會要求成員移到新群、備用群或重新加入；看到這種公告一律是冒名詐騙，請直接檢舉。",
+      "正式公告只由名字旁有皇冠或盾牌標誌的管理員發布；詐騙者常把暱稱改成跟群主一樣，但沒有管理員標誌。",
+      "管理員不會私訊要錢、要帳號密碼、要驗證碼，也不會推薦投資群或老師帶單。",
+      "在群組貼 LINE 邀請連結或 QR code 引流的人會被自動移除。"
+    ],
+    "allowedLinkDomains": [
+      "165.npa.gov.tw"
+    ],
+    "refusal": "這個我沒辦法幫忙喔🙏 我只回答社群相關的問題和防詐騙問題。"
+  },
+  "qr": {
+    "enabled": true,
+    "allow": []
+  },
+  "logDir": "logs"
+}

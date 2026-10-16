@@ -8,3 +8,9 @@ session.json.*
 api-token.json
 api-token.json.*
 linejs.pid
+
+# 反詐守衛的個人設定、Token 與紀錄
+guard/guard.config.json
+guard/token.txt
+guard/logs/
+guard/node_modules/

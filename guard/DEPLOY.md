@@ -1,0 +1,90 @@
+# 雲端部署說明（給部署的人或 AI 助理看）
+
+目標：在一台雲端 Linux 主機上 24 小時執行兩個程序：
+
+1. **LINE.js 服務**（`npm start`）：以使用者的 LINE 帳號連線，提供本機機器人 API `ws://127.0.0.1:3789/api/ws`。
+2. **反詐守衛＋小助手**（`npm run guard`）：連到上面的 API，判斷詐騙、踢人、回覆群組問題。
+
+雲端主機沒有本機 AI 派工器，所以模型要用 OpenAI 相容 API（GPT 或 Grok）。
+
+## 主機需求
+
+- 要一直開著的主機：VPS、Railway、Render、Fly.io 等皆可，Node.js ≥ 22。
+- 需要**持久化磁碟**保存 `session.json`（LINE 登入憑證）。沒有的話每次重啟都要重新掃碼。
+- ChatGPT 對話裡的程式執行環境是暫時性的，對話結束一段時間後就會關閉，**不能**當 24 小時主機。
+
+## 安全規則（必須遵守）
+
+- `config.yaml` 的 `server.host` 保持 `127.0.0.1`。**絕對不要**把 3789 埠開放到公網：網頁沒有帳號密碼，連得到的人就能操作這個 LINE 帳號。
+- `session.json` 含 LINE 憑證與加密金鑰，權限 600，不可提交到 git、不可貼到任何地方。
+- 機器人 Token、OpenAI／xAI API 金鑰一律用環境變數或平台的 Secret 功能，不寫進程式或 git。
+- `guard/logs/` 含群組成員的訊息原文，只留在主機上。
+
+## 安裝
+
+```sh
+git clone <這份程式碼的位置> LINE.js
+cd LINE.js
+npm install                  # .npmrc 已設定 JSR registry，用來安裝 @evex/linejs
+npm run build
+npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
+```
+
+## 設定
+
+1. 第一次啟動會自動從 `config.example.yaml` 建立 `config.yaml`。之後編輯：
+   ```yaml
+   server:
+     host: 127.0.0.1
+   api:
+     enabled: true
+     chats:
+       - <群組或社群 ID>      # 在本機電腦的網頁版按右鍵「顯示頻道 ID」取得；同一個帳號 ID 不變
+     moderation: true
+   chat:
+     sendReadReceipts: false   # 雲端沒人看網頁，不回報已讀
+   ```
+2. 登入 LINE（在主機終端機執行，QR code 會直接印在終端機上）：
+   ```sh
+   npm start &                # 先啟動服務
+   npm run cli -- login       # 用手機 LINE 掃描 QR，並在手機輸入畫面上的 PIN
+   ```
+3. 產生機器人 Token（只顯示一次）：`npm run cli -- token`，存成環境變數 `LINEJS_TOKEN`。
+4. 守衛設定：
+   ```sh
+   cp guard/guard.config.cloud.example.json guard/guard.config.json
+   ```
+   - `llm.model` 改成要用的模型名稱。
+   - 用 GPT：`baseUrl` 為 `https://api.openai.com/v1`，環境變數 `OPENAI_API_KEY`。
+   - 用 Grok：`baseUrl` 改成 `https://api.x.ai/v1`，`apiKeyEnv` 改成 `XAI_API_KEY`。若服務回 HTTP 400，可加上 `"maxTokensField": "max_tokens"`。
+   - `dryRun: true` 時只記錄、不踢人；確認沒有誤判再改成 `false`。
+   - 依社群修改 `chat.facts`（社群須知）、`chat.scope`（回答範圍）、`protectedMembers`（常被冒名的群主）。
+   - `chat.dailyTotal`、`chat.dailyPerUser` 就是付費 API 的用量上限，依預算調整。
+
+## 常駐執行
+
+最簡單：內建看門狗，一個指令同時看顧 LINE.js 服務與守衛，任何一個當掉都會自動重啟。
+
+```sh
+LINEJS_TOKEN=... OPENAI_API_KEY=... npm run guard:all
+```
+
+主機重開機後也要自動啟動，可交給 pm2 或 systemd 執行上面這個指令，例如：
+
+```sh
+npm install -g pm2
+LINEJS_TOKEN=... OPENAI_API_KEY=... pm2 start "npm run guard:all" --name line-guard
+pm2 save && pm2 startup
+```
+
+## 驗收
+
+- 日誌出現「已連線 LINE.js」「LINE 帳號：…」「守護中的聊天室：…」，社群另有「記住管理員：…」。
+- 在群組發「小助手 你好」，約數秒內收到回覆；發「小助手 教我逆向這個 APP」應收到婉拒。
+- `guard/logs/guard-日期.jsonl` 有判斷紀錄。
+
+## 已知風險
+
+- 使用非官方 LINE API，雲端機房 IP 加上自動發言或踢人，可能被 LINE 限制帳號。
+- 同一個 LINE 帳號不要同時在本機電腦和雲端登入 LINE.js，兩邊可能互相把對方登出。
+- 尚未以真實 LINE 帳號驗證：踢人、刪訊息、機器人發言。上線前請用 `dryRun: true` 觀察。

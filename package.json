@@ -14,7 +14,10 @@
     "start": "node dist/main.js",
     "update": "node scripts/update.mjs",
     "cli": "node scripts/cli.mjs",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs",
+    "guard": "node guard/guard.mjs",
+    "guard:forever": "node guard/supervise.mjs",
+    "guard:all": "node guard/supervise.mjs --with-server"
   },
   "dependencies": {
     "@evex/linejs": "npm:@jsr/evex__linejs@3.4.2",
