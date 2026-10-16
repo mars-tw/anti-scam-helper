@@ -13,6 +13,7 @@ import { chatEventMids, chatEventText, isChatEvent } from "./chatEvent.js";
 import { contentTypeName, messageCard } from "./cards.js";
 import { isEmptySquareStatus, squareReactions, talkReactions } from "./reactions.js";
 import { SessionStorage } from "./session.js";
+import { LivenessMonitor, type LivenessOptions, type StaleReason } from "./liveness.js";
 
 export interface QRCallbacks {
   onQRUrl: (url: string) => void;
@@ -35,6 +36,11 @@ export interface ProviderEvents {
   onReactions: (chatId: string, messageId: string, reactions: Reactions | undefined) => void;
   onStatus: (state: "listening" | "reconnecting") => void;
   onError: (code: "SESSION_WRITE_FAILED" | "LINE_LISTEN_FAILED" | "MESSAGE_PARSE_FAILED") => void;
+  /**
+   * The LINE connection is dead although nothing errored (typically after the host was suspended).
+   * The provider does not recover by itself: the owner restarts the process (see main.ts).
+   */
+  onStale?: (reason: StaleReason, detail: { silentMs: number; jumpMs?: number }) => void;
 }
 
 export interface LogoutResult {
@@ -168,6 +174,7 @@ export class EvexLineProvider implements LineProvider {
   // messages seen here, so the browser cannot use this session to probe arbitrary LINE objects.
   private mediaOrigins = new Map<string, { raw: LineMessage; square: boolean }>();
   private previewDecrypts = new Map<string, { raw: LineMessage; undecryptable: boolean }>();
+  private liveness?: LivenessMonitor;
 
   constructor(
     private readonly storage: SessionStorage,
@@ -175,6 +182,7 @@ export class EvexLineProvider implements LineProvider {
     private readonly events: ProviderEvents,
     private readonly fetch?: FetchLike,
     private readonly downloadMaxBytes = DEFAULT_DOWNLOAD_BYTES,
+    private readonly livenessOptions: Omit<LivenessOptions, "onStale"> = {},
   ) {}
 
   private createBase(): BaseClient {
@@ -189,6 +197,14 @@ export class EvexLineProvider implements LineProvider {
       });
     });
     base.on("log", ({ type }) => {
+      // Any inbound bytes on the PUSH stream (LINE pings it every ~30 s) prove the connection is alive.
+      if (typeof type === "string" && type.startsWith("[LEGY/PUSH] readByte")) {
+        if (this.base === base && this.liveness) {
+          this.liveness.touch();
+          if (this.liveness.activityCount === 1) console.info("LINE_PUSH_ALIVE（PUSH 連線有心跳）");
+        }
+        return;
+      }
       // Never forward upstream log data: it can contain authentication material.
       if (type !== "LegyPusherError" && type !== "LegyPusherError_cannot_init") return;
       setImmediate(() => {
@@ -306,7 +322,18 @@ export class EvexLineProvider implements LineProvider {
         }
       }
     });
+    this.startLiveness();
     this.listen();
+  }
+
+  private startLiveness(): void {
+    if (!this.events.onStale) return;
+    this.liveness?.stop();
+    this.liveness = new LivenessMonitor({
+      ...this.livenessOptions,
+      onStale: (reason, detail) => { if (!this.stopped) this.events.onStale?.(reason, detail); },
+    });
+    this.liveness.start();
   }
 
   /** The message's media is no longer fetchable through us, and the hub replaces what it shows. */
@@ -1203,6 +1230,8 @@ export class EvexLineProvider implements LineProvider {
   }
 
   private async teardown(): Promise<void> {
+    this.liveness?.stop();
+    this.liveness = undefined;
     clearTimeout(this.retry);
     this.retry = undefined;
     this.signal?.abort();
