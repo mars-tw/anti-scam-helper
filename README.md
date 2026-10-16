@@ -2,6 +2,14 @@
 
 # LINE.js
 
+> **本版本為修改版（fork）**，由 **TW_MARS（阿軒割割）** 修改自 [JS-PACKAGE/LINE.js](https://github.com/JS-PACKAGE/LINE.js)（Apache-2.0），新增 LINE 群組／社群的**反詐守衛與小助手**。原作者不為本修改版負責。
+>
+> **修改內容**
+> - 機器人 API 新增 `member:remove`（移除已顯示訊息的寄件者，社群可一併刪除訊息）與 `media:fetch`（取得圖片訊息供讀取 QR code），由 `config.yaml` 的 `api.moderation` 開啟，預設關閉。修改檔案：`src/config.ts`、`src/line/provider.ts`、`src/ws/hub.ts`、`src/ws/protocol.ts`、`src/ws/requests.ts`、`test/config.test.mjs`、`test/hub.test.mjs`、`config.example.yaml`、`AGENTS.md`、`SECURITY.md`、`package.json`、`.gitignore`。
+> - 新增 [`guard/`](guard/README.md)：以規則＋語言模型判斷詐騙訊息、冒名群主、圖片中的 LINE 邀請 QR code 並自動移除；小助手回答成員問題，含防濫用與用量上限。
+>
+> **免責聲明**：本專案使用**非官方** LINE API，與 LINE 公司（LY Corporation）無任何關係，亦未經其認可。使用可能違反 LINE 服務條款，並導致帳號被限制或封鎖；自動移除成員可能誤判。請自行評估風險，使用者自負一切責任。「LINE」為其權利人之商標。
+
 本機 TypeScript LINE 網頁客戶端，以釘選的 [@evex/linejs v3.4.2](https://github.com/evex-dev/linejs/tree/v3.4.2) 連線 LINE，經 WebSocket 同步頻道與訊息、同埠 HTTP 提供網頁。
 
 > 開發狀態：QR 登入／登出、session 復用、頻道清單（好友與聊天分頁、大頭照）、即時與歷史訊息、文字／圖片／影片／貼圖發送（可貼上圖片或影片、可從已擁有的貼圖包選貼圖）、收到的圖片／GIF／影片／語音內嵌顯示、他人已讀、已讀回報與未讀數、社群管理員徽章、訊息內連結、系統訊息（例如「XX 新增 OO 至群組」）、斷線全畫面覆蓋、手機版漢堡選單、機器人 API（`/api/ws`）、終端機介面（CLI）與版本更新通知已可用。Gate 1 以次要帳號掃碼的驗收仍待小語確認。
@@ -393,3 +401,5 @@ npm run update -- --verify      # 更新前額外要求最新 tag 通過 git ver
 工程與安全規範見 [AGENTS.md](AGENTS.md)，定案企劃全文見 [PLAN.md](PLAN.md)。依功能分批提交，不混入個人設定或憑證；不得改寫既有 `LICENSE`、`.nojekyll`。
 
 本作品 **LINE.js** 採 **Apache-2.0**，以根目錄 [LICENSE](LICENSE) 為準。消費套件 **@evex/linejs** 與 **@evex/linejs-types** 採 **MIT**，其授權獨立於本作品，詳見 [上游授權](https://github.com/evex-dev/linejs/blob/v3.4.2/LICENSE)。本倉庫僅供 clone，不發布 npm／JSR 套件。
+
+本修改版的修改部分與 `guard/` 由 TW_MARS（阿軒割割）於 2026 年撰寫，同樣採 **Apache-2.0**。`guard/` 使用的套件：ws、pngjs、omggif（MIT）、jsqr（Apache-2.0）、jpeg-js（BSD-3-Clause），授權各自獨立。
