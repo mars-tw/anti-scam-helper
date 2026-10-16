@@ -5,7 +5,7 @@
 // - 小助手：訊息以觸發詞開頭或 @ 本帳號時，用語言模型回覆；只答範圍內的問題，並有每日上限。
 // 用法：node guard/guard.mjs [設定檔路徑]（預設 guard/guard.config.json）
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
@@ -88,6 +88,10 @@ const questionRedact = {
   message: "（自動提醒）為避免其他人誤加，已先移除含 QR 碼／LINE 資訊的圖片或訊息。下次詢問詐騙時請先把 QR 碼與 LINE ID 碼掉再貼，謝謝！",
   failedMessage: "（自動提醒）你貼的內容含 QR 碼／LINE 資訊，為避免其他人誤加，請先自行收回。下次詢問詐騙時請先把 QR 碼與 LINE ID 碼掉再貼，謝謝！",
   failedAdminsSuffix: "請群主／管理員協助移除含 QR 碼／LINE 資訊的內容",
+  // 再犯：提醒過的人在 warnedTtlDays 天內又貼外部 LINE QR／LINE ID／外部邀請連結（不論有沒有問句）→ 刪除、踢人、通知群主與管理員。
+  // 不經 Meta 覆核；noDeleteChats 的聊天室（本帳號不是管理員）踢不了，改成只通知。已提醒名單存在 warnedFile（預設 logDir/warned-askers.json，600）。
+  kickRepeat: false,
+  warnedTtlDays: 7,
   ...config.questionRedact,
 };
 
@@ -692,7 +696,7 @@ function remove(ws, message, entry) {
   if (config.dryRun) {
     console.log(`【試跑，未踢】${message.senderName}（${[entry.verdict, entry.names?.join("、"), refLabel(entry)].filter(Boolean).join("，")}）`);
     record({ action: "dry-run", ...entry });
-    notifyAdmins(ws, entry, "removed");
+    notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
     return;
   }
   const requestId = `kick${++requestSeq}`;
@@ -733,6 +737,7 @@ async function handle(ws, message) {
     }
     return;
   }
+  if (!trusted && repeatOffense(message) && hasLineInfo(text)) return punishRepeat(ws, message, { ...contentRef(text) });
   if (!trusted) {
     const result = await decide(message, text);
     const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
@@ -806,10 +811,16 @@ async function checkImage(ws, message) {
   // 日誌只記 QR 內容的短雜湊與字數，不記解碼出來的內容。
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE_QR", ...contentRef(content) };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
-  if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
+  if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) {
+    // 自家群 QR：詢問者遮蔽「刪這段時間所有圖片」時也不刪。
+    const item = askerLog.get(`${message.channelId} ${message.senderId}`)?.items.get(message.messageId);
+    if (item) item.safe = true;
+    return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
+  }
   // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
     // 詢問者遮蔽：這張是外部 LINE 邀請 QR。發的人前後有問「是不是詐騙」就刪圖＋提醒，不送覆核、不踢。
+    if (repeatOffense(message)) return punishRepeat(ws, message, { contentType: "IMAGE_QR", ...contentRef(content) });
     if (questionRedact.enabled && !isStaff(message)) {
       noteAsker(message, { kind: "image", risky: true });
       if (await redactIfAsker(ws, message)) return record({ action: "qr-asker", ...entry, verdict: "QR_LINE_INVITE" });
@@ -908,6 +919,41 @@ const noDeleteChats = new Set(questionRedact.noDeleteChats ?? []);
 // 文字裡的外部 LINE 資訊：不在 linkAllow 的 LINE 邀請／加好友連結，或寫出來的 LINE ID。
 const LINE_ID_TEXT = /(line|賴)\s*(id|ＩＤ)?\s*[:：]\s*@?[\w.-]{3,}|(line|賴)\s*(id|ＩＤ)\s*@?[\w.-]{3,}|加\s*(我\s*)?(賴|line)\s*[:：]?\s*@?[a-z0-9][\w.-]{2,}/i;
 
+const warnedFile = resolve(logDir, questionRedact.warnedFile ?? "warned-askers.json");
+const warned = new Map(Object.entries((() => { try { return JSON.parse(readFileSync(warnedFile, "utf8")); } catch { return {}; } })()));
+const warnedTtl = () => questionRedact.warnedTtlDays * 86_400_000;
+function saveWarned() {
+  const now = Date.now();
+  for (const [key, at] of warned) if (now - at >= warnedTtl()) warned.delete(key);
+  try {
+    const temp = `${warnedFile}.tmp`;
+    writeFileSync(temp, JSON.stringify(Object.fromEntries(warned)), { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, warnedFile);
+  } catch (error) { recordError("warned-save", error.message); }
+}
+function markWarned(message) {
+  warned.set(`${message.channelId} ${message.senderId}`, Date.now());
+  saveWarned();
+}
+/** 提醒過（未過期）的一般成員，這則是在提醒之後發的。 */
+function repeatOffense(message) {
+  if (!questionRedact.enabled || !questionRedact.kickRepeat || isStaff(message)) return false;
+  const at = warned.get(`${message.channelId} ${message.senderId}`);
+  if (at === undefined) return false;
+  if (Date.now() - at >= warnedTtl()) { warned.delete(`${message.channelId} ${message.senderId}`); saveWarned(); return false; }
+  return (message.createdAt ?? Date.now()) > at;
+}
+/** 再犯：刪除＋踢人＋通知（不經 Meta）；刪不了／踢不了的聊天室只通知群主與管理員。 */
+function punishRepeat(ws, message, content) {
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...content, verdict: "ASKER_REPEAT", names: ["已提醒仍重複張貼外部 LINE 資訊"], noticeKind: "repeat" };
+  if (noDeleteChats.has(message.channelId)) {
+    record({ action: "repeat-flag", ...entry, reason: "no-permission" });
+    return notifyAdmins(ws, entry, "repeat-failed");
+  }
+  return remove(ws, message, entry);
+}
+
 /** 群主、管理員、白名單、自己：不處理。 */
 function isStaff(message) {
   if (message.senderRole || whitelist.has(message.senderId) || isSelf(message.channelId, message.senderId)) return true;
@@ -951,7 +997,7 @@ async function redactIfAsker(ws, message) {
   const near = (item) => log.questions.some((t) => Math.abs(t - item.at) <= questionRedact.windowSeconds * 1000);
   const items = [...log.items].filter(([, item]) => near(item));
   if (!items.some(([, item]) => item.risky)) return false;
-  const targets = items.filter(([id, item]) => !redactHandled.has(id) && (item.risky || (questionRedact.deleteAllImagesInWindow && item.kind === "image"))).map(([id]) => id);
+  const targets = items.filter(([id, item]) => !redactHandled.has(id) && (item.risky || (questionRedact.deleteAllImagesInWindow && item.kind === "image" && !item.safe))).map(([id]) => id);
   if (targets.length === 0) return true;
   for (const id of targets) redactHandled.add(id);
   if (redactHandled.size > 5000) redactHandled.delete(redactHandled.values().next().value);
@@ -977,6 +1023,7 @@ async function remindAsker(ws, message, failed) {
   const now = Date.now();
   if (now - (lastRedactReminder.get(key) ?? 0) < questionRedact.cooldownSeconds * 1000) return record({ action: "asker-remind-skipped", reason: "cooldown", chatId: message.channelId, senderId: message.senderId });
   lastRedactReminder.set(key, now);
+  if (questionRedact.kickRepeat) markWarned(message);
   const label = `@${message.senderName || "你"}`;
   let text = `${label} `;
   const mentions = [{ userId: message.senderId, start: 0, end: label.length }];
@@ -1031,7 +1078,11 @@ function noticeReason(entry) {
 
 function buildNotice(entry, kind, admins) {
   const reason = noticeReason(entry);
-  const head = kind === "removed"
+  const head = kind === "repeat"
+    ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，已移出社群。`
+    : kind === "repeat-failed"
+      ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，但本帳號無法移除，請群主／管理員處理。`
+    : kind === "removed"
     ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群${reason}。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
@@ -1145,7 +1196,7 @@ function connect() {
         pending.delete(frame.requestId);
         console.log(`已移除 ${entry?.senderName ?? frame.memberId}${frame.messageDeleted ? "，並刪除訊息" : ""}${refLabel(entry) ? `（${refLabel(entry)}）` : ""}`);
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
-        if (entry) notifyAdmins(ws, entry, "removed");
+        if (entry) notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
         return;
       }
       case "sent":
@@ -1159,7 +1210,7 @@ function connect() {
         console.error(`移除 ${entry.senderName} 失敗：${frame.message}（${frame.code}）`);
         recordError("kick", `${entry.senderName}：${frame.code}`);
         record({ action: "failed", code: frame.code, ...entry });
-        notifyAdmins(ws, entry, "failed");
+        notifyAdmins(ws, entry, entry.noticeKind ? `${entry.noticeKind}-failed` : "failed");
       }
     }
   });
