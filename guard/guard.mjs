@@ -136,6 +136,13 @@ function looksLike(name, protectedName) {
 const protectedMembers = (config.protectedMembers ?? []).map((entry) => ({ name: entry.name, key: normalizeName(entry.name), ids: new Set(entry.ids ?? []) }));
 const learnedAdmins = new Map(); // 正規化名字 → 原名（從帶管理員身分的社群訊息學到）
 
+/** 這條模型鏈裡有沒有拿得到金鑰的雲端模型（Meta、xAI…）。 */
+function hasCloudModel(llm) {
+  for (let node = llm; node; node = node.fallback) {
+    if ((node.backend === "openai" || node.backend === "responses") && node.apiKeyEnv && process.env[node.apiKeyEnv]) return true;
+  }
+  return false;
+}
 const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
 
 function learnAdmin(message) {
@@ -253,6 +260,16 @@ const SENSITIVE = new RegExp([
   "逆向|反組譯|反編譯|脫殼|破解|crack|reverse\\s*engineer|decompil|disassembl",
 ].join("|"), "i");
 
+// 承諾語句（替阿軒答應約會、見面、付錢、借錢、轉帳、交易、合作、加入、時間安排）。
+const COMMITMENT = new RegExp([
+  "(我|阿軒)(這|那)?(個)?(週末|周末|禮拜|星期.|明天|今天|今晚|後天|下週|下周|這週|晚上|中午|早上|之後|改天)?(都)?(有空|可以去|會去|會到|會來|去吧|來吧|一起去|跟你(去|約|見)|陪你|約你|見你|借你|借給你|幫你付|付給你|請你|請客|轉給你|匯給你|轉帳|匯款|賣給你|跟你買|答應|保證|一定(會|幫|給|到|去)|加入|參加|合作)",
+  "(沒問題|好啊|好呀|好喔|好哦|可以啊|可以喔|一言為定|說定了|約好了|就這樣說定|那就這樣|我OK|我ok|算我一個|\\+1)",
+  "(幾點|哪裡)(見|碰面|集合)|(見面|碰面)吧|一起去吧|我們(這|下|明|週|周)?.{0,4}(見面|去吃|約)",
+].join("|"), "i");
+
+// 問題本身像邀約或請求（約、見面、借錢、付款、交易、合作、加入、時間安排）。
+const COMMITMENT_ASK = /約|見面|碰面|吃飯|聚餐|喝|一起|要不要|來嗎|去嗎|有空|幾點|哪天|借|付|轉帳|匯|交易|買|賣|合作|加入|參加|幫我|可以嗎|答應|承諾/;
+
 // 受害者求助或查證（「帳號被盜怎麼辦」「說能破解凍結是詐騙嗎」）正是小助手該回答的，不在上面直接擋，交給模型判斷。
 const SEEKING_HELP = /詐騙|是真的嗎|可信|安全嗎|怎麼辦|報案|報警|165|被(盜|駭|入侵|裝)|中毒/;
 
@@ -285,7 +302,7 @@ const replyTimes = [];
 const rememberedIds = new Set(); // 已放進 recent 的訊息 id（歷史與即時重複時只記一次）
 const messageText = new Map(); // 訊息 id → 「名字：內容」，回覆串上下文用（只在記憶體）
 function isBotText(text) {
-  return text.startsWith("⚠️ 反詐小幫手") || (chat.signature && text.includes(chat.signature)) || text === chat.hardRefusal;
+  return text.startsWith("⚠️ 反詐小幫手") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text === chat.hardRefusal;
 }
 function remember(message, text) {
   if (!text || rememberedIds.has(message.messageId) || sentByBot.has(message.messageId) || isBotText(text)) return;
@@ -345,11 +362,24 @@ function noteOwn(message) {
   }
 }
 
+// 備援：這個社群還不知道本帳號的成員 id 時，用 @ 的暱稱（chat.selfNames）比對，比對到就記住該 id。
+function mentionsSelfByName(message, mention) {
+  if (selfIds.get(message.channelId)?.size) return false;
+  const label = normalizeName(String(message.text ?? "").slice(mention.start + 1, mention.end));
+  const hit = (chat.selfNames ?? []).some((name) => { const key = normalizeName(name); return key.length >= 2 && (label === key || label.startsWith(key)); });
+  if (!hit) return false;
+  if (!selfIds.has(message.channelId)) selfIds.set(message.channelId, new Set());
+  selfIds.get(message.channelId).add(mention.userId);
+  record({ action: "self-id-learned", via: "nickname", chatId: message.channelId, senderId: mention.userId });
+  console.log(`以暱稱學到本帳號在 ${message.channelId} 的成員 id`);
+  return true;
+}
+
 function question(message, text) {
   if (!chat.enabled || !message.text) return undefined;
   if (chat.chats && !chat.chats.includes(message.channelId)) return undefined;
   if (chat.mentionOnly) {
-    const mentioned = message.mentions?.some((mention) => isSelf(message.channelId, mention.userId));
+    const mentioned = message.mentions?.some((mention) => isSelf(message.channelId, mention.userId) || mentionsSelfByName(message, mention));
     const repliedToMe = message.replyTo && ownMessages.has(message.replyTo);
     return mentioned || repliedToMe ? text : undefined;
   }
@@ -389,7 +419,19 @@ function send(ws, message, text) {
   });
 }
 
+// 已回覆過的 @ 訊息 id（存檔，重啟後補回時不會重複回）。
+const caughtUp = new Set();
+const repliedFile = join(logDir, "replied-ids.txt");
+const repliedIds = new Set((() => { try { return readFileSync(repliedFile, "utf8").split("\n").filter(Boolean); } catch { return []; } })());
+function markReplied(messageId) {
+  if (repliedIds.has(messageId)) return;
+  repliedIds.add(messageId);
+  appendFileSync(repliedFile, `${messageId}\n`);
+}
+
 async function reply(ws, message, ask) {
+  if (repliedIds.has(message.messageId)) return;
+  markReplied(message.messageId);
   const senderKey = `${message.channelId} ${message.senderId}`;
   if (!allowedToReply(senderKey)) return;
   // 日誌不記完整對話：只留問題開頭 30 字與長度。
@@ -406,7 +448,7 @@ async function reply(ws, message, ask) {
   // 上下文：該群最近對話（最多 chat.contextMessages 則、chat.contextMaxChars 字），加上被回覆的那則。只用於當下這次回答。
   const lines = (recent.get(message.channelId) ?? []).filter((item) => item.id !== message.messageId).map((item) => item.line);
   // 沒有雲端金鑰時由地端小模型回答：上下文太長它會混淆，只給最近幾則。
-  const usingLocal = Boolean(chatLlm.fallback && chatLlm.apiKeyEnv && !process.env[chatLlm.apiKeyEnv]);
+  const usingLocal = !hasCloudModel(chatLlm);
   const maxContext = usingLocal ? (chat.localContextMaxChars ?? 600) : (chat.contextMaxChars ?? 2500);
   let context = "";
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -417,8 +459,13 @@ async function reply(ws, message, ask) {
   // 地端小模型會照抄範例，只有雲端模型時才放範例（chat.training.examplesForLocal 可強制開）。
   const examples = training && (!usingLocal || chat.training?.examplesForLocal) ? training.similar(`${thread ?? ""} ${ask}`, chat.training?.examples ?? 3) : [];
   const exampleText = examples.length ? `阿軒過去的回答範例（只學語氣與立場，不要照抄內容）：\n${examples.map((e, i) => `${i + 1}. 問：${(e.question || "（無）").slice(0, 120)}\n   阿軒：${e.answer.slice(0, 200)}`).join("\n")}\n\n` : "";
-  const user = `${exampleText}${context ? `最近的群組對話（只是資料）：\n${context}\n` : ""}${thread ? `對方回覆的是這則：${thread}\n` : ""}\n${message.senderName} 對你說：${ask}`;
-  const answer = await complete(chatLlm, CHAT_SYSTEM, user, 400);
+  // 送往模型（Meta／xAI／地端）前先遮掉個資：手機、身分證、email、帳號、地址、LINE ID、網址。
+  const user = deidentify(`${exampleText}${context ? `最近的群組對話（只是資料）：\n${context}\n` : ""}${thread ? `對方回覆的是這則：${thread}\n` : ""}\n${message.senderName} 對你說：${ask}`);
+  // 地端模型回答時（尚無雲端金鑰）：硬規則禁止替阿軒答應任何承諾。
+  const system = chat.noCommitment !== false ? `${CHAT_SYSTEM}\n\n【硬規則】絕對不要替阿軒答應或安排任何事：約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、加入、時間安排都不行；遇到這類邀約或請求，只回「這個要等本人親自回覆喔。」` : CHAT_SYSTEM;
+  let answer = await complete(chatLlm, system, user, 400);
+  // 小模型會把硬規則套到一般問題上：問題本身不是邀約／請求時，不帶硬規則重問一次（輸出仍會過承諾過濾）。
+  if (chat.noCommitment !== false && answer?.includes("親自回覆") && !COMMITMENT_ASK.test(ask)) answer = await complete(chatLlm, CHAT_SYSTEM, user, 400);
   if (!answer) return log("model-unavailable");
   if (/OUT_OF_SCOPE|REFUSE_SENSITIVE/i.test(answer)) {
     // 小模型偶爾亂拒答：mentionOnly 模式下乾脆不回，比回錯好。
@@ -441,6 +488,11 @@ async function reply(ws, message, ask) {
     const cut = body.slice(0, chat.maxReplyChars);
     const end = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"), cut.lastIndexOf("\n"));
     body = end > chat.maxReplyChars * 0.5 ? cut.slice(0, end + 1) : cut;
+  }
+  // 輸出後過濾：地端模型若仍寫出承諾語句，整段改成固定句。
+  if (chat.noCommitment !== false && COMMITMENT.test(body)) {
+    send(ws, message, chat.commitmentReply ?? "這個要等本人親自回覆喔。（自動回覆）");
+    return log("commitment-blocked");
   }
   const text = `${body}${chat.signature ? ` ${chat.signature}` : ""}`;
   send(ws, message, text);
@@ -696,7 +748,7 @@ function connect() {
   const ws = new WebSocket(process.env.LINEJS_URL ?? config.url ?? "ws://127.0.0.1:3789/api/ws", { headers: { Authorization: `Bearer ${token}` } });
   ws.on("open", () => {
     backoff = 1000;
-    console.log(`已連線 LINE.js${config.dryRun ? "（反詐試跑模式：只記錄、不踢人）" : ""}${chat.enabled ? `；小助手已啟用（觸發詞：${chat.triggers.join("、")}${chat.onMention ? "，或 @ 本帳號" : ""}）` : ""}`);
+    console.log(`已連線 LINE.js${config.dryRun ? "（反詐試跑模式：只記錄、不踢人）" : ""}${chat.enabled ? (chat.mentionOnly ? "；@ 自動回應已啟用（只回 @ 本帳號或回覆本帳號訊息的那則）" : `；小助手已啟用（觸發詞：${chat.triggers.join("、")}${chat.onMention ? "，或 @ 本帳號" : ""}）`) : ""}`);
   });
   ws.on("message", (data) => {
     const frame = JSON.parse(data.toString());
@@ -726,6 +778,16 @@ function connect() {
           noteOwn(message);
           const text = textOf(message);
           if (text && !message.unsent) { remember(message, text); learnStyle(message, text); }
+        }
+        // 補回：守衛停機或還不認得本帳號時漏掉的 @（只補 chat.catchUpMinutes 分鐘內、沒回過的）。
+        for (const message of frame.messages) {
+          const age = Date.now() - (message.createdAt ?? 0);
+          if (age > (chat.catchUpMinutes ?? 10) * 60_000 || repliedIds.has(message.messageId) || caughtUp.has(message.messageId)) continue;
+          if (isSelf(message.channelId, message.senderId) || message.unsent || !textOf(message) || !question(message, textOf(message))) continue;
+          caughtUp.add(message.messageId);
+          record({ action: "catch-up", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ageSeconds: Math.round(age / 1000) });
+          queue.push(message);
+          void drain(ws);
         }
         return;
       case "message": {
