@@ -23,6 +23,8 @@ LINE 群組與社群的反詐騙機器人，以 LINE.js 為基礎修改。
 
 本作品使用非官方 LINE API，可能造成帳號限制或封鎖。**請先用次要帳號驗證**，不要直接以主帳號測試。
 
+**新手圖文教學**：[群組反詐守門員 新手接線教學（中文／English）](docs/gatekeeper-quickstart.md)
+
 **反詐守衛快速上手**（完整步驟見 [guard/DEPLOY.md](guard/DEPLOY.md)、設定見 [guard/README.md](guard/README.md)）：
 1. Node.js **≥ 22**（`node -v`；系統 node 太舊請另裝 Node 22）、一個 LINE **次要帳號**；要踢社群成員，該帳號須是社群管理員或共同管理員。
 2. `git clone https://github.com/mars-tw/anti-scam-helper.git && cd anti-scam-helper && npm install && npm run build && npm install --prefix guard`。

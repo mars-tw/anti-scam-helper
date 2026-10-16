@@ -14,6 +14,8 @@ The complete goal includes QR login/logout, session reuse, lists of friends/grou
 
 This project uses unofficial LINE APIs and may cause account restrictions or bans. **Verify with a secondary account first**; do not test directly with your main account.
 
+**Step-by-step beginner guide**: [LINE Group Anti-Scam Gatekeeper Quickstart (中文 / English)](docs/gatekeeper-quickstart.md)
+
 **Anti-scam guard quick start** (full steps in [guard/DEPLOY.md](guard/DEPLOY.md); settings in [guard/README.md](guard/README.md)):
 1. Node.js **≥ 22** (`node -v`; if the system `node` is too old, install Node 22 separately) and a **secondary** LINE account. To remove OpenChat members, that account must be an OpenChat administrator or co-administrator.
 2. `git clone https://github.com/mars-tw/anti-scam-helper.git && cd anti-scam-helper && npm install && npm run build && npm install --prefix guard`.
