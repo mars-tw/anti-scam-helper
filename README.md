@@ -6,6 +6,7 @@
 >
 > **修改內容**
 > - 機器人 API 新增 `member:remove`（移除已顯示訊息的寄件者，社群可一併刪除訊息）與 `media:fetch`（取得圖片訊息供讀取 QR code），由 `config.yaml` 的 `api.moderation` 開啟，預設關閉。修改檔案：`src/config.ts`、`src/line/provider.ts`、`src/ws/hub.ts`、`src/ws/protocol.ts`、`src/ws/requests.ts`、`test/config.test.mjs`、`test/hub.test.mjs`、`config.example.yaml`、`AGENTS.md`、`SECURITY.md`、`package.json`、`.gitignore`。
+> - 對外連線可經代理伺服器（`LINEJS_PROXY` 環境變數或 `proxy.txt`），LINE 看到的是代理的 IP。修改檔案：`src/line/proxy.ts`、`src/main.ts`、`test/proxy.test.mjs`、`package.json`、`.gitignore`、`AGENTS.md`、`SECURITY.md`、`README*.md`。
 > - 新增 [`guard/`](guard/README.md)：以規則＋語言模型判斷詐騙訊息、冒名群主、圖片中的 LINE 邀請 QR code 並自動移除；小助手回答成員問題，含防濫用與用量上限。
 >
 > **免責聲明**：本專案使用**非官方** LINE API，與 LINE 公司（LY Corporation）無任何關係，亦未經其認可。使用可能違反 LINE 服務條款，並導致帳號被限制或封鎖；自動移除成員可能誤判。請自行評估風險，使用者自負一切責任。「LINE」為其權利人之商標。
@@ -103,6 +104,7 @@ npm start
 - WS frame：最多 256KB；文字：最多 8000 字。
 - 發送：每 WS 連線最多每秒 5 次；媒體上傳：圖片每檔最多 10MB（PNG／JPEG／GIF）、影片每檔最多 50MB（MP4／MOV，`limits.uploadVideoMaxBytes` 可調，上限 200MB；影片整份暫存於記憶體）、每連線每分鐘最多 5 次。
 - 收到的媒體與檔案：每個最多 50MB（`limits.downloadMaxBytes`），超過者只顯示類型標籤（檔案的下載會失敗）。
+- 對外代理（選用，本修改版加入）：設定環境變數 `LINEJS_PROXY`，或在專案根目錄放 `proxy.txt`（已列入 `.gitignore`），內容可以是網址（`http://帳號:密碼@主機:埠`、`socks5://…`），或代理商常給的一行 `主機:埠:帳號:密碼`。設定後連 LINE 的所有連線（含即時接收用的 HTTP/2）與伺服器其他對外 HTTPS 請求都經代理，啟動時只印出代理的主機與埠，不印帳密；格式錯誤時拒絕啟動，不會默默改成直連。兩者都沒有就直連。
 - 機器人 API：預設關閉；`api.enabled`、`api.chats`（必填、至少一個聊天室 id）、`api.sendsPerMinute`（預設 20、≤120）。細節見[機器人 API](#機器人-apiapiws)。
 - 詐騙訊息分析（選用）：在 `jev.token` 填入 [TypeSafe](https://console.typesafe.ai/keys) 的 API 金鑰並重啟後，網頁對**別人傳來的文字訊息**按右鍵（觸控長按）會出現「詐騙機率分析」，以 TypeSafe 的 Jev 決策模型估計詐騙機率（> 80% 高度疑似、≤ 20% 不太像，中間為無法確定）與最接近的手法。只有點選的那一則文字會送到 `api.typesafe.ai`（伺服器取自己快取的內容，不採用網頁傳來的文字；不送寄件者或聊天室），每次依 TypeSafe 計費、每個網頁連線每分鐘最多 10 次。機器人也可透過[機器人 API](#機器人-apiapiws) 的 `scam:check` 分析 `api.chats` 內的訊息（所有機器人合計每分鐘最多 10 次）。金鑰只留在伺服器，不送網頁、不入日誌；`jev.model` 預設固定 `jev-1.13.0`。結果是模型估計，僅供參考。`token` 留空或省略即停用。
 

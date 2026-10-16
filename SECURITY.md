@@ -132,6 +132,14 @@ approval, and a regression against any of them is treated as a vulnerability.
 | `member:remove` (local addition, off unless `api.moderation: true`) removes the **sender of a message the server has shown** in a group or OpenChat inside `api.chats`; the bot cannot name a member id. It refuses this account's own messages, OpenChat managers (`senderRole`), system messages, rooms and 1:1 chats, and is limited to 10 per minute across all bots. With `deleteMessage: true` it also deletes that message in OpenChat (best effort). Removals are logged as `MEMBER_REMOVED` with chat, member and message ids; failures answer only the generic `REMOVE_FAILED`. | `src/ws/hub.ts`, `src/ws/requests.ts`, `src/line/provider.ts` |
 | `media:fetch` (local addition, same `api.moderation` switch) hands a bot the picture of an **image message the server has shown** in `api.chats` (so it can read QR codes): PNG, JPEG or GIF by content, at most 5 MB, base64 in one frame, 30 per minute across all bots. Videos, files, stickers, avatars and anything taken back are refused. | `src/ws/hub.ts` |
 
+### Outbound proxy (local addition, off by default)
+
+| Rule | Enforcement |
+|---|---|
+| A proxy is used only when `LINEJS_PROXY` is set or `proxy.txt` (git-ignored) exists. A malformed value stops startup (`PROXY_INVALID`) rather than falling back to a direct connection. | `src/line/proxy.ts`, `src/main.ts` |
+| The proxy's credentials go only to the proxy (`Proxy-Authorization` / SOCKS5 login). Startup prints only its scheme, host and port; credentials are never logged or sent to the page or bots. | `src/line/proxy.ts` |
+| LINE traffic stays TLS end to end through the tunnel, but the proxy operator sees which LINE hosts are contacted and when. Use a provider you trust. | — |
+
 ### Scam check (TypeSafe Jev, off by default)
 
 | Rule | Enforcement |

@@ -22,6 +22,7 @@
 - `session.json` 含 LINE 憑證與加密金鑰，權限 600，不可提交到 git、不可貼到任何地方。
 - 機器人 Token、OpenAI／xAI API 金鑰一律用環境變數或平台的 Secret 功能，不寫進程式或 git。
 - `guard/logs/` 含群組成員的訊息原文，只留在主機上。
+- 代理（VPN）帳密檔 `proxy.txt` 不可提交到 git、不可貼到任何地方。
 
 ## 安裝
 
@@ -63,6 +64,19 @@ npm install --prefix guard   # 守衛的套件（QR code 解讀、WebSocket）
    - `dryRun: true` 時只記錄、不踢人；確認沒有誤判再改成 `false`。
    - 依社群修改 `chat.facts`（社群須知）、`chat.scope`（回答範圍）、`protectedMembers`（常被冒名的群主）。
    - `chat.dailyTotal`、`chat.dailyPerUser` 就是付費 API 的用量上限，依預算調整。
+
+## 經代理（VPN）連線 LINE
+
+讓 LINE 看到代理的 IP，而不是雲端機房的 IP。把代理商給的那一行（`主機:埠:帳號:密碼`，或 `http://帳號:密碼@主機:埠`）存成專案根目錄的 `proxy.txt`：
+
+```sh
+chmod 600 proxy.txt        # 只有這台主機有，已列入 .gitignore
+npm start                  # 啟動訊息出現「對外連線經代理：http://主機:埠」即生效
+```
+
+也可以改用環境變數 `LINEJS_PROXY`（優先於 `proxy.txt`）。只有 LINE.js 伺服器的對外連線經代理；守衛連本機伺服器與本機模型（`127.0.0.1`）不經代理。
+
+**登入前就要設好代理**，之後也不要拿掉或更換：同一個登入狀態忽然換 IP 或換國家，LINE 可能要求重新登入或限制帳號。
 
 ## 免費版：在主機上自己跑模型
 
@@ -110,5 +124,6 @@ pm2 save && pm2 startup
 ## 已知風險
 
 - 使用非官方 LINE API，雲端機房 IP 加上自動發言或踢人，可能被 LINE 限制帳號。
+- 使用代理時，帳號平常在台灣使用、卻從國外 IP 登入，也可能觸發 LINE 的異常登入檢查；代理商若更換出口 IP，登入狀態可能失效。
 - 同一個 LINE 帳號不要同時在本機電腦和雲端登入 LINE.js，兩邊可能互相把對方登出。
 - 尚未以真實 LINE 帳號驗證：踢人、刪訊息、機器人發言。上線前請用 `dryRun: true` 觀察。

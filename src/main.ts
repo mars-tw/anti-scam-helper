@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { SessionStorage } from "./line/session.js";
 import { EvexLineProvider } from "./line/provider.js";
+import { describeProxy, loadProxy, useProxy } from "./line/proxy.js";
 import { LoginController } from "./line/login.js";
 import { ApiTokenStore } from "./http/apiToken.js";
 import { JevClient } from "./jev/client.js";
@@ -18,6 +19,9 @@ async function main(): Promise<void> {
   const manifest: { version: string } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const storage = new SessionStorage(resolve("session.json"));
   const store = new ChatStore(config.cache.messagesPerChannel);
+  // Optional: LINE sees the proxy's address instead of this host's (LINEJS_PROXY or proxy.txt).
+  const proxy = await loadProxy(resolve("proxy.txt"));
+  const proxyFetch = proxy ? useProxy(proxy) : undefined;
   const provider = new EvexLineProvider(storage, config.line.device, {
     onMessage: (message, kind) => {
       console.info(`LINE 訊息收到：id=${message.messageId} type=${message.contentType} kind=${kind}`);
@@ -39,7 +43,7 @@ async function main(): Promise<void> {
       console.error(code);
       if (code === "SESSION_WRITE_FAILED") login.fail();
     },
-  }, undefined, config.limits.downloadMaxBytes);
+  }, proxyFetch, config.limits.downloadMaxBytes);
   const login = new LoginController(provider);
   const media = new MediaService(config.cache.mediaMaxBytes, provider);
   const apiTokens = new ApiTokenStore(resolve("api-token.json"));
@@ -80,6 +84,7 @@ async function main(): Promise<void> {
   }
   if (config.api.enabled) console.info(`機器人 API：ws://${config.server.host}:${config.server.port}/api/ws（Token 以 npm run cli -- token 產生）`);
   if (config.jev.token) console.info(`詐騙訊息分析：已啟用（TypeSafe ${config.jev.model}；只在你對訊息按右鍵選擇分析時送出該則文字）`);
+  if (proxy) console.info(`對外連線經代理：${describeProxy(proxy)}`);
   console.info("請使用次要帳號；QR 與 PIN 僅於網頁顯示。");
   void login.restore();
   const updates = config.update.check ? new UpdateChecker({ current: manifest.version, onUpdate: (info) => hub.setUpdate(info) }) : undefined;
