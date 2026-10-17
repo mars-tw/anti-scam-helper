@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideAction, findImpersonated, hasLink, hasScamSignal, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
+import { decideAction, findImpersonated, hasLink, hasScamSignal, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
 import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
@@ -105,4 +105,44 @@ test("Meta 不可用／不確定／OK：不處置", () => {
 test("只有 Meta 判 SCAM（地端沒判）或沒有連結：不刪", () => {
   assert.equal(decideAction({ score: 1, verdict: "UNSURE", review: "SCAM", names: ["網址"], link: true, deleteOnLink: true, canDelete: true }), "none");
   assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["私下聯繫"], link: false, deleteOnLink: true, canDelete: true }), "none");
+});
+
+const ALLOW = ["line.me/ti/g2/owngroup123", "openchat.line.me/cover/owngroup456", "example-own.org/join"];
+
+test("只有自家群／白名單連結：整則視為官方，略過", () => {
+  for (const text of ["新朋友請加入 https://line.me/ti/g2/OwnGroup123?utm=x", "社群入口 openchat.line.me/tw/cover/owngroup456", "報名 https://example-own.org/join/form"]) {
+    const r = sanitizeLinks(text, ALLOW);
+    assert.equal(r.officialOnly, true, text);
+    assert.equal(hasLink(r.text), false, text);
+  }
+});
+
+test("自家群連結＋外部連結：不算官方，外部連結照常判斷", () => {
+  const cases = [
+    "官方群 https://line.me/ti/g2/owngroup123 另外看這個 https://scam-site.xyz/promo",
+    "官方群 line.me/ti/g2/owngroup123 加這個 line.me/ti/g2/OtherGroup999",
+    "入口 openchat.line.me/tw/cover/owngroup456 優惠 bit.ly/3abc",
+    "官方群 https://line.me/ti/g2/owngroup123 外部 shop-deal.xyz/abc",
+  ];
+  for (const text of cases) {
+    const r = sanitizeLinks(text, ALLOW);
+    assert.equal(r.official, true, text);
+    assert.equal(r.officialOnly, false, text);
+    assert.equal(hasLink(r.text), true, text);
+    assert.ok(r.text.includes("［本社群官方連結］"), text);
+  }
+  // 外部連結照常計分；兩個模型都判 SCAM → 管理員群刪除、6 分以上踢人。
+  const mixed = sanitizeLinks("官方群 https://line.me/ti/g2/owngroup123 外部 https://scam-site.xyz/promo", ALLOW).text;
+  const r = score({ senderName: "某人" }, mixed);
+  assert.ok(r.names.includes("網址"));
+  assert.equal(decideAction({ score: r.score, verdict: "SCAM", review: "SCAM", names: r.names, link: hasLink(mixed), deleteOnLink: true, canDelete: true }), "delete");
+  const fake = sanitizeLinks("本群明天要刪除了，請大家加入新群 line.me/ti/g2/OtherGroup999 官方 line.me/ti/g2/owngroup123", ALLOW).text;
+  const k = score({ senderName: "某人" }, fake);
+  assert.equal(decideAction({ score: k.score, verdict: "SCAM", review: "SCAM", names: k.names, link: hasLink(fake), deleteOnLink: true, canDelete: true }), "kick");
+});
+
+test("LINE 官方一般頁面不算外部連結；外部 LINE 邀請算", () => {
+  assert.equal(hasLink(sanitizeLinks("說明 https://help.line.me/line/?contentId=1", ALLOW).text), false);
+  assert.equal(sanitizeLinks("加這個 https://line.me/ti/g2/OtherGroup999", ALLOW).official, false);
+  assert.equal(hasLink(sanitizeLinks("加這個 https://line.me/ti/g2/OtherGroup999", ALLOW).text), true);
 });

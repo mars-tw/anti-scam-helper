@@ -15,7 +15,7 @@ import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
-import { decideAction, findImpersonated, hasLink, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
+import { decideAction, findImpersonated, hasLink, LINE_INVITE_PATH, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
@@ -272,27 +272,14 @@ const strongScore = config.strongScore ?? 6;
 const localScreenAll = config.localScreenAll ?? config.checkEveryMessage ?? false;
 
 // ── 自家社群官方連結白名單與 LINE 官方網域 ──────────────────────
-// linkAllow：自家群的邀請網址（line.me/ti/g2/…、openchat.line.me/…/cover/…）。貼這些連結不計分、不踢、不刪。
+// linkAllow：自家群的邀請網址（line.me/ti/g2/…、openchat.line.me/…/cover/…）。訊息裡「所有」連結都在白名單才略過；混了外部連結照常判斷。
 // LINE 官方網域的一般頁面（不是邀請／加好友連結）也不當成可疑網址。
 const linkAllow = (config.linkAllow ?? []).map((entry) => normalizeUrl(typeof entry === "string" ? entry : entry.url)).filter(Boolean);
-function normalizeUrl(url) {
-  return String(url ?? "").trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").split(/[?#]/)[0].replace(/\/$/, "").replace(/\/(tw|th|jp|en|zh-hant)\/cover\//i, "/cover/").toLowerCase();
-}
-const LINE_URL = /(https?:\/\/)?([\w-]+\.)*(line\.me|lin\.ee)\/[^\s，。）)」』]*/gi;
-const LINE_INVITE_PATH = /^(([\w-]+\.)*line\.me\/(ti\/|r\/ti\/|r\/msg\/)|lin\.ee\/|openchat\.line\.me\/)/i;
-function sanitizeLinks(text) {
-  let official = false;
-  const cleaned = String(text ?? "").replace(LINE_URL, (url) => {
-    const key = normalizeUrl(url);
-    if (linkAllow.some((prefix) => key === prefix || key.startsWith(`${prefix}/`))) { official = true; return "［本社群官方連結］"; }
-    if (!LINE_INVITE_PATH.test(key)) return "［LINE 官方網站］";
-    return url;
-  });
-  return { text: cleaned, official };
-}
+const sanitizeLinks = (text) => sanitizeWith(text, linkAllow);
 
 async function decide(message, rawText) {
-  const { text, official } = sanitizeLinks(rawText);
+  // 只有「所有連結都是白名單／自家群連結」才算官方；混了外部連結就照一般流程判斷（計分、刪除、踢人）。
+  const { text, officialOnly: official } = sanitizeLinks(rawText);
   const { score, names } = ruleScore(message, text);
   if (official && score < strongScore) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: "OFFICIAL_LINK" };
   // 規則 0 分的訊息只在 localScreenAll 開啟時才交給模型（預設不交）；訊息積壓時一律先略過，避免模型拖慢。
@@ -834,7 +821,7 @@ async function checkImage(ws, message) {
   // 日誌只記 QR 內容的短雜湊與字數，不記解碼出來的內容。
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE_QR", ...contentRef(content) };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
-  if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).official) {
+  if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).officialOnly) {
     // 自家群 QR：詢問者遮蔽「刪這段時間所有圖片」時也不刪。
     const item = askerLog.get(`${message.channelId} ${message.senderId}`)?.items.get(message.messageId);
     if (item) item.safe = true;

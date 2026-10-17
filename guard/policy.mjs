@@ -71,3 +71,29 @@ export function findImpersonated({ nameKey, senderId, admins, adminIds = new Set
   }
   return undefined;
 }
+
+// ── 連結白名單 ───────────────────────────────────────────────
+export function normalizeUrl(url) {
+  return String(url ?? "").trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").split(/[?#]/)[0].replace(/\/$/, "").replace(/\/(tw|th|jp|en|zh-hant)\/cover\//i, "/cover/").toLowerCase();
+}
+export const LINE_URL = /(https?:\/\/)?([\w-]+\.)*(line\.me|lin\.ee)\/[^\s，。）)」』]*/gi;
+export const LINE_INVITE_PATH = /^(([\w-]+\.)*line\.me\/(ti\/|r\/ti\/|r\/msg\/)|lin\.ee\/|openchat\.line\.me\/)/i;
+const ANY_URL = /(https?:\/\/)?(?<![\w.@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s，。）)」』]*/gi;
+
+/**
+ * 把白名單（自家群）連結換成［本社群官方連結］、LINE 官方一般頁面換成［LINE 官方網站］，其餘連結原樣保留。
+ * official：至少有一個白名單連結；officialOnly：有白名單連結，而且換掉之後沒有任何其他外部連結。
+ * 只有 officialOnly 才能整則略過；混了外部連結就照一般流程判斷外部連結。
+ */
+export function sanitizeLinks(text, allow = []) {
+  let official = false;
+  const allowed = (url) => { const key = normalizeUrl(url); return allow.some((prefix) => key === prefix || key.startsWith(`${prefix}/`)); };
+  let cleaned = String(text ?? "").replace(LINE_URL, (url) => {
+    if (allowed(url)) { official = true; return "［本社群官方連結］"; }
+    if (!LINE_INVITE_PATH.test(normalizeUrl(url))) return "［LINE 官方網站］";
+    return url;
+  });
+  // 白名單裡也可以放非 LINE 的自家網址。
+  cleaned = cleaned.replace(ANY_URL, (url) => (allowed(url) ? ((official = true), "［本社群官方連結］") : url));
+  return { text: cleaned, official, officialOnly: official && !hasLink(cleaned) };
+}
