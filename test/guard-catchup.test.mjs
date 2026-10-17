@@ -38,3 +38,12 @@ test("水位只往前推並存成 600 權限的檔案", () => {
   assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(new Watermarks(file).get("c1"), 100);
 });
+
+test("主機暫停 1 小時以上：6 小時上限內，水位之後的訊息全部補掃", () => {
+  const messages = [msg("before", 130), msg("gap-early", 110), msg("gap-mid", 70), msg("gap-late", 40), msg("after", 1)];
+  const result = selectCatchUp(messages, { watermark: now - 120 * 60_000, now, maxAgeMs: 360 * 60_000 });
+  assert.deepEqual(result.toScan.map((m) => m.messageId), ["gap-early", "gap-mid", "gap-late", "after"]);
+  // 舊的 30 分鐘上限會漏掉大半。
+  const old = selectCatchUp(messages, { watermark: now - 120 * 60_000, now, maxAgeMs: 30 * 60_000 });
+  assert.deepEqual(old.toScan.map((m) => m.messageId), ["after"]);
+});

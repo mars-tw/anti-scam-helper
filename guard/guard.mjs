@@ -15,6 +15,7 @@ import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
+import { decideAction, findImpersonated, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
@@ -144,7 +145,11 @@ function looksLike(name, protectedName) {
 }
 
 const protectedMembers = (config.protectedMembers ?? []).map((entry) => ({ name: entry.name, key: normalizeName(entry.name), ids: new Set(entry.ids ?? []) }));
-const learnedAdmins = new Map(); // 正規化名字 → 原名（從帶管理員身分的社群訊息學到）
+// 從帶管理員身分的社群訊息學到的管理員，依「社群」分開：社群鍵 → Map(正規化名字 → { name, ids })。
+// 不同社群的成員 id 不同，同名的人在 A 社群是管理員、在 B 社群只是一般成員，這不算冒名（以前全域比對，會把本人當冒名）。
+const learnedAdmins = new Map();
+const channelSquare = new Map(); // 聊天室 id → 社群鍵（頻道名稱「社群 / 聊天室」的前半；不知道時用聊天室 id）
+const squareOf = (chatId) => channelSquare.get(chatId) ?? chatId;
 
 /** 這條模型鏈裡有沒有拿得到金鑰的雲端模型（Meta、xAI…）。 */
 function hasCloudModel(llm) {
@@ -176,10 +181,15 @@ function learnAdmin(message) {
     admins.set(message.senderId, { name: message.senderName, role: message.senderRole });
   }
   const key = normalizeName(message.senderName);
-  if (key.length >= 2 && !learnedAdmins.has(key)) {
-    learnedAdmins.set(key, message.senderName);
+  if (key.length < 2) return;
+  const square = squareOf(message.channelId);
+  if (!learnedAdmins.has(square)) learnedAdmins.set(square, new Map());
+  const names = learnedAdmins.get(square);
+  if (!names.has(key)) {
+    names.set(key, { name: message.senderName, ids: new Set() });
     console.log(`記住管理員：${message.senderName}`);
   }
+  if (message.senderId) names.get(key).ids.add(message.senderId);
 }
 
 /** 回傳被冒用的名字；不是冒名時回 undefined。 */
@@ -193,7 +203,11 @@ function impersonated(message) {
     if (looksLike(name, entry.key)) return entry.name;
   }
   if (message.channelKind === "square") {
-    for (const [key, original] of learnedAdmins) if (looksLike(name, key)) return original;
+    const square = squareOf(message.channelId);
+    // 同一社群裡，這個成員 id 本身就是（任何聊天室的）管理員：不是冒名。
+    const adminIds = new Set();
+    for (const [chatId, admins] of chatAdmins) if (squareOf(chatId) === square) for (const id of admins.keys()) adminIds.add(id);
+    return findImpersonated({ nameKey: name, senderId: message.senderId, admins: learnedAdmins.get(square), adminIds, looksLike });
   }
   return undefined;
 }
@@ -283,6 +297,8 @@ async function decide(message, rawText) {
   if (official && score < strongScore) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: "OFFICIAL_LINK" };
   // 規則 0 分的訊息只在 localScreenAll 開啟時才交給模型（預設不交）；訊息積壓時一律先略過，避免模型拖慢。
   if (score === 0 && (!localScreenAll || queue.length > (config.localBacklog ?? 5))) return { kick: false, score, names, verdict: "SKIP" };
+  // 規則 0 分又沒有連結／LINE ID／金錢字眼的短訊息：地端小模型常把閒聊判成 SCAM，但這種判定本來就不會送覆核，乾脆不問（省 CPU、少雜訊）。
+  if (score === 0 && config.localSkipNoSignal !== false && !shouldScreenLocally({ score, text })) return { kick: false, score, names, verdict: "SKIP" };
   // 第一層：地端模型（正常訊息到此為止，不送雲端）。
   const { verdict, model, ms } = await llmJudge(text);
   if (official) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: `OFFICIAL_LINK_${verdict ?? "UNAVAILABLE"}`, model, modelMs: ms };
@@ -300,12 +316,14 @@ async function decide(message, rawText) {
   if (!suspicious) return { kick: false, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
   // 第二層：Meta 覆核。踢人＝規則分數 ≥ strongScore 且地端判 SCAM 且 Meta 也判 SCAM；Meta 不可用就不踢、只記錄。
   const review = await metaReview(text);
-  const kick = score >= strongScore && verdict === "SCAM" && review.verdict === "SCAM";
+  // 處置：kick＝規則 ≥ strongScore＋地端 SCAM＋Meta SCAM（不放寬）；notice＝Meta SCAM 且（規則 ≥ notifyScore，或地端也 SCAM 且含連結）。
+  const action = decideAction({ score, verdict, review: review.verdict, names, strongScore, notifyScore: config.notifyScore ?? 3 });
+  const kick = action === "kick";
   // Meta 確認詐騙：去識別化後累積到範例庫（只存訊息本身，不存發言者）。
   if (review.verdict === "SCAM" && patterns) {
     try { if (patterns.addConfirmed(scamModelText(text), names.join("、") || "Meta 確認", { score, reviewModel: review.model })) record({ action: "pattern-learned", score }); } catch (error) { recordError("patterns", error.message); }
   }
-  return { kick, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
+  return { kick, action, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
 }
 
 // ── 小助手 ───────────────────────────────────────────────────
@@ -637,7 +655,7 @@ function localDay() {
 }
 function record(entry) {
   const day = localDay();
-  appendFileSync(join(logDir, `guard-${day}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
+  appendFileSync(join(logDir, `guard-${day}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 });
 }
 
 // ── 主流程 ───────────────────────────────────────────────────
@@ -730,8 +748,8 @@ async function handle(ws, message) {
     // 日誌只記訊息的短雜湊與字數，不記文字（被踢的詐騙訊息也一樣）。
     // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
     if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry });
-    // 沒到踢人門檻，但規則 ≥ notifyScore（預設 3）且 Meta 覆核判 SCAM：只通知該群群主與管理員確認，不踢。
-    if (result.review === "SCAM" && result.score >= (config.notifyScore ?? 3)) {
+    // 沒到踢人門檻，但 Meta 判 SCAM 且（規則 ≥ notifyScore，或地端也判 SCAM 且含連結）：引用回覆該則、通知群主與管理員確認，不踢。
+    if (result.action === "notice") {
       record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
       notifyAdmins(ws, entry, "suspect");
       return;
@@ -832,6 +850,8 @@ async function checkImage(ws, message) {
 const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成員貼出的這張圖片是不是詐騙或詐騙引流：
 投資、飆股、虛擬貨幣的獲利截圖或對帳單，老師帶單，加 LINE 或其他群組的廣告，博弈娛樂城，兼職刷單，假中獎，假客服或假公告，借貸廣告。
 一般生活照、風景、食物、寵物、迷因、新聞截圖、一般聊天截圖都算 OK；只是圖裡有數字或文字不代表是詐騙。
+軟體或網站畫面、AI 模型的用量／額度／價格頁、官方服務公告、技術文件、程式碼、終端機、主機設定畫面，都算 OK（這是技術社群的日常分享）。
+只有圖片本身在「引流或要錢」時才算 SCAM：有 QR code、LINE ID、加好友／加群的邀請、網址，或要人投資、匯款、入金、領獎、兼職接案、色情約會。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行用 20 字內寫你在圖中看到的證據。`;
 
 const visionQueue = [];
@@ -870,8 +890,10 @@ async function checkWithVision(ws, message, picture) {
   const usedVision = {};
   const answer = await complete(vision.llm ?? scamLlm, VISION_SYSTEM, "請判斷這張圖片。", vision.llm?.verdictTokens ?? 80, small, usedVision);
   const lines = String(answer ?? "").trim().split(/\n+/);
-  const verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
+  let verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
   const reason = (lines.slice(1).join(" ").trim() || lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60);
+  // 判 SCAM 但理由裡沒有具體的引流／要錢訊號（只是軟體畫面、用量上限、公告…）：不採計，只記成 SCAM_WEAK。
+  if (verdict === "SCAM" && !visionCounts(reason)) verdict = "SCAM_WEAK";
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   if (verdict === "SCAM" || verdict === "UNSURE") {
@@ -1131,8 +1153,9 @@ async function drain(ws) {
 }
 
 // ── 歷史訊息：認識管理員、補回 @、斷線補掃 ─────────────────────────
-// catchUp.scanMinutes：補掃多久以內的訊息（預設 30 分鐘；0＝不補掃）。水位檔只存聊天室 id 與時間。
-const catchUp = { scanMinutes: 30, ...config.catchUp };
+// catchUp.scanMinutes：補掃多久以內的訊息（預設 360 分鐘＝6 小時，主機暫停常超過 30 分鐘；0＝不補掃）。
+// 實際範圍是「上次看到的最新訊息之後」到現在，scanMinutes 只是上限。水位檔只存聊天室 id 與時間。
+const catchUp = { scanMinutes: 360, retryDelaysSeconds: [15, 30, 60], ...config.catchUp };
 const watermarks = new Watermarks(resolve(logDir, catchUp.watermarkFile ?? "scan-watermarks.json"));
 const seenIds = new Set(); // 已進處理佇列的訊息 id（即時與補掃共用，避免同一則判兩次）
 function markSeen(messageId) {
@@ -1141,21 +1164,61 @@ function markSeen(messageId) {
 }
 
 let historyRun = 0;
-/** 一次只抓一個聊天室（伺服器的社群歷史快取只放 5 個，同時抓 8 個會互相擠掉而失敗）。 */
+// 還沒補掃完的聊天室 → 斷線前的水位。只在第一次拍下，補掃成功才清掉：
+// 中途又重連（新的一輪取代舊的一輪）或抓取失敗，都不會因為期間有新訊息把水位往前推而跳過斷線期間的訊息。
+const pendingBase = new Map();
+let lastChannels = [];
+let currentWs;
+/** 一次只抓一個聊天室（伺服器的社群歷史快取只放 5 個，同時抓 8 個會互相擠掉而失敗）；失敗依 retryDelaysSeconds 退避重試。 */
 async function syncHistory(ws, channels) {
   const run = ++historyRun;
-  // 水位先拍下來：抓歷史的這段時間若有新訊息即時進來，水位會被往前推，不能因此跳過斷線期間的訊息。
-  const base = new Map(channels.map((channel) => [channel.channelId, watermarks.get(channel.channelId)]));
+  for (const channel of channels) if (!pendingBase.has(channel.channelId)) pendingBase.set(channel.channelId, watermarks.get(channel.channelId));
   for (const channel of channels) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const delays = catchUp.retryDelaysSeconds ?? [];
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
       if (run !== historyRun || ws.readyState !== WebSocket.OPEN) return;
-      const page = await call(ws, { type: "history:fetch", chatId: channel.channelId, limit: 100 }, 180_000);
-      if (page.type === "history") { processHistory(ws, page, base.get(channel.channelId)); break; }
-      recordError("history", `${page.code ?? "unknown"}${attempt === 0 ? "（稍後重試）" : ""}`);
-      if (attempt === 0) await new Promise((done) => setTimeout(done, 15_000));
+      const page = await fetchGap(ws, channel.channelId, pendingBase.get(channel.channelId));
+      if (page.type === "history") {
+        processHistory(ws, page, pendingBase.get(channel.channelId));
+        pendingBase.delete(channel.channelId);
+        break;
+      }
+      const last = attempt === delays.length;
+      recordError("history", `${page.code ?? "unknown"}${last ? "（放棄，下次重連再補）" : `（${delays[attempt]} 秒後重試）`}`);
+      if (!last) await sleep(delays[attempt] * 1000);
     }
   }
 }
+
+/** 一頁 100 則不夠蓋住斷線期間時，往前翻頁（最多 catchUp.maxPages 頁），直到碰到水位或超過補掃上限。 */
+async function fetchGap(ws, chatId, base) {
+  const oldestWanted = Math.max(base ?? Infinity, Date.now() - catchUp.scanMinutes * 60_000);
+  const messages = [];
+  let before;
+  for (let pageNo = 0; pageNo < (catchUp.maxPages ?? 5); pageNo++) {
+    const page = await call(ws, { type: "history:fetch", chatId, limit: 100, ...(before ? { before } : {}) }, 180_000);
+    if (page.type !== "history") return pageNo === 0 ? page : { type: "history", chatId, messages };
+    messages.push(...page.messages);
+    const oldest = Math.min(...page.messages.map((m) => m.createdAt).filter(Number.isFinite));
+    if (base === undefined || !page.hasMore || !page.cursor || !(oldest > oldestWanted)) break;
+    before = page.cursor;
+  }
+  const unique = new Map(messages.map((m) => [m.messageId, m]));
+  return { type: "history", chatId, messages: [...unique.values()] };
+}
+
+// 主機暫停偵測（守衛這端）：牆上時鐘一次跳很多（> 40 秒），代表剛從暫停醒來；
+// LINE 服務不一定會重啟（推播若自己恢復就不會），所以醒來 75 秒後主動補掃一次。
+let lastTick = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const jump = now - lastTick - 10_000;
+  lastTick = now;
+  if (jump > 40_000) {
+    record({ action: "wake-detected", jumpSeconds: Math.round(jump / 1000) });
+    setTimeout(() => { if (currentWs?.readyState === WebSocket.OPEN && lastChannels.length) void syncHistory(currentWs, lastChannels); }, 75_000).unref?.();
+  }
+}, 10_000).unref?.();
 
 function processHistory(ws, frame, baseWatermark) {
   // 斷線補掃：上次看到的最新訊息之後、catchUp.scanMinutes 分鐘內、還沒處理過的訊息，走一般判斷流程。
@@ -1217,6 +1280,8 @@ function connect() {
         if (frame.state !== "ready") console.log(`LINE 尚未登入（${frame.state}），請先執行 npm run cli -- login 掃碼登入。`);
         return;
       case "channels":
+        for (const channel of frame.channels) channelSquare.set(channel.channelId, squareKey(channel.name) || channel.channelId);
+        if (frame.channels.length) { lastChannels = frame.channels; currentWs = ws; }
         console.log(`守護中的聊天室：${frame.channels.map((channel) => channel.name).join("、") || "（無，請檢查 config.yaml 的 api.chats）"}`);
         // 逐一抓各群最近訊息：認識管理員（冒名者一出現就認得出來）、補回漏掉的 @，並補掃斷線期間的訊息。
         void syncHistory(ws, frame.channels);

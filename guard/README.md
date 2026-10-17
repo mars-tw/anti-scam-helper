@@ -229,3 +229,12 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 ## 授權與免責
 
 Copyright 2026 TW_MARS（阿軒割割）。本資料夾採 Apache-2.0，屬於 [LINE.js](https://github.com/JS-PACKAGE/LINE.js) 的修改版。使用非官方 LINE API，與 LINE 公司無關；可能違反 LINE 服務條款並導致帳號被限制，自動移除可能誤判，使用者自負風險。
+
+## 處置門檻與斷線補掃（2026-10 調整）
+
+- **通知**：Meta 覆核判 SCAM 且規則 ≥ `notifyScore`（預設 3）；或地端與 Meta 都判 SCAM、且訊息含網址／短網址／LINE 邀請（即使規則只有 1 分）。通知以引用回覆該訊息發出。
+- **踢人**不變：規則 ≥ `strongScore`（6）＋地端 SCAM＋Meta SCAM（`kickPolicy: "strict"`）。
+- 規則 0 分、40 字以內、沒有網址／LINE／金錢字眼的閒聊不送地端模型（`localSkipNoSignal: false` 可關掉）。
+- 看圖判 SCAM 但理由沒有具體的引流或要錢訊號（QR、LINE ID、加好友、匯款、帶單…）時，只記成 `VISION_SCAM_WEAK`。
+- 冒名比對以「社群」為單位：只比對同一社群學到的管理員，發言者本身是該社群管理員就不算冒名。
+- 斷線補掃 `catchUp`：`scanMinutes`（預設 360，補「上次看到的最新訊息之後」到現在，這是上限）、`retryDelaysSeconds`（預設 `[15, 30, 60]`）、`maxPages`（預設 5 頁 × 100 則）。一次只抓一個聊天室。守衛偵測到主機暫停醒來（時鐘跳 > 40 秒）時，75 秒後自動補掃一次。
