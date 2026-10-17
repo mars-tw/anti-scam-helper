@@ -733,6 +733,74 @@ async function remove(ws, message, entry) {
   }, notify.beforeActionMs ?? 2000, sleep);
 }
 
+// ── 冒名＋邀請／QR ───────────────────────────────────────────
+// 暱稱冒用「任一受守護社群」的管理員（依 ID 排除：受保護成員、任何群的管理員、本帳號、白名單），
+// 而且同一則（或同一人前後 2 分鐘內）有外部連結（LINE 群組／社群邀請、引流網址）或外部 LINE QR → 確認詐騙：
+// 先引用回覆發通知，再刪這段時間他的訊息；impersonation.kickWithInvite=true 才踢（不受 kickMode 影響）。刪不了的群只通知。
+// 只有冒名、沒有連結／QR：照舊只通知。
+const COMBO_WINDOW_MS = 120_000;
+const comboLog = new Map(); // 聊天室＋發言者 → [{ messageId, at, invite }]
+const comboHandled = new Map(); // 聊天室＋發言者 → 處理時間（10 分鐘內不重複處理）
+function impersonatedAnyCommunity(message) {
+  const id = message.senderId;
+  if (message.senderRole || whitelist.has(id) || id === me || isSelf(message.channelId, id)) return undefined;
+  for (const admins of chatAdmins.values()) if (admins.has(id)) return undefined;
+  for (const names of learnedAdmins.values()) for (const admin of names.values()) if (admin.ids.has(id)) return undefined;
+  const name = normalizeName(message.senderName);
+  if (name.length < 2) return undefined;
+  for (const entry of protectedMembers) if (entry.key && looksLike(name, entry.key)) return entry.name;
+  for (const names of learnedAdmins.values()) for (const [key, admin] of names) if (looksLike(name, key)) return admin.name;
+  return undefined;
+}
+/** 記下冒名者這則（invite：是否含外部連結／QR），湊滿條件就處理。有處理回 true。 */
+async function checkImpersonationInvite(ws, message, { invite }) {
+  const victim = impersonatedAnyCommunity(message);
+  if (!victim) return false;
+  const key = `${message.channelId} ${message.senderId}`;
+  const at = message.createdAt ?? Date.now();
+  const list = (comboLog.get(key) ?? []).filter((item) => Math.abs(at - item.at) <= COMBO_WINDOW_MS && item.messageId !== message.messageId);
+  list.push({ messageId: message.messageId, at, invite });
+  comboLog.set(key, list);
+  if (comboLog.size > 2000) comboLog.delete(comboLog.keys().next().value);
+  const invites = list.filter((item) => item.invite);
+  if (invites.length === 0) return false;
+  if (Date.now() - (comboHandled.get(key) ?? 0) < 600_000) return true;
+  comboHandled.set(key, Date.now());
+  await punishImpersonationInvite(ws, message, victim, invites.at(-1).messageId, list.map((item) => item.messageId));
+  return true;
+}
+async function punishImpersonationInvite(ws, message, victim, replyTo, targets) {
+  const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names: [`冒用「${victim}」`, "外部邀請／引流連結或 QR code"] };
+  const kick = config.impersonation?.kickWithInvite === true;
+  record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick });
+  if (config.dryRun) { record({ action: "dry-run", ...entry }); return; }
+  if (noDeleteChats.has(message.channelId)) {
+    record({ action: "failed", code: "NO_PERMISSION", ...entry });
+    return notifyAdmins(ws, entry, "failed", { force: true });
+  }
+  let deleted = 0;
+  let failed = 0;
+  let kickSent = false;
+  const notified = await notifyThenAct(() => notifyAdmins(ws, entry, kick ? "removed" : "link-delete", { force: true }), async () => {
+    // 踢人時，引用的那則交給踢人請求一起刪（伺服器要靠那則訊息找人）；其餘先刪。
+    for (const messageId of targets) {
+      if (kick && messageId === replyTo) continue;
+      const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId });
+      if (answer.type === "message:deleted") deleted++;
+      else { failed++; recordError("delete", answer.code); }
+    }
+    if (kick) {
+      kicked.add(`${message.channelId} ${message.senderId}`);
+      const requestId = `kick${++requestSeq}`;
+      pending.set(requestId, { ...entry, preNotified: true });
+      ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: replyTo, deleteMessage: true }));
+      kickSent = true;
+    }
+  }, notify.beforeActionMs ?? 2000, sleep);
+  record({ action: "impersonation-invite-handled", chatId: entry.chatId, messageId: replyTo, senderId: entry.senderId, notified, deleted, failed, kickSent });
+  if (failed > 0) await notifyAdmins(ws, entry, kick ? "failed" : "link-delete-failed", { force: true });
+}
+
 // scamLink.deleteOnConfirmed：本帳號是管理員的群（不在 noDeleteChats、在 notify.chats），
 // 地端＋Meta 都判 SCAM 且含外部連結 → 先引用回覆發通知「將刪除」，等 notify.beforeActionMs，再刪這則訊息（不踢人）。
 // 刪不掉就補發「請發文者自行收回或請管理員處理」（不受冷卻限制）。公開版預設關閉。
@@ -768,6 +836,10 @@ async function handle(ws, message) {
     return;
   }
   learnAdmin(message);
+  // 冒名＋外部連結（同一則或前後 2 分鐘內）：確認詐騙。圖片的 QR 在 checkImage 解碼後判斷。
+  if (text && !message.senderRole && !whitelist.has(message.senderId)) {
+    if (await checkImpersonationInvite(ws, message, { invite: hasLink(sanitizeLinks(text).text) })) return;
+  }
   // 冒名不看內容：連貼圖、圖片也算，先處理。
   const victim = impersonated(message);
   if (victim) {
@@ -879,6 +951,7 @@ async function checkImage(ws, message) {
   }
   // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
+    if (await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_LINE_INVITE" });
     // 詢問者遮蔽：這張是外部 LINE 邀請 QR。發的人前後有問「是不是詐騙」就刪圖＋提醒，不送覆核、不踢。
     if (repeatOffense(message)) return punishRepeat(ws, message, { contentType: "IMAGE_QR", ...contentRef(content) });
     if (questionRedact.enabled && !isStaff(message)) {
@@ -909,6 +982,8 @@ async function checkImage(ws, message) {
     return record({ action: "qr-flag", ...flagged });
   }
   // 其他 QR（一般網址、Wi-Fi 等）一律只記錄（網址只記網域、去掉帳密；不是網址就不記內容）。
+  // 冒名者貼外部網址 QR（引流網址）也算「冒名＋引流」。
+  if (/^https?:\/\//i.test(content) && await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_URL" });
   const host = (content.match(/^[a-z]+:\/\/([^/?#\s]+)/i) ?? [])[1]?.replace(/^.*@/, "") ?? "（非網址）";
   record({ action: "none", ...entry, verdict: "QR_OTHER", qrHost: host });
 }

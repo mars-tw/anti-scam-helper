@@ -7,13 +7,14 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import QRCode from "qrcode";
 import { WebSocketServer } from "../guard/node_modules/ws/wrapper.mjs";
 
 const SCAM_TEXT = "通知：本群明天要刪除了，請大家加入新群 https://scam-site.xyz/join 快點";
 const NORMAL_TEXT = "我剛剛醒，睡很久";
 const now = Date.now();
 
-async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer } = {}) {
+async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, media } = {}) {
   const llm = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
@@ -38,6 +39,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
       if (f.type === "history:fetch") socket.send(JSON.stringify({ type: "history", requestId: f.requestId, chatId: f.chatId, messages: history.filter((m) => m.channelId === f.chatId), hasMore: false }));
       else if (f.type === "message:send") socket.send(JSON.stringify({ type: "sent", requestId: f.requestId, messageId: `sent${++seq}` }));
       else if (f.type === "member:remove") socket.send(JSON.stringify({ type: "member:removed", requestId: f.requestId, chatId: f.chatId, messageId: f.messageId, memberId: "x", messageDeleted: true }));
+      else if (f.type === "media:fetch") socket.send(JSON.stringify(media ? { type: "media", requestId: f.requestId, mime: "image/png", data: media } : { type: "error", requestId: f.requestId, code: "NOT_FOUND" }));
       else if (f.type === "message:delete") socket.send(JSON.stringify({ type: "message:deleted", requestId: f.requestId }));
     });
     setTimeout(() => { for (const m of live) socket.send(JSON.stringify({ type: "message", message: { contentType: "NONE", channelKind: "square", createdAt: Date.now(), ...m } })); }, 600);
@@ -163,4 +165,62 @@ test("小助手：一般建議照常回答", async () => {
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 這個連結安全嗎" }], { chatAnswer: "你可以先查證來源，不要匯款給陌生人" });
   assert.equal(r.sends.length, 1);
   assert.ok(r.sends[0].text.startsWith("你可以先查證來源"));
+});
+
+// 冒名＋邀請／QR：冒用（任一社群的）管理員暱稱，又貼外部邀請連結或 QR。
+const ADMIN_HISTORY = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
+const INVITE = "新群在這 https://line.me/ti/g2/ExtGroup999";
+
+test("冒名＋群組邀請連結（別的社群的管理員名）：通知＋刪除，開關關閉不踢", async () => {
+  const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: false } }, [{ messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length, 0);
+  assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
+  assert.ok(r.sends.length >= 1);
+  assert.equal(r.sends[0].replyTo, "m1");
+});
+
+test("冒名＋群組邀請連結：kickWithInvite=true 時踢人（即使 kickMode=notify）", async () => {
+  const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length, 1);
+  assert.equal(r.removes[0].messageId, "m1");
+  assert.ok(r.sends.length >= 1);
+});
+
+test("冒名：前一則閒聊、2 分鐘內再貼連結 → 兩則都刪", async () => {
+  const r = await runGuard({ impersonation: { kickWithInvite: false } }, [
+    { messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", text: "大家好我是管理員" },
+    { messageId: "m2", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE },
+  ], { history: ADMIN_HISTORY });
+  assert.deepEqual(r.deletes.map((f) => f.messageId).sort(), ["m1", "m2"]);
+  assert.equal(r.removes.length, 0);
+});
+
+test("冒名＋外部 LINE QR 圖片：通知＋刪除", async () => {
+  const png = (await QRCode.toBuffer("https://line.me/ti/g2/ExtGroup999", { width: 300 })).toString("base64");
+  const r = await runGuard({ qr: { enabled: true }, impersonation: { kickWithInvite: false } }, [{ messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", contentType: "IMAGE" }], { history: ADMIN_HISTORY, media: png });
+  assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
+  assert.equal(r.removes.length, 0);
+});
+
+test("冒名但沒有連結：只通知（同社群），不刪不踢", async () => {
+  const r = await runGuard({ impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "大家好" }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.equal(r.sends.length, 1);
+});
+
+test("受保護成員（真本人另一個 ID）貼連結：不處置", async () => {
+  const r = await runGuard({ protectedIds: [{ note: "本人", ids: ["pReal"] }], impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cB", senderId: "pReal", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length + r.deletes.length + r.sends.length, 0);
+});
+
+test("真管理員貼 QR：不處置", async () => {
+  const png = (await QRCode.toBuffer("https://line.me/ti/g2/ExtGroup999", { width: 300 })).toString("base64");
+  const r = await runGuard({ qr: { enabled: true }, impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", contentType: "IMAGE" }], { history: ADMIN_HISTORY, media: png });
+  assert.equal(r.removes.length + r.deletes.length + r.sends.length, 0);
+});
+
+test("非管理員的群：冒名＋連結只通知（請管理員處理）", async () => {
+  const r = await runGuard({ impersonation: { kickWithInvite: true }, questionRedact: { noDeleteChats: ["cB"] } }, [{ messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.equal(r.sends.length, 1);
 });

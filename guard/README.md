@@ -242,3 +242,4 @@ Copyright 2026 TW_MARS（阿軒割割）。本資料夾採 Apache-2.0，屬於 [
 - **受保護成員 `protectedIds`**：`[{ "note": "…", "ids": ["<成員 ID>", …] }]`，依成員 ID、所有群適用，永遠不踢、不刪、不提醒、不判冒名（`whitelist` 與 `protectedMembers` 裡登記的 ID 也一樣）。社群成員 ID 每個社群不同，離開再加入會換新 ID，要一併登記。
 - **冒名預設只通知**：暱稱相似＋Meta 判 SCAM 只發通知請管理員確認；`impersonation.kick: true` 才會踢。
 - **`kickMode: "notify"`**：所有踢人改成只通知（不踢、不刪），出事時的暫時安全模式；預設 `"kick"`。
+- **冒名＋邀請／QR**：暱稱冒用任一受守護社群的管理員（依 ID 排除受保護成員、任何群的管理員、本帳號、白名單），而且同一則或同一人前後 2 分鐘內貼外部連結（LINE 群組／社群邀請、引流網址）或外部 QR → 先引用回覆通知，再刪這段時間他的訊息；`impersonation.kickWithInvite: true` 才踢（不受 `kickMode` 影響）。刪不了的群只通知。只有冒名沒有連結：照舊只通知。
