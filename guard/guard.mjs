@@ -15,6 +15,7 @@ import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
+import { DEFAULT_BLOCKED_WORDS, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
 process.on("unhandledRejection", (error) => {
@@ -77,6 +78,8 @@ const chatLlm = { ...scamLlm, ...chat.llm };
 // 只會發到 notify.chats 列出的聊天室（留空＝不發）；試跑模式只記錄要發的內容，不送出。
 const notify = { enabled: false, chats: [], admins: {}, mentionLearned: true, cooldownSeconds: 30, ...config.notify };
 const notifyChats = new Set(notify.chats ?? []);
+// LINE 群組的禁止關鍵字（含禁字的訊息別人看不到）：所有自動發出的訊息送出前先替換。notify.blockedWords 可覆寫。
+const blockedWords = notify.blockedWords ?? DEFAULT_BLOCKED_WORDS;
 // 詢問者遮蔽：有人「問是不是詐騙」，同時（前後 windowSeconds 內）貼了外部 LINE 群／加好友 QR 或 LINE ID／邀請連結，
 // 就把他這段時間含這些資訊的訊息（deleteAllImagesInWindow：連同這段時間他貼的所有圖片）對所有人刪除，並回一則提醒（不踢、不 @管理員）。
 // noDeleteChats：本帳號不是管理員、刪不了的聊天室，改成只提醒並 @群主；刪除失敗也一樣 @群主／管理員。
@@ -518,7 +521,7 @@ function send(ws, message, text) {
     console.log(`【試跑，未回覆】${message.senderName}：${text.replace(/\n/g, " ").slice(0, 120)}`);
     return record({ action: "reply-dry-run", chatId: message.channelId, messageId: message.messageId, replyChars: text.length });
   }
-  void call(ws, { type: "message:send", chatId: message.channelId, text, replyTo: message.messageId }).then((reply) => {
+  void call(ws, { type: "message:send", chatId: message.channelId, text: scrubNotice(text, blockedWords), replyTo: message.messageId }).then((reply) => {
     if (reply.type === "sent" && reply.messageId) { sentWaiting.set(reply.messageId, message.channelId); ownMessages.add(reply.messageId); sentByBot.add(reply.messageId); }
     else record({ action: "reply-failed", chatId: message.channelId, code: reply.code });
   });
@@ -985,7 +988,7 @@ async function remindAsker(ws, message, failed) {
   if (now - (lastRedactReminder.get(key) ?? 0) < questionRedact.cooldownSeconds * 1000) return record({ action: "asker-remind-skipped", reason: "cooldown", chatId: message.channelId, senderId: message.senderId });
   lastRedactReminder.set(key, now);
   if (questionRedact.kickRepeat) markWarned(message);
-  const label = `@${message.senderName || "你"}`;
+  const label = `@${safeName(message.senderName || "你", blockedWords)}`;
   let text = `${label} `;
   const mentions = [{ userId: message.senderId, start: 0, end: label.length }];
   text += failed ? questionRedact.failedMessage : questionRedact.message;
@@ -1007,10 +1010,10 @@ async function remindAsker(ws, message, failed) {
     return record({ action: "asker-remind-dry-run", chatId: message.channelId, senderId: message.senderId, failed, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
   }
   if (!notifyChats.has(message.channelId)) return record({ action: "asker-remind-skipped", reason: "chat-not-allowed", chatId: message.channelId });
-  let answer = await call(ws, { type: "message:send", chatId: message.channelId, text, mentions, replyTo: message.messageId });
-  if (answer.type === "error") answer = await call(ws, { type: "message:send", chatId: message.channelId, text });
+  // 回覆（引用）他貼的那則訊息；刪掉了或伺服器不認得就退成不引用。
+  const { answer, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(text, blockedWords), mentions, replyTo: message.messageId });
   if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
-  record({ action: answer.type === "sent" ? "asker-reminded" : "asker-remind-failed", chatId: message.channelId, senderId: message.senderId, failed, code: answer.code, mentions: mentions.map((m) => m.userId) });
+  record({ action: answer.type === "sent" ? "asker-reminded" : "asker-remind-failed", chatId: message.channelId, senderId: message.senderId, failed, code: answer.code, replied, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
 }
 
 // ── 通知群主與管理員 ─────────────────────────────────────────
@@ -1038,6 +1041,8 @@ function noticeReason(entry) {
 }
 
 function buildNotice(entry, kind, admins) {
+  // 不引用詐騙內容：暱稱去掉網址／ID／禁字，理由只放規則名稱（模型長句不放）。
+  entry = { ...entry, senderName: safeName(entry.senderName, blockedWords) };
   const reason = noticeReason(entry);
   const head = kind === "repeat"
     ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，已移出社群。`
@@ -1063,7 +1068,7 @@ function buildNotice(entry, kind, admins) {
     }
     text += admins.some(([, a]) => a.role === "admin") ? "請群主與管理員留意" : "請管理員留意";
   }
-  return { text, mentions };
+  return { text: scrubNotice(text, blockedWords), mentions };
 }
 
 async function notifyAdmins(ws, entry, kind) {
@@ -1079,10 +1084,11 @@ async function notifyAdmins(ws, entry, kind) {
     console.log(`【試跑，未發通知】${text.replace(/\n/g, " ")}`);
     return record({ action: "notify-dry-run", kind, chatId: entry.chatId, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
   }
-  let reply = await call(ws, { type: "message:send", chatId: entry.chatId, text, ...(mentions.length ? { mentions } : {}) });
+  // 回覆（引用）那則詐騙訊息，大家看得出是哪一則；訊息已刪除或伺服器不認得就退成不引用。
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
-  if (reply.type === "error" && mentions.length) reply = await call(ws, { type: "message:send", chatId: entry.chatId, text });
-  record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, code: reply.code, mentions: mentions.map((m) => m.userId) });
+  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId });
+  if (reply.type === "sent" && reply.messageId) { sentByBot.add(reply.messageId); ownMessages.add(reply.messageId); }
+  record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
 }
 
 async function drain(ws) {

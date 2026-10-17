@@ -9,19 +9,19 @@ test("空格拆字的假換群公告＋短網址：達踢人門檻（≥6），�
   const text = "通知 : 本 群 明 天 要 刪 除了\n請 大 家 加 入 新 群\n謝 謝 配 合！\n\n1url.cz/AbCdE\n\n換   群 了，請 各 位 配 合一 下 謝 謝！";
   const result = score(member, text);
   assert.ok(result.score >= 6, JSON.stringify(result));
-  assert.ok(result.names.includes("假換群公告"));
+  assert.ok(result.names.includes("假群組連結"));
   assert.ok(result.names.includes("短網址"));
 });
 
 test("全形空白與零寬字元也去掉", () => {
   assert.equal(normalizeForRules("換　群\u200b了").compact, "換群了");
-  assert.ok(score(member, "本　群　即　將　解　散，請　大　家　加　入　新　群").names.includes("假換群公告"));
+  assert.ok(score(member, "本　群　即　將　解　散，請　大　家　加　入　新　群").names.includes("假群組連結"));
 });
 
 test("單獨一句「換群了」只到覆核門檻（3），不到踢人分數", () => {
   const result = score(member, "換   群 了，請 各 位 配 合一 下 謝 謝！");
   assert.equal(result.score, 3);
-  assert.deepEqual(result.names, ["換群字眼"]);
+  assert.deepEqual(result.names, ["疑似假群組"]);
 });
 
 test("一般成員暱稱自稱管理員：有其他訊號時加權", () => {
@@ -62,5 +62,5 @@ test("正常聊天與提醒不誤判", () => {
 
 test("既有規則照舊：LINE 邀請、群組搬家", () => {
   assert.ok(score(member, "加我 line: abc123").names.includes("LINE 邀請／加好友"));
-  assert.ok(score(member, "請大家移到新群").names.includes("群組搬家"));
+  assert.ok(score(member, "請大家移到新群").names.includes("假群組公告"));
 });
