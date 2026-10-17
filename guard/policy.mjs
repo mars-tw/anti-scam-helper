@@ -97,3 +97,13 @@ export function sanitizeLinks(text, allow = []) {
   cleaned = cleaned.replace(ANY_URL, (url) => (allowed(url) ? ((official = true), "［本社群官方連結］") : url));
   return { text: cleaned, official, officialOnly: official && !hasLink(cleaned) };
 }
+
+// ── 自動回覆：不替本人說明守衛處置或帳號權限 ─────────────────────
+// 問到踢人、移出、刪除、警告、封鎖、管理員／權限、為什麼被移除：一律只回固定句，不讓模型回答（曾錯誤回覆「我沒有踢人」「沒有管理員權限」）。
+export const MODERATION_REPLY = "這要等本人回覆";
+const MODERATION_ASK = /踢|剔|移出|移除|請出|趕出|退群|被退|刪|收回|警告|封鎖|禁言|管理員|管理者|管理權|權限|群主|皇冠|盾牌|kick|ban|admin|mod(erat)?/i;
+// 模型輸出的備援過濾：回覆裡談到這些就整段換成固定句。
+const MODERATION_CLAIM = /踢|剔|移出|移除|請出|封鎖|禁言|管理權|權限|誤判|(有|沒有?|不是)\s*管理員/;
+export function isModerationAsk(text) { return MODERATION_ASK.test(String(text ?? "")); }
+export function isModerationClaim(text) { return MODERATION_CLAIM.test(String(text ?? "")); }
+export const MODERATION_PROMPT = `【硬規則】不要說明或猜測任何踢人、移出、刪除訊息、警告、封鎖的原因或經過，也不要說本帳號有沒有管理員權限、有沒有做過這些事。被問到時，整個回答只寫「${MODERATION_REPLY}」。`;

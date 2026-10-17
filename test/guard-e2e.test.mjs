@@ -13,8 +13,17 @@ const SCAM_TEXT = "通知：本群明天要刪除了，請大家加入新群 htt
 const NORMAL_TEXT = "我剛剛醒，睡很久";
 const now = Date.now();
 
-async function runGuard(extraConfig, live, { history = [], waitMs = 2500 } = {}) {
-  const llm = createServer((req, res) => { req.resume(); req.on("end", () => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ choices: [{ message: { content: "SCAM\n測試" } }] })); }); });
+async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer } = {}) {
+  const llm = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      // 小助手的提示裡有「回答範圍」；其餘（詐騙判斷、覆核）一律回 SCAM。
+      const content = chatAnswer && body.includes("回答範圍") ? chatAnswer : "SCAM\n測試";
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+  });
   await new Promise((done) => llm.listen(0, "127.0.0.1", done));
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await new Promise((done) => wss.on("listening", done));
@@ -47,7 +56,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500 } = {})
   child.kill();
   wss.close(); llm.close();
   rmSync(dir, { recursive: true, force: true });
-  return { removes: frames.filter((f) => f.type === "member:remove"), deletes: frames.filter((f) => f.type === "message:delete"), sends: frames.filter((f) => f.type === "message:send") };
+  return { frames, removes: frames.filter((f) => f.type === "member:remove"), deletes: frames.filter((f) => f.type === "message:delete"), sends: frames.filter((f) => f.type === "message:send") };
 }
 
 test("對照：一般成員貼高分詐騙＋兩模型 SCAM → 會送踢人（確認測試抓得到）", async () => {
@@ -89,4 +98,29 @@ test("對照：impersonation.kick=true 才會因冒名踢人（舊行為，預�
   const history = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
   const r = await runGuard({ impersonation: { kick: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pOther", senderName: "阿明", text: NORMAL_TEXT }], { history });
   assert.equal(r.removes.length, 1);
+});
+
+// 小助手：問到踢人、刪除、管理員權限等，只回固定句，不讓模型說明。
+const CHAT = { chat: { enabled: true, triggers: ["小助手"], onMention: false, userCooldownSeconds: 0 } };
+const OK_ANSWER = "這個問題很好，記得查證喔";
+
+test("小助手：問「你把他踢了嗎」→ 只回「這要等本人回覆」", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你把阿明剔除去了？" }], { chatAnswer: OK_ANSWER });
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+});
+
+test("小助手：問管理員權限 → 固定句", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你有管理員權限啊" }], { chatAnswer: OK_ANSWER });
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+});
+
+test("小助手：模型自己說「我沒有踢人」→ 輸出過濾換成固定句", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 剛剛發生什麼事" }], { chatAnswer: "沒有啊，我這邊沒有踢人，也沒有管理員權限。" });
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+});
+
+test("小助手：一般問題照常回答", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 今天天氣如何" }], { chatAnswer: OK_ANSWER });
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.startsWith(OK_ANSWER));
 });

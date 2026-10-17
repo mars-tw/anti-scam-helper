@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideAction, findImpersonated, hasLink, hasScamSignal, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
+import { decideAction, findImpersonated, hasLink, hasScamSignal, isModerationAsk, isModerationClaim, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
 import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
@@ -145,4 +145,12 @@ test("LINE 官方一般頁面不算外部連結；外部 LINE 邀請算", () => 
   assert.equal(hasLink(sanitizeLinks("說明 https://help.line.me/line/?contentId=1", ALLOW).text), false);
   assert.equal(sanitizeLinks("加這個 https://line.me/ti/g2/OtherGroup999", ALLOW).official, false);
   assert.equal(hasLink(sanitizeLinks("加這個 https://line.me/ti/g2/OtherGroup999", ALLOW).text), true);
+});
+
+test("自動回覆：問到踢人／刪除／警告／封鎖／權限一律交給本人", () => {
+  assert.equal(MODERATION_REPLY, "這要等本人回覆");
+  for (const ask of ["你把他踢了嗎", "你把阿明剔除去了", "為什麼他被移出", "誰刪了我的訊息", "你有管理員權限啊", "是不是你封鎖他", "為什麼警告我", "你有皇冠耶"]) assert.ok(isModerationAsk(ask), ask);
+  for (const ask of ["今天天氣如何", "這個連結安全嗎", "怎麼申請 API"]) assert.equal(isModerationAsk(ask), false, ask);
+  for (const answer of ["我這邊沒有踢人", "我沒有管理員權限啦", "會不會是系統誤判", "我不是管理員"]) assert.ok(isModerationClaim(answer), answer);
+  assert.equal(isModerationClaim("記得查證，必要時打 165"), false);
 });
