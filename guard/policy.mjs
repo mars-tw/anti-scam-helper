@@ -98,15 +98,39 @@ export function sanitizeLinks(text, allow = []) {
   return { text: cleaned, official, officialOnly: official && !hasLink(cleaned) };
 }
 
-// ── 自動回覆：不替本人說明守衛處置或帳號權限 ─────────────────────
-// 問到踢人、移出、刪除、警告、封鎖、管理員／權限、為什麼被移除：一律只回固定句，不讓模型回答（曾錯誤回覆「我沒有踢人」「沒有管理員權限」）。
-export const MODERATION_REPLY = "這要等本人回覆";
-const MODERATION_ASK = /踢|剔|移出|移除|請出|趕出|退群|被退|刪|收回|警告|封鎖|禁言|管理員|管理者|管理權|權限|群主|皇冠|盾牌|kick|ban|admin|mod(erat)?/i;
-// 模型輸出的備援過濾：回覆裡談到這些就整段換成固定句。
-const MODERATION_CLAIM = /踢|剔|移出|移除|請出|封鎖|禁言|管理權|權限|誤判|(有|沒有?|不是)\s*管理員/;
-export function isModerationAsk(text) { return MODERATION_ASK.test(String(text ?? "")); }
-export function isModerationClaim(text) { return MODERATION_CLAIM.test(String(text ?? "")); }
-export const MODERATION_PROMPT = `【硬規則】不要說明或猜測任何踢人、移出、刪除訊息、警告、封鎖的原因或經過，也不要說本帳號有沒有管理員權限、有沒有做過這些事。被問到時，整個回答只寫「${MODERATION_REPLY}」。`;
+// ── 自動回覆：守衛處置與權限的即時事實 ─────────────────────────
+// 回覆時依「目前執行中的設定」產生事實給模型（不寫死），讓它照實回答；不透露設定細節、門檻、金鑰、模型名稱、ID 或其他成員資料。
+export const MODERATION_REPLY = "這要等本人回覆"; // 後置過濾的替換句（回覆否認事實或替本人承諾時）
+export const ESCALATE_REPLY = "這個我會轉給本人處理"; // 需要本人決定的事（邀回某人、替特定人申訴、補償）：唯一允許的承諾句
+
+/** isAdmin：本帳號在這個群是不是管理員（true／false；undefined＝不確定，不提）。 */
+export function buildGuardFacts({ kickMode = "kick", deleteOnLink = false, metaAvailable = true, isAdmin } = {}) {
+  const facts = [
+    "本帳號在這幾個社群裡執行反詐騙守衛（自動程式），會偵測：假的「換群／搬家／新群」公告、引流或廣告連結、冒用管理員名字、外部 LINE 群組／好友的 QR code 或 LINE ID。",
+    kickMode === "notify" ? "踢人功能目前暫停，只通知管理員。" : "確認是詐騙的帳號，守衛可能會把對方移出社群，並先發通知說明。",
+  ];
+  if (isAdmin === true) {
+    facts.push("本帳號在這個群是管理員。");
+    if (deleteOnLink && metaAvailable) facts.push("在這個群，確認是詐騙的連結訊息，守衛會先發通知再刪除那則訊息。");
+  } else if (isAdmin === false) {
+    facts.push("本帳號在這個群不是管理員，守衛在這裡只能發通知，請管理員處理。");
+  }
+  facts.push("如果覺得自己被誤判，可以聯絡這個群的管理員。");
+  return `【守衛現況（真實資訊，回答相關問題時照這些說，不要自己猜或補充）】
+${facts.map((fact) => `- ${fact}`).join("\n")}
+【硬規則】不要透露設定細節、分數門檻、金鑰、模型名稱、成員 ID 或其他成員的資料；不要猜測某個人被處理的具體原因或經過，也不要說出和上面現況相反的話（例如本帳號是管理員卻說沒有權限）。
+有人要求把某人邀回來、替特定的人申訴、要求補償，或其他需要本人決定的事，整個回答只寫「${ESCALATE_REPLY}」。`;
+}
+
+/** 回覆是否否認或捏造處置事實：說「沒有踢人」、或和本群管理員身分相反、或在踢人暫停時說會踢。 */
+export function isFalseModerationClaim(text, { isAdmin, kickMode = "kick" } = {}) {
+  const t = String(text ?? "");
+  if (/(沒有?|不會|從來沒|並沒有?)\s*(在)?(踢|剔|移出|移除)(人|他|她|任何人)?|沒有?把.{0,8}(踢|剔|移出|移除)/.test(t)) return true;
+  if (isAdmin === true && /(沒有?|無)(任何)?(管理員|管理)?(的)?(權限|管理權)|不是(這個群的?)?管理員|我不是管理|沒有管理員(身分|資格)/.test(t)) return true;
+  if (isAdmin === false && /我(是|有)(這個群的?)?管理員|我有(管理)?權限/.test(t)) return true;
+  if (kickMode === "notify" && /(會|將|已經?)(把.{0,8})?(踢|移出)(社群|群組|出去)?/.test(t) && !/暫停/.test(t)) return true;
+  return false;
+}
 
 // ── 自動回覆：不替本人承諾 ──────────────────────────────────────
 // 第一人稱的未來行動或承諾（我會／我再／我來／我幫你／我改／我調／下次我／保證／答應／約／付錢…）→ 整段換成固定句。
@@ -120,5 +144,5 @@ const PROMISE = new RegExp([
   "(我們|我跟你|跟你).{0,4}約|約你|約個時間|約好(了|囉|喔|啦)",
   "(我|讓我).{0,6}(付錢|付款|匯款|轉帳|匯給你|轉給你|付給你|請客|請你吃)",
 ].join("|"));
-export function isPromise(text) { return PROMISE.test(String(text ?? "")); }
-export const PROMISE_PROMPT = `【硬規則】你不是本人，不能替本人承諾或答應任何事：不要用第一人稱說之後會做什麼（我會、我再、我來、我幫你、我改、我調、我處理、下次我），不要保證、答應、約時間、談付錢或匯款。需要本人決定或行動的事，整個回答只寫「${MODERATION_REPLY}」。可以給一般建議（「你可以…」「建議…」）。`;
+export function isPromise(text) { return PROMISE.test(String(text ?? "").split(ESCALATE_REPLY).join("")); }
+export const PROMISE_PROMPT = `【硬規則】你不是本人，不能替本人承諾或答應任何事：不要用第一人稱說之後會做什麼（我會、我再、我來、我幫你、我改、我調、我處理、下次我），不要保證、答應、約時間、談付錢或匯款。需要本人決定或行動的事，整個回答只寫「${ESCALATE_REPLY}」。可以給一般建議（「你可以…」「建議…」）。`;

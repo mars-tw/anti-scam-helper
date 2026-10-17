@@ -19,7 +19,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
       // 小助手的提示裡有「回答範圍」；其餘（詐騙判斷、覆核）一律回 SCAM。
-      const content = chatAnswer && body.includes("回答範圍") ? chatAnswer : "SCAM\n測試";
+      const content = chatAnswer && body.includes("回答範圍") ? (typeof chatAnswer === "function" ? chatAnswer(JSON.parse(body)) : chatAnswer) : "SCAM\n測試";
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });
@@ -104,14 +104,43 @@ test("對照：impersonation.kick=true 才會因冒名踢人（舊行為，預�
 const CHAT = { chat: { enabled: true, triggers: ["小助手"], onMention: false, userCooldownSeconds: 0 } };
 const OK_ANSWER = "這個問題很好，記得查證喔";
 
-test("小助手：問「你把他踢了嗎」→ 只回「這要等本人回覆」", async () => {
-  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你把阿明剔除去了？" }], { chatAnswer: OK_ANSWER });
+// 假模型：把系統提示裡的「守衛現況」原樣回出來，檢查小助手拿到的事實。
+const echoFacts = (req) => {
+  const prompt = JSON.stringify(req);
+  return [
+    prompt.includes("踢人功能目前暫停") ? "踢人功能目前暫停，只通知管理員。" : prompt.includes("可能會把對方移出") ? "確認是詐騙的帳號可能會被移出社群。" : "",
+    prompt.includes("本帳號在這個群是管理員") ? "本帳號在這個群是管理員。" : prompt.includes("不是管理員") ? "在這個群只能通知管理員處理。" : "",
+  ].filter(Boolean).join("");
+};
+
+test("小助手：問踢人 → 依目前設定回答（kickMode=notify：暫停、只通知）", async () => {
+  const r = await runGuard({ ...CHAT, kickMode: "notify", protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你把阿明剔除去了？" }], { chatAnswer: echoFacts });
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.includes("踢人功能目前暫停"), r.sends[0].text);
+  assert.ok(r.sends[0].text.includes("本帳號在這個群是管理員"), r.sends[0].text);
+});
+
+test("小助手：kickMode=kick 時說可能移出；非管理員的群說只能通知", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"], questionRedact: { noDeleteChats: ["cB"] } }, [{ messageId: "q1", channelId: "cB", senderId: "pAsk", senderName: "成員", text: "小助手 你有管理員權限嗎" }], { chatAnswer: echoFacts });
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.includes("可能會被移出"), r.sends[0].text);
+  assert.ok(r.sends[0].text.includes("只能通知管理員"), r.sends[0].text);
+});
+
+test("小助手：「怎麼刪 git branch」照常回答", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 怎麼刪 git branch" }], { chatAnswer: "用 git branch -d 分支名稱 就可以" });
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.startsWith("用 git branch -d"));
+});
+
+test("小助手：管理員群卻說「沒有權限」→ 換成固定句", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你有權限嗎" }], { chatAnswer: "我沒有管理員權限啦" });
   assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
 });
 
-test("小助手：問管理員權限 → 固定句", async () => {
-  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你有管理員權限啊" }], { chatAnswer: OK_ANSWER });
-  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+test("小助手：請求邀回某人 → 「這個我會轉給本人處理」不被承諾過濾擋", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 可以把阿明邀回來嗎" }], { chatAnswer: "這個我會轉給本人處理。" });
+  assert.deepEqual(r.sends.map((f) => f.text), ["這個我會轉給本人處理"]);
 });
 
 test("小助手：模型自己說「我沒有踢人」→ 輸出過濾換成固定句", async () => {
