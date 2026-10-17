@@ -42,7 +42,7 @@ if (!token) {
 // 這些 ID 永遠不踢、不刪、不提醒、不判冒名。社群成員 ID 每個社群不同，離開再加入也會換新 ID，要一併登記。
 const whitelist = new Set([
   ...(config.whitelist ?? []),
-  ...(config.protectedIds ?? []).flatMap((entry) => (typeof entry === "string" ? [entry] : entry?.ids ?? [])),
+  ...(config.protectedIds ?? []).flatMap((entry) => (typeof entry === "string" ? [entry] : [...(entry?.ids ?? []), ...(entry?.id ? [entry.id] : [])])),
   ...(config.protectedMembers ?? []).flatMap((entry) => entry?.ids ?? []),
 ]);
 // kickMode："kick"（預設）照常踢；"notify"：所有踢人改成只發通知請管理員確認（不踢、不刪），出事時的暫時安全模式。
@@ -777,9 +777,14 @@ async function checkImpersonationInvite(ws, message, { invite }) {
   await punishImpersonationInvite(ws, message, victim, invites.at(-1).messageId, list.map((item) => item.messageId));
   return true;
 }
+// 這兩條（冒名＋邀請、購物再犯）直接送踢人、不經 remove()，送出前再擋一次：受保護成員、管理員、群主、本帳號絕不踢。
+function neverKick(message) {
+  return Boolean(message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)
+    || [...chatAdmins.values()].some((admins) => admins.has(message.senderId)) || isStaff(message));
+}
 async function punishImpersonationInvite(ws, message, victim, replyTo, targets) {
   const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names: [`冒用「${victim}」`, "外部邀請／引流連結或 QR code"] };
-  const kick = config.impersonation?.kickWithInvite === true;
+  const kick = config.impersonation?.kickWithInvite === true && !neverKick(message);
   record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick });
   if (config.dryRun) { record({ action: "dry-run", ...entry }); return; }
   if (noDeleteChats.has(message.channelId)) {
@@ -855,7 +860,7 @@ async function checkScamShop(ws, message, rawText) {
   const repeat = (shopOffenses[message.senderId] ?? []).length > 0;
   shopOffenses[message.senderId] = [...(shopOffenses[message.senderId] ?? []), now];
   saveShopOffenses();
-  const kick = repeat && scamShop.kickRepeat === true;
+  const kick = repeat && scamShop.kickRepeat === true && !neverKick(message);
   record({ action: repeat ? "scam-shop-repeat" : "scam-shop-first", ...entry, kick });
   if (config.dryRun) { record({ action: "dry-run", ...entry }); return true; }
   if (noDeleteChats.has(message.channelId)) {

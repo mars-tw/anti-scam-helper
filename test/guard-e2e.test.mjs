@@ -286,3 +286,38 @@ test("小助手：一般回答結尾是（AI代理），模型自己加的（自
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"], chat: { ...CHAT.chat, signature: "（自動回覆）" } }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 今天天氣如何" }], { chatAnswer: "記得帶傘喔（自動回覆）" });
   assert.deepEqual(r.sends.map((f) => f.text), ["記得帶傘喔（AI代理）"]);
 });
+
+// 正式設定的組合：kickMode=notify、impersonation.kick=false，只開 kickWithInvite 與 kickRepeat。
+const PROD = { kickMode: "notify", impersonation: { kick: false, kickWithInvite: true }, scamShop: { enabled: true, fetchPage: false, kickRepeat: true } };
+
+test("正式組合：一般高分詐騙仍只通知，不踢", async () => {
+  const r = await runGuard({ ...PROD }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
+  assert.equal(r.removes.length, 0);
+});
+
+test("正式組合：只有冒名（Meta 判 SCAM）仍只通知，不踢", async () => {
+  const r = await runGuard({ ...PROD }, [{ messageId: "m1", channelId: "cA", senderId: "pOther", senderName: "阿明", text: NORMAL_TEXT }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+});
+
+test("正式組合：冒名＋邀請連結 → 踢", async () => {
+  const r = await runGuard({ ...PROD }, [{ messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+  assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
+});
+
+test("正式組合：受保護成員（id 欄位格式）冒名＋連結、購物再犯都不踢不刪", async () => {
+  const r = await runGuard({ ...PROD, protectedIds: [{ id: "pReal", name: "阿明" }] }, [
+    { messageId: "m1", channelId: "cB", senderId: "pReal", senderName: "阿明", text: INVITE },
+    { messageId: "m2", channelId: "cA", senderId: "pReal", senderName: "阿明", text: SHOP_AD },
+    { messageId: "m3", channelId: "cA", senderId: "pReal", senderName: "阿明", text: SHOP_AD.replace("/a", "/b") },
+  ], { history: ADMIN_HISTORY, waitMs: 3500 });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+});
+
+test("正式組合：別的群的管理員來購物再犯也不踢", async () => {
+  const r = await runGuard({ ...PROD }, [
+    { messageId: "m1", channelId: "cB", senderId: "pAdmin", senderName: "阿明", text: SHOP_AD },
+    { messageId: "m2", channelId: "cB", senderId: "pAdmin", senderName: "阿明", text: SHOP_AD.replace("/a", "/b") },
+  ], { history: ADMIN_HISTORY, waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+});
