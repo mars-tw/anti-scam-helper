@@ -67,5 +67,8 @@
     "maxQueue": 20,
     "maxSide": 768
   },
-  "logDir": "logs"
+  "logDir": "logs",
+  "scamLink": {
+    "deleteOnConfirmed": false
+  }
 }

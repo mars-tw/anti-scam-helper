@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideAction, findImpersonated, hasScamSignal, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
+import { decideAction, findImpersonated, hasLink, hasScamSignal, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
 import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
@@ -70,4 +70,39 @@ test("社群鍵：同社群的不同聊天室相同，不同社群不同", () =>
   assert.equal(squareKey("社群甲 / (新手區) 社群甲"), "社群甲");
   assert.equal(squareKey("社群甲"), "社群甲");
   assert.notEqual(squareKey("工具甲 交流區"), squareKey("工具乙 交流區"));
+});
+
+test("含連結＋地端與 Meta 都判 SCAM：本帳號是管理員的群且開關打開 → 刪除（不踢）", () => {
+  const base = { score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true };
+  assert.equal(decideAction({ ...base, deleteOnLink: true, canDelete: true }), "delete");
+  // 無 http 網址、短網址、LINE 邀請也一樣（link 由清掉白名單後的文字判斷）。
+  for (const text of ["shop-deal.xyz/abc", "bit.ly/3abc", "https://line.me/ti/g2/AbCdEf", "lin.ee/xyz"]) assert.ok(hasLink(text), text);
+  // 分數到 notifyScore 也一樣是刪除，不是只通知；到 strongScore 才踢。
+  assert.equal(decideAction({ ...base, score: 4, deleteOnLink: true, canDelete: true }), "delete");
+  assert.equal(decideAction({ ...base, score: 6, deleteOnLink: true, canDelete: true }), "kick");
+});
+
+test("非管理員的群（刪不了）：只通知", () => {
+  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true, deleteOnLink: true, canDelete: false }), "notice");
+});
+
+test("開關關閉（公開版預設）：只通知", () => {
+  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true, canDelete: true }), "notice");
+});
+
+test("白名單／自家群連結：清掉後不算連結，不刪", () => {
+  assert.equal(hasLink("新朋友請看置頂 ［本社群官方連結］"), false);
+  assert.equal(hasLink("詳見 ［LINE 官方網站］"), false);
+  assert.notEqual(decideAction({ score: 0, verdict: "SCAM", review: "SCAM", names: [], link: false, deleteOnLink: true, canDelete: true }), "delete");
+});
+
+test("Meta 不可用／不確定／OK：不處置", () => {
+  for (const review of [undefined, "UNAVAILABLE", "UNSURE", "OK"]) {
+    assert.equal(decideAction({ score: 1, verdict: "SCAM", review, names: ["網址"], link: true, deleteOnLink: true, canDelete: true }), "none", String(review));
+  }
+});
+
+test("只有 Meta 判 SCAM（地端沒判）或沒有連結：不刪", () => {
+  assert.equal(decideAction({ score: 1, verdict: "UNSURE", review: "SCAM", names: ["網址"], link: true, deleteOnLink: true, canDelete: true }), "none");
+  assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["私下聯繫"], link: false, deleteOnLink: true, canDelete: true }), "none");
 });

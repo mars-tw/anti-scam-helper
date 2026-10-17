@@ -30,11 +30,14 @@ export const LINK_RULES = new Set(["網址", "短網址", "LINE 邀請／加好�
  * - notice：Meta 判 SCAM，且（規則 ≥ notifyScore，或地端也判 SCAM 且訊息含連結）→ 引用回覆那則訊息通知管理員。
  * - none：其他。
  */
-export function decideAction({ score, verdict, review, names = [], strongScore = 6, notifyScore = 3 }) {
-  if (review !== "SCAM") return "none";
+export function decideAction({ score, verdict, review, names = [], strongScore = 6, notifyScore = 3, link, deleteOnLink = false, canDelete = false }) {
+  if (review !== "SCAM") return "none"; // Meta 不可用／不確定／OK：一律不處置（只記錄）
   if (score >= strongScore && verdict === "SCAM") return "kick";
+  const bothScam = verdict === "SCAM";
+  // 地端＋Meta 都判 SCAM，而且真的含外部連結（白名單連結已先被換掉）：本帳號能刪的群 → 先通知再刪訊息（不踢）。
+  if (bothScam && link === true && deleteOnLink && canDelete) return "delete";
   if (score >= notifyScore) return "notice";
-  if (verdict === "SCAM" && names.some((name) => LINK_RULES.has(name))) return "notice";
+  if (bothScam && (link === true || names.some((name) => LINK_RULES.has(name)))) return "notice";
   return "none";
 }
 

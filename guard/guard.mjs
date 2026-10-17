@@ -15,7 +15,7 @@ import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
-import { decideAction, findImpersonated, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
+import { decideAction, findImpersonated, hasLink, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
@@ -317,13 +317,16 @@ async function decide(message, rawText) {
   // 第二層：Meta 覆核。踢人＝規則分數 ≥ strongScore 且地端判 SCAM 且 Meta 也判 SCAM；Meta 不可用就不踢、只記錄。
   const review = await metaReview(text);
   // 處置：kick＝規則 ≥ strongScore＋地端 SCAM＋Meta SCAM（不放寬）；notice＝Meta SCAM 且（規則 ≥ notifyScore，或地端也 SCAM 且含連結）。
-  const action = decideAction({ score, verdict, review: review.verdict, names, strongScore, notifyScore: config.notifyScore ?? 3 });
+  // link：清掉白名單／LINE 官方頁面後，還有外部網址、無 http 網址、短網址或 LINE 邀請。
+  const link = hasLink(text);
+  const action = decideAction({ score, verdict, review: review.verdict, names, strongScore, notifyScore: config.notifyScore ?? 3,
+    link, deleteOnLink: scamLink.deleteOnConfirmed === true, canDelete: !noDeleteChats.has(message.channelId) && notifyChats.has(message.channelId) });
   const kick = action === "kick";
   // Meta 確認詐騙：去識別化後累積到範例庫（只存訊息本身，不存發言者）。
   if (review.verdict === "SCAM" && patterns) {
     try { if (patterns.addConfirmed(scamModelText(text), names.join("、") || "Meta 確認", { score, reviewModel: review.model })) record({ action: "pattern-learned", score }); } catch (error) { recordError("patterns", error.message); }
   }
-  return { kick, action, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
+  return { kick, action, link, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
 }
 
 // ── 小助手 ───────────────────────────────────────────────────
@@ -697,6 +700,30 @@ async function remove(ws, message, entry) {
   }, notify.beforeActionMs ?? 2000, sleep);
 }
 
+// scamLink.deleteOnConfirmed：本帳號是管理員的群（不在 noDeleteChats、在 notify.chats），
+// 地端＋Meta 都判 SCAM 且含外部連結 → 先引用回覆發通知「將刪除」，等 notify.beforeActionMs，再刪這則訊息（不踢人）。
+// 刪不掉就補發「請發文者自行收回或請管理員處理」（不受冷卻限制）。公開版預設關閉。
+const scamLink = { deleteOnConfirmed: false, ...config.scamLink };
+async function deleteScamLink(ws, message, entry) {
+  if (isStaff(message) || message.senderId === me) return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
+  record({ action: "scam-link-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review, reviewModel: entry.reviewModel });
+  if (config.dryRun) {
+    record({ action: "scam-link-dry-run", chatId: entry.chatId, messageId: entry.messageId });
+    notifyAdmins(ws, entry, "link-delete");
+    return;
+  }
+  let answer = { type: "error", code: "NOT_SENT" };
+  const notified = await notifyThenAct(() => notifyAdmins(ws, entry, "link-delete"), async () => {
+    answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
+  }, notify.beforeActionMs ?? 2000, sleep);
+  const deleted = answer.type === "message:deleted";
+  record({ action: deleted ? "scam-link-deleted" : "scam-link-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code });
+  if (!deleted) {
+    recordError("delete", answer.code);
+    await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
+  }
+}
+
 async function handle(ws, message) {
   const text = textOf(message);
   const key = `${message.channelId} ${message.senderId}`;
@@ -749,6 +776,9 @@ async function handle(ws, message) {
     // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
     if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry });
     // 沒到踢人門檻，但 Meta 判 SCAM 且（規則 ≥ notifyScore，或地端也判 SCAM 且含連結）：引用回覆該則、通知群主與管理員確認，不踢。
+    if (result.action === "delete") return deleteScamLink(ws, message, entry);
+    // 地端判 SCAM＋含連結，但 Meta 不可用：不處置，只記錄。
+    if (result.verdict === "SCAM" && result.link && result.review === "UNAVAILABLE") record({ action: "scam-link-meta-unavailable", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: result.score, names: result.names });
     if (result.action === "notice") {
       record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
       notifyAdmins(ws, entry, "suspect");
@@ -1096,6 +1126,10 @@ function buildNotice(entry, kind, admins) {
     ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，將把「${entry.senderName}」移出社群並刪除這則訊息。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
+      : kind === "link-delete"
+        ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，含可疑連結，將刪除這則訊息。`
+      : kind === "link-delete-failed"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」的訊息疑似詐騙${reason}，但本帳號無法刪除，請發文者自行收回，或請管理員處理。`
       : kind === "suspect"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」的訊息疑似詐騙${reason}，請管理員確認。`
       : kind === "qr"
