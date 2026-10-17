@@ -146,3 +146,11 @@ const PROMISE = new RegExp([
 ].join("|"));
 export function isPromise(text) { return PROMISE.test(String(text ?? "").split(ESCALATE_REPLY).join("")); }
 export const PROMISE_PROMPT = `【硬規則】你不是本人，不能替本人承諾或答應任何事：不要用第一人稱說之後會做什麼（我會、我再、我來、我幫你、我改、我調、我處理、下次我），不要保證、答應、約時間、談付錢或匯款。需要本人決定或行動的事，整個回答只寫「${ESCALATE_REPLY}」。可以給一般建議（「你可以…」「建議…」）。`;
+
+// ── 小助手回覆標記 ─────────────────────────────────────────────
+export const AGENT_LABEL = "（AI代理）";
+/** 去掉舊的「自動回覆」字樣與重複標記，結尾加上一個（AI代理）。 */
+export function labelReply(text, label = AGENT_LABEL) {
+  const body = String(text ?? "").replace(/\s*[（(]\s*(自動回覆|AI\s*代理)\s*[）)]/gi, "").replace(/自動回覆/g, "").trim();
+  return `${body}${label}`;
+}

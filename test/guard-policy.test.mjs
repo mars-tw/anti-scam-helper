@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideAction, findImpersonated, hasLink, hasScamSignal, buildGuardFacts, ESCALATE_REPLY, isFalseModerationClaim, isPromise, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
+import { decideAction, findImpersonated, hasLink, hasScamSignal, buildGuardFacts, ESCALATE_REPLY, labelReply, isFalseModerationClaim, isPromise, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
 import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
@@ -190,4 +190,11 @@ test("自動回覆：一般建議與說明不擋", () => {
   for (const answer of ["你可以先查證再說", "建議撥打 165 反詐騙專線", "不要匯款給陌生人", "沒有人能保證獲利", "我覺得這個工具不錯", "我會建議先看官方文件", "我來說明一下：這是官方公告", "這要看你的設定", "記得不要點陌生連結", "我也不知道耶", "可以到設定頁調整", "你再試一次看看", "跟家裡長輩約好一個原則，看到要匯款一律先問"]) {
     assert.equal(isPromise(answer), false, answer);
   }
+});
+
+test("回覆標記：結尾一個（AI代理），不留「自動回覆」", () => {
+  assert.equal(labelReply("這要等本人回覆"), "這要等本人回覆（AI代理）");
+  assert.equal(labelReply("好的（自動回覆）"), "好的（AI代理）");
+  assert.equal(labelReply("好的 (自動回覆)（AI代理）"), "好的（AI代理）");
+  assert.equal(labelReply("這是自動回覆喔"), "這是喔（AI代理）");
 });

@@ -137,17 +137,17 @@ test("小助手：「怎麼刪 git branch」照常回答", async () => {
 
 test("小助手：管理員群卻說「沒有權限」→ 換成固定句", async () => {
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你有權限嗎" }], { chatAnswer: "我沒有管理員權限啦" });
-  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆（AI代理）"]);
 });
 
 test("小助手：請求邀回某人 → 「這個我會轉給本人處理」不被承諾過濾擋", async () => {
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 可以把阿明邀回來嗎" }], { chatAnswer: "這個我會轉給本人處理。" });
-  assert.deepEqual(r.sends.map((f) => f.text), ["這個我會轉給本人處理"]);
+  assert.deepEqual(r.sends.map((f) => f.text), ["這個我會轉給本人處理（AI代理）"]);
 });
 
 test("小助手：模型自己說「我沒有踢人」→ 輸出過濾換成固定句", async () => {
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 剛剛發生什麼事" }], { chatAnswer: "沒有啊，我這邊沒有踢人，也沒有管理員權限。" });
-  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆（AI代理）"]);
 });
 
 test("小助手：一般問題照常回答", async () => {
@@ -158,7 +158,7 @@ test("小助手：一般問題照常回答", async () => {
 
 test("小助手：模型替本人承諾（我再把規則調鬆）→ 固定句", async () => {
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 剛剛怎麼了" }], { chatAnswer: "我再把規則調鬆一點，辛苦你重新進來了" });
-  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆（AI代理）"]);
 });
 
 test("小助手：一般建議照常回答", async () => {
@@ -223,4 +223,66 @@ test("非管理員的群：冒名＋連結只通知（請管理員處理）", as
   const r = await runGuard({ impersonation: { kickWithInvite: true }, questionRedact: { noDeleteChats: ["cB"] } }, [{ messageId: "m1", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
   assert.equal(r.removes.length + r.deletes.length, 0);
   assert.equal(r.sends.length, 1);
+});
+
+// 一頁式詐騙購物站
+const SHOP_AD = "LV 精品快閃店 名牌包只要 $399 貨到付款 https://lv-bags-sale.shop/a";
+const SHOP = { scamShop: { enabled: true, fetchPage: false, kickRepeat: false } };
+
+test("詐騙購物：第一次 → 引用回覆警告＋刪除", async () => {
+  const r = await runGuard({ ...SHOP }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
+  assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.sends[0].replyTo, "m1");
+  assert.ok(r.sends[0].text.includes("一頁式詐騙購物"));
+});
+
+test("詐騙購物：再犯 kickRepeat=true → 踢（即使 kickMode=notify）", async () => {
+  const r = await runGuard({ kickMode: "notify", scamShop: { enabled: true, kickRepeat: true } }, [
+    { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD },
+    { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD.replace("/a", "/b") },
+  ], { waitMs: 3500 });
+  assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
+  assert.deepEqual(r.removes.map((f) => f.messageId), ["m2"]);
+});
+
+test("詐騙購物：再犯 kickRepeat=false → 刪除＋警告，不踢", async () => {
+  const r = await runGuard({ ...SHOP }, [
+    { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD },
+    { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD.replace("/a", "/b") },
+  ], { waitMs: 3500 });
+  assert.deepEqual(r.deletes.map((f) => f.messageId).sort(), ["m1", "m2"]);
+  assert.equal(r.removes.length, 0);
+});
+
+test("詐騙購物：正規電商連結不處理（也不走詐騙連結刪除）", async () => {
+  const r = await runGuard({ ...SHOP }, [{ messageId: "m1", channelId: "cA", senderId: "pBuyer", senderName: "成員", text: "LV 名牌包特價 $399 貨到付款 https://www.momoshop.com.tw/goods/123" }]);
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.equal(r.sends.some((f) => f.text.includes("一頁式")), false);
+});
+
+test("詐騙購物：受保護成員、管理員不處理", async () => {
+  const r = await runGuard({ ...SHOP, protectedIds: ["pReal"] }, [
+    { messageId: "m1", channelId: "cA", senderId: "pReal", senderName: "阿明", text: SHOP_AD },
+    { messageId: "m2", channelId: "cA", senderId: "pAdm", senderName: "管理員", senderRole: "coAdmin", text: SHOP_AD },
+  ]);
+  assert.equal(r.removes.length + r.deletes.length + r.sends.length, 0);
+});
+
+test("詐騙購物：不確定 → 只通知，不刪", async () => {
+  const r = await runGuard({ ...SHOP, review: null }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: "名牌包特賣 https://bagsale.shop/x" }]);
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.includes("查證"));
+});
+
+test("詐騙購物：非管理員群 → 只通知", async () => {
+  const r = await runGuard({ ...SHOP, questionRedact: { noDeleteChats: ["cA"] } }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.equal(r.sends.length, 1);
+});
+
+test("小助手：一般回答結尾是（AI代理），模型自己加的（自動回覆）會被換掉", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"], chat: { ...CHAT.chat, signature: "（自動回覆）" } }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 今天天氣如何" }], { chatAnswer: "記得帶傘喔（自動回覆）" });
+  assert.deepEqual(r.sends.map((f) => f.text), ["記得帶傘喔（AI代理）"]);
 });

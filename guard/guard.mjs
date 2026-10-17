@@ -15,6 +15,8 @@ import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
+import { allLinksLegit, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
+import { labelReply } from "./policy.mjs";
 import { buildGuardFacts, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 
@@ -316,7 +318,7 @@ async function decide(message, rawText) {
   const review = await metaReview(text);
   // 處置：kick＝規則 ≥ strongScore＋地端 SCAM＋Meta SCAM（不放寬）；notice＝Meta SCAM 且（規則 ≥ notifyScore，或地端也 SCAM 且含連結）。
   // link：清掉白名單／LINE 官方頁面後，還有外部網址、無 http 網址、短網址或 LINE 邀請。
-  const link = hasLink(text);
+  const link = hasLink(text) && !allLinksLegit(text); // 正規電商連結不當成詐騙連結刪除
   const action = decideAction({ score, verdict, review: review.verdict, names, strongScore, notifyScore: config.notifyScore ?? 3,
     link, deleteOnLink: scamLink.deleteOnConfirmed === true, canDelete: !noDeleteChats.has(message.channelId) && notifyChats.has(message.channelId) });
   const kick = action === "kick";
@@ -435,7 +437,7 @@ const replyTimes = [];
 const rememberedIds = new Set(); // 已放進 recent 的訊息 id（歷史與即時重複時只記一次）
 const messageText = new Map(); // 訊息 id → 「名字：內容」，回覆串上下文用（只在記憶體）
 function isBotText(text) {
-  return text.startsWith("⚠️ 反詐小幫手") || text.includes("（自動提醒）") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text === chat.hardRefusal;
+  return text.startsWith("⚠️ 反詐小幫手") || text.includes("（自動提醒）") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text.includes("（AI代理）") || text.includes("（自動回覆）") || text === chat.hardRefusal;
 }
 function remember(message, text) {
   if (!text || rememberedIds.has(message.messageId) || sentByBot.has(message.messageId) || isBotText(text)) return;
@@ -566,6 +568,12 @@ function markReplied(messageId) {
   appendFileSync(repliedFile, `${messageId}\n`);
 }
 
+// 小助手每則回覆（含固定句、婉拒）結尾都加（AI代理）；舊設定的「（自動回覆）」一律換掉。
+const replyLabel = chat.signature && !/自動回覆/.test(chat.signature) ? chat.signature : "（AI代理）";
+function sendLabeled(ws, message, text) {
+  return send(ws, message, labelReply(text, replyLabel));
+}
+
 async function reply(ws, message, ask) {
   if (repliedIds.has(message.messageId)) return;
   markReplied(message.messageId);
@@ -575,11 +583,11 @@ async function reply(ws, message, ask) {
   const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(ask, "ask"), ...extra });
   if (!withinDailyQuota(senderKey)) return log("quota-exceeded");
   if (ask.length > chat.maxQuestionChars) {
-    send(ws, message, `問題有點長，可以濃縮在 ${chat.maxQuestionChars} 字內再問我嗎？`);
+    sendLabeled(ws, message, `問題有點長，可以濃縮在 ${chat.maxQuestionChars} 字內再問我嗎？`);
     return log("refused", { reason: "too-long" });
   }
   if (chat.mentionOnly ? SENSITIVE.test(ask) : ABUSE.test(ask) && !SEEKING_HELP.test(ask)) {
-    send(ws, message, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
+    sendLabeled(ws, message, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
     return log("refused", { reason: "abuse" });
   }
   // 上下文：該群最近對話（最多 chat.contextMessages 則、chat.contextMaxChars 字），加上被回覆的那則。只用於當下這次回答。
@@ -612,7 +620,7 @@ async function reply(ws, message, ask) {
   if (/OUT_OF_SCOPE|REFUSE_SENSITIVE/i.test(answer)) {
     // 小模型偶爾亂拒答：mentionOnly 模式下乾脆不回，比回錯好。
     if (chat.mentionOnly) return log("model-refused-no-reply", { model: used.model });
-    send(ws, message, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
+    sendLabeled(ws, message, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
     return log("refused", { reason: "model" });
   }
   // 清掉小模型常見的「自我說明」與模擬別人說話的行，只留要回給對方的話。
@@ -635,26 +643,26 @@ async function reply(ws, message, ask) {
   // 模型照提示只回了固定句（轉給本人／等本人）：原樣送出，不加簽名。
   for (const fixed of [ESCALATE_REPLY, MODERATION_REPLY]) {
     if (body.replace(/[。.!！\s]/g, "") === fixed) {
-      send(ws, message, fixed);
+      sendLabeled(ws, message, fixed);
       return log("moderation-deferred", { reason: fixed === ESCALATE_REPLY ? "escalate" : "model", model: used.model });
     }
   }
   // 輸出後過濾：否認或捏造處置事實（「沒有踢人」、是管理員卻說沒權限、踢人暫停卻說會踢）→ 固定句。
   if (isFalseModerationClaim(body, { isAdmin, kickMode })) {
-    send(ws, message, MODERATION_REPLY);
+    sendLabeled(ws, message, MODERATION_REPLY);
     return log("moderation-deferred", { reason: "false-claim", model: used.model });
   }
   // 輸出後過濾：替本人承諾未來行動（我會／我再／我來／我幫你／下次我／保證／約／付錢…）→ 固定句。
   if (chat.noCommitment !== false && isPromise(body)) {
-    send(ws, message, MODERATION_REPLY);
+    sendLabeled(ws, message, MODERATION_REPLY);
     return log("commitment-blocked", { reason: "promise", model: used.model });
   }
   // 輸出後過濾：對方在要求承諾，而且回覆真的在答應（或模型已回固定句）時，整段改成固定句。
   if (commitmentAsk && (COMMITMENT.test(body) || body.includes("親自回覆"))) {
-    send(ws, message, chat.commitmentReply ?? "這個要等本人親自回覆喔。（自動回覆）");
+    sendLabeled(ws, message, chat.commitmentReply ?? "這個要等本人親自回覆喔。");
     return log("commitment-blocked", { model: used.model });
   }
-  const text = `${body}${chat.signature ? ` ${chat.signature}` : ""}`;
+  const text = labelReply(body, replyLabel);
   send(ws, message, text);
   log("replied", { model: used.model, replyChars: text.length, examples: examples.length, contextChars: context.length });
   if (training) {
@@ -801,6 +809,76 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets) 
   if (failed > 0) await notifyAdmins(ws, entry, kick ? "failed" : "link-delete-failed", { force: true });
 }
 
+// ── 一頁式詐騙購物站 ───────────────────────────────────────────
+// scamShop.enabled：一般成員貼可疑購物連結（正規電商、白名單連結不算）。訊號：名牌低價、貨到付款、可疑網域、（fetchPage）頁面一頁式／訂購表單。
+// 確定（強訊號，Meta 沒判 OK）：第一次 → 引用回覆警告＋刪除（刪不了的群只通知），記一筆；30 天內再犯 → scamShop.kickRepeat=true 才踢（不受 kickMode 影響），否則刪除＋警告。
+// 不確定：只通知，不刪。違規紀錄只存成員 ID 與時間（600），30 天過期。
+const scamShop = { enabled: false, fetchPage: false, kickRepeat: false, ...config.scamShop };
+const shopFile = resolve(logDir, scamShop.offendersFile ?? "scam-shop-offenders.json");
+const shopOffenses = pruneOffenses((() => { try { return JSON.parse(readFileSync(shopFile, "utf8")); } catch { return {}; } })());
+function saveShopOffenses() {
+  try {
+    pruneOffenses(shopOffenses);
+    const temp = `${shopFile}.tmp`;
+    writeFileSync(temp, JSON.stringify(shopOffenses), { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, shopFile);
+  } catch (error) { recordError("shop-offenders", error.message); }
+}
+/** 有處理（含只通知）回 true。 */
+async function checkScamShop(ws, message, rawText) {
+  if (!scamShop.enabled || isStaff(message) || message.senderId === me) return false;
+  const text = sanitizeLinks(rawText).text;
+  const links = shopLinks(text);
+  if (links.length === 0) return false;
+  let page = [];
+  if (scamShop.fetchPage) {
+    const html = await fetchPageSafe(links[0].url, { timeoutMs: scamShop.fetchTimeoutMs ?? 5000, maxBytes: scamShop.fetchMaxBytes ?? 300_000 });
+    if (html) page = pageSignals(html);
+  }
+  let result = scoreScamShop({ text, links, page });
+  if (result.score < 2) return false;
+  let review;
+  if (reviewLlm) {
+    review = await metaReview(text, `一般成員貼出購物連結。網站與訊息的特徵：${result.signals.join("、")}。一頁式詐騙購物網站（名牌超低價、只收貨到付款、單頁訂購表單、新註冊或奇怪網域）是 SCAM；正規電商或一般分享是 OK。`);
+    result = scoreScamShop({ text, links, page, review: review.verdict });
+  }
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(rawText), verdict: "SCAM_SHOP", names: ["疑似一頁式詐騙購物網站"], score: result.score, signals: result.signals, review: review?.verdict ?? (reviewLlm ? "UNAVAILABLE" : undefined), level: result.level };
+  if (result.level === "none") { record({ action: "scam-shop-cleared", ...entry }); return false; }
+  if (result.level === "unsure") {
+    record({ action: "scam-shop-suspect", ...entry });
+    notifyAdmins(ws, entry, "shop-suspect");
+    return true;
+  }
+  const now = Date.now();
+  pruneOffenses(shopOffenses, now);
+  const repeat = (shopOffenses[message.senderId] ?? []).length > 0;
+  shopOffenses[message.senderId] = [...(shopOffenses[message.senderId] ?? []), now];
+  saveShopOffenses();
+  const kick = repeat && scamShop.kickRepeat === true;
+  record({ action: repeat ? "scam-shop-repeat" : "scam-shop-first", ...entry, kick });
+  if (config.dryRun) { record({ action: "dry-run", ...entry }); return true; }
+  if (noDeleteChats.has(message.channelId)) {
+    notifyAdmins(ws, entry, "shop-noperm", { force: true });
+    return true;
+  }
+  let answer = { type: "message:deleted" };
+  const notified = await notifyThenAct(() => notifyAdmins(ws, entry, kick ? "removed" : repeat ? "shop-repeat" : "shop", { force: true }), async () => {
+    if (kick) {
+      kicked.add(`${message.channelId} ${message.senderId}`);
+      const requestId = `kick${++requestSeq}`;
+      pending.set(requestId, { ...entry, preNotified: true });
+      ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: true }));
+    } else {
+      answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
+    }
+  }, notify.beforeActionMs ?? 2000, sleep);
+  const deleted = answer.type === "message:deleted";
+  record({ action: "scam-shop-handled", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, deleted: kick ? undefined : deleted, kickSent: kick });
+  if (!deleted) { recordError("delete", answer.code); await notifyAdmins(ws, entry, "link-delete-failed", { force: true }); }
+  return true;
+}
+
 // scamLink.deleteOnConfirmed：本帳號是管理員的群（不在 noDeleteChats、在 notify.chats），
 // 地端＋Meta 都判 SCAM 且含外部連結 → 先引用回覆發通知「將刪除」，等 notify.beforeActionMs，再刪這則訊息（不踢人）。
 // 刪不掉就補發「請發文者自行收回或請管理員處理」（不受冷卻限制）。公開版預設關閉。
@@ -867,6 +945,7 @@ async function handle(ws, message) {
     return;
   }
   if (!trusted && repeatOffense(message) && hasLineInfo(text)) return punishRepeat(ws, message, { ...contentRef(text) });
+  if (!trusted && await checkScamShop(ws, message, text)) return;
   if (!trusted) {
     const result = await decide(message, text);
     const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
@@ -1188,7 +1267,7 @@ async function remindAsker(ws, message, failed, { replyTo = message.messageId, f
       text += questionRedact.failedAdminsSuffix;
     }
   }
-  if (chat.signature) text += ` ${chat.signature}`;
+  text += replyLabel;
   if (config.dryRun) {
     console.log(`【試跑，未發提醒】${text.replace(/\n/g, " ")}`);
     record({ action: "asker-remind-dry-run", chatId: message.channelId, senderId: message.senderId, failed, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
@@ -1238,6 +1317,14 @@ function buildNotice(entry, kind, admins) {
     ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，將把「${entry.senderName}」移出社群並刪除這則訊息。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
+      : kind === "shop"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的疑似是一頁式詐騙購物網站（名牌超低價、貨到付款這類），將刪除這則訊息。請不要在這類網站下單。`
+      : kind === "shop-repeat"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」再次張貼疑似一頁式詐騙購物網站，將刪除這則訊息，請管理員留意。`
+      : kind === "shop-noperm"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的疑似是一頁式詐騙購物網站，請不要在這類網站下單；本帳號在這裡無法刪除，請管理員處理。`
+      : kind === "shop-suspect"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的購物連結有一頁式詐騙網站的特徵，下單前請先查證（165 反詐騙專線），請管理員確認。`
       : kind === "link-delete"
         ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，含可疑連結，將刪除這則訊息。`
       : kind === "link-delete-failed"

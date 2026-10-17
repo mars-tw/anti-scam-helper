@@ -69,5 +69,14 @@
   "logDir": "logs",
   "scamLink": {
     "deleteOnConfirmed": false
+  },
+  "scamShop": {
+    "enabled": false,
+    "fetchPage": false,
+    "kickRepeat": false
+  },
+  "impersonation": {
+    "kick": false,
+    "kickWithInvite": false
   }
 }
