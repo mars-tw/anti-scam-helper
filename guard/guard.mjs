@@ -15,7 +15,7 @@ import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
-import { DEFAULT_BLOCKED_WORDS, safeName, scrubNotice, sendNotice } from "./notice.mjs";
+import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
 process.on("unhandledRejection", (error) => {
@@ -649,7 +649,10 @@ const queue = [];
 let busy = false;
 let backoff = 1000;
 
-function remove(ws, message, entry) {
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// 處置順序：先發通知（引用回覆那則詐騙訊息，大家看得到是哪一則），等 notify.beforeActionMs（預設 2 秒）再刪訊息／踢人。
+// 本帳號不是管理員的聊天室（questionRedact.noDeleteChats）不送踢人請求，直接發「無法移除、請管理員處理」。
+async function remove(ws, message, entry) {
   // 絕不處理管理員、群主、白名單或自己（伺服器也會再擋一次）。
   if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || chatAdmins.get(message.channelId)?.has(message.senderId)) {
     return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
@@ -657,15 +660,23 @@ function remove(ws, message, entry) {
   kicked.add(`${message.channelId} ${message.senderId}`);
   // 先標記：不論之後踢人成功與否，紀錄裡都有這筆詐騙判定。
   record({ action: "flagged", ...entry });
+  const kind = entry.noticeKind ?? "removed";
+  const failedKind = entry.noticeKind ? `${entry.noticeKind}-failed` : "failed";
   if (config.dryRun) {
     console.log(`【試跑，未踢】${message.senderName}（${[entry.verdict, entry.names?.join("、"), refLabel(entry)].filter(Boolean).join("，")}）`);
     record({ action: "dry-run", ...entry });
-    notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
+    notifyAdmins(ws, entry, kind);
     return;
   }
-  const requestId = `kick${++requestSeq}`;
-  pending.set(requestId, entry);
-  ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: config.deleteMessage !== false }));
+  if (noDeleteChats.has(message.channelId)) {
+    record({ action: "failed", code: "NO_PERMISSION", ...entry });
+    return notifyAdmins(ws, entry, failedKind);
+  }
+  await notifyThenAct(() => notifyAdmins(ws, entry, kind), (preNotified) => {
+    const requestId = `kick${++requestSeq}`;
+    pending.set(requestId, { ...entry, preNotified });
+    ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: config.deleteMessage !== false }));
+  }, notify.beforeActionMs ?? 2000, sleep);
 }
 
 async function handle(ws, message) {
@@ -968,24 +979,33 @@ async function redactIfAsker(ws, message) {
   const base = { chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, messages: targets.length };
   let deleted = 0;
   let failed = 0;
+  // 引用回覆其中一則含外部 QR／LINE 資訊的訊息（沒有就回他這則）。
+  const replyTo = items.find(([id, item]) => item.risky && targets.includes(id))?.[0] ?? message.messageId;
   if (noDeleteChats.has(message.channelId)) failed = targets.length;
   else if (config.dryRun) deleted = targets.length;
   else {
-    for (const messageId of targets) {
-      const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId });
-      if (answer.type === "message:deleted") deleted++;
-      else { failed++; recordError("delete", answer.code); }
-    }
+    // 先提醒（引用那則），等 notify.beforeActionMs 再刪；刪不掉才補發「請自行收回」（不受冷卻限制）。
+    const reminded = await notifyThenAct(() => remindAsker(ws, message, false, { replyTo }), async () => {
+      for (const messageId of targets) {
+        const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId });
+        if (answer.type === "message:deleted") deleted++;
+        else { failed++; recordError("delete", answer.code); }
+      }
+    }, notify.beforeActionMs ?? 2000, sleep);
+    record({ action: "asker-redact", ...base, deleted, failed, reminded });
+    if (failed > 0) await remindAsker(ws, message, true, { replyTo, force: true });
+    return true;
   }
   record({ action: config.dryRun ? "asker-redact-dry-run" : "asker-redact", ...base, deleted, failed, noDelete: noDeleteChats.has(message.channelId) || undefined });
-  await remindAsker(ws, message, failed > 0);
+  await remindAsker(ws, message, failed > 0, { replyTo });
   return true;
 }
 
-async function remindAsker(ws, message, failed) {
+/** 提醒詢問者；真的送出回 true。replyTo：要引用的訊息；force：不受冷卻限制（刪除失敗的補充提醒）。 */
+async function remindAsker(ws, message, failed, { replyTo = message.messageId, force = false } = {}) {
   const key = `${message.channelId} ${message.senderId}`;
   const now = Date.now();
-  if (now - (lastRedactReminder.get(key) ?? 0) < questionRedact.cooldownSeconds * 1000) return record({ action: "asker-remind-skipped", reason: "cooldown", chatId: message.channelId, senderId: message.senderId });
+  if (!force && now - (lastRedactReminder.get(key) ?? 0) < questionRedact.cooldownSeconds * 1000) { record({ action: "asker-remind-skipped", reason: "cooldown", chatId: message.channelId, senderId: message.senderId }); return false; }
   lastRedactReminder.set(key, now);
   if (questionRedact.kickRepeat) markWarned(message);
   const label = `@${safeName(message.senderName || "你", blockedWords)}`;
@@ -1007,13 +1027,15 @@ async function remindAsker(ws, message, failed) {
   if (chat.signature) text += ` ${chat.signature}`;
   if (config.dryRun) {
     console.log(`【試跑，未發提醒】${text.replace(/\n/g, " ")}`);
-    return record({ action: "asker-remind-dry-run", chatId: message.channelId, senderId: message.senderId, failed, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
+    record({ action: "asker-remind-dry-run", chatId: message.channelId, senderId: message.senderId, failed, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
+    return false;
   }
-  if (!notifyChats.has(message.channelId)) return record({ action: "asker-remind-skipped", reason: "chat-not-allowed", chatId: message.channelId });
+  if (!notifyChats.has(message.channelId)) { record({ action: "asker-remind-skipped", reason: "chat-not-allowed", chatId: message.channelId }); return false; }
   // 回覆（引用）他貼的那則訊息；刪掉了或伺服器不認得就退成不引用。
-  const { answer, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(text, blockedWords), mentions, replyTo: message.messageId });
+  const { answer, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(text, blockedWords), mentions, replyTo });
   if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
   record({ action: answer.type === "sent" ? "asker-reminded" : "asker-remind-failed", chatId: message.channelId, senderId: message.senderId, failed, code: answer.code, replied, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
+  return answer.type === "sent";
 }
 
 // ── 通知群主與管理員 ─────────────────────────────────────────
@@ -1045,11 +1067,11 @@ function buildNotice(entry, kind, admins) {
   entry = { ...entry, senderName: safeName(entry.senderName, blockedWords) };
   const reason = noticeReason(entry);
   const head = kind === "repeat"
-    ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，已移出社群。`
+    ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，將移出社群並刪除這則訊息。`
     : kind === "repeat-failed"
       ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，但本帳號無法移除，請群主／管理員處理。`
     : kind === "removed"
-    ? `⚠️ 反詐小幫手：偵測到疑似詐騙並已將「${entry.senderName}」移出社群${reason}。`
+    ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，將把「${entry.senderName}」移出社群並刪除這則訊息。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
       : kind === "suspect"
@@ -1071,24 +1093,27 @@ function buildNotice(entry, kind, admins) {
   return { text: scrubNotice(text, blockedWords), mentions };
 }
 
-async function notifyAdmins(ws, entry, kind) {
-  if (!notify.enabled || !entry?.chatId) return;
-  if (!notifyChats.has(entry.chatId)) return record({ action: "notify-skipped", reason: "chat-not-allowed", chatId: entry.chatId });
+/** 發通知；真的送出回 true。force：不受冷卻限制（處置失敗的補充通知）。 */
+async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
+  if (!notify.enabled || !entry?.chatId) return false;
+  if (!notifyChats.has(entry.chatId)) { record({ action: "notify-skipped", reason: "chat-not-allowed", chatId: entry.chatId }); return false; }
   const now = Date.now();
-  if (now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) return record({ action: "notify-skipped", reason: "cooldown", chatId: entry.chatId, senderName: entry.senderName });
+  if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", chatId: entry.chatId, senderName: entry.senderName }); return false; }
   lastNotified.set(entry.chatId, now);
   const admins = adminsOf(entry.chatId);
   const { text, mentions } = buildNotice(entry, kind, admins);
   if (config.dryRun) {
     // 通知內容只在試跑時顯示在主控台，供檢視；日誌只記字數。
     console.log(`【試跑，未發通知】${text.replace(/\n/g, " ")}`);
-    return record({ action: "notify-dry-run", kind, chatId: entry.chatId, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
+    record({ action: "notify-dry-run", kind, chatId: entry.chatId, noticeChars: text.length, mentions: mentions.map((m) => m.userId) });
+    return false;
   }
   // 回覆（引用）那則詐騙訊息，大家看得出是哪一則；訊息已刪除或伺服器不認得就退成不引用。
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
   const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId });
   if (reply.type === "sent" && reply.messageId) { sentByBot.add(reply.messageId); ownMessages.add(reply.messageId); }
   record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
+  return reply.type === "sent";
 }
 
 async function drain(ws) {
@@ -1214,7 +1239,8 @@ function connect() {
         pending.delete(frame.requestId);
         console.log(`已移除 ${entry?.senderName ?? frame.memberId}${frame.messageDeleted ? "，並刪除訊息" : ""}${refLabel(entry) ? `（${refLabel(entry)}）` : ""}`);
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
-        if (entry) notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
+        // 通知已在處置前發過；沒發成（冷卻、權限、失敗）才補發。
+        if (entry && !entry.preNotified) notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
         return;
       }
       case "sent":
@@ -1228,7 +1254,8 @@ function connect() {
         console.error(`移除 ${entry.senderName} 失敗：${frame.message}（${frame.code}）`);
         recordError("kick", `${entry.senderName}：${frame.code}`);
         record({ action: "failed", code: frame.code, ...entry });
-        notifyAdmins(ws, entry, entry.noticeKind ? `${entry.noticeKind}-failed` : "failed");
+        // 已先發過「移出」通知：補一則「無法移除」（不受冷卻限制），讓管理員知道要手動處理。
+        notifyAdmins(ws, entry, entry.noticeKind ? `${entry.noticeKind}-failed` : "failed", { force: entry.preNotified });
       }
     }
   });

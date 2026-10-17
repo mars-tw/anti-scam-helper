@@ -50,3 +50,15 @@ export async function sendNotice(send, { chatId, text, mentions = [], replyTo })
   }
   return { answer, tried, replied: answer.type === "sent" && Boolean(tried.at(-1)?.reply) };
 }
+
+/**
+ * 先通知、再處置：notify() 送出通知（引用那則訊息），等 delayMs，再 act(notified) 刪訊息／踢人。
+ * 通知失敗也照樣處置（不能因為發不出通知就放著詐騙訊息）；回傳通知是否送出。
+ */
+export async function notifyThenAct(notify, act, delayMs = 2000, sleep = (ms) => new Promise((done) => setTimeout(done, ms))) {
+  let notified = false;
+  try { notified = Boolean(await notify()); } catch { notified = false; }
+  await sleep(delayMs);
+  await act(notified);
+  return notified;
+}

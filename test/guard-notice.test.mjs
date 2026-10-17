@@ -53,3 +53,19 @@ test("沒有 replyTo／mentions 時不產生重複嘗試", async () => {
   await sendNotice(server.send, { chatId: "c", text: "t" });
   assert.equal(server.frames.length, 1);
 });
+
+import { notifyThenAct } from "../guard/notice.mjs";
+
+test("先通知、等一下、再處置（刪除／踢人）", async () => {
+  const order = [];
+  const notified = await notifyThenAct(async () => { order.push("notify"); return true; }, async (ok) => { order.push(`act:${ok}`); }, 2000, async (ms) => { order.push(`sleep:${ms}`); });
+  assert.deepEqual(order, ["notify", "sleep:2000", "act:true"]);
+  assert.equal(notified, true);
+});
+
+test("通知失敗（或丟錯）也照樣處置，並回報沒通知到", async () => {
+  const order = [];
+  const notified = await notifyThenAct(async () => { throw new Error("boom"); }, async (ok) => { order.push(`act:${ok}`); }, 10, async () => {});
+  assert.deepEqual(order, ["act:false"]);
+  assert.equal(notified, false);
+});
