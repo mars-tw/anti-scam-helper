@@ -13,6 +13,8 @@ import { complete, onModelError } from "./llm.mjs";
 import { isLineInvite, readQr, shrinkForModel } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
+import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
+import { Watermarks, selectCatchUp } from "./catchup.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
 process.on("unhandledRejection", (error) => {
@@ -95,36 +97,8 @@ const questionRedact = {
   ...config.questionRedact,
 };
 
-// 詢問或提醒詐騙（「這是詐騙嗎」「是不是詐騙」「有人收到這個嗎」「這可信嗎」「小心詐騙」）：扣分，也是 questionRedact 認定「詢問者」的依據。
-const ASK_SCAM = /(這|那)(個|些|則|種)?(是|應該是|根本是|算)詐騙|是詐騙嗎|詐騙嗎|是不是(詐騙|詐團|騙人|騙局|假的)|是(真|假)的嗎|有(人|沒有人)(也)?收到(這|類似|一樣)|(這|那)(個|種|則)?.{0,4}(可信|能信|可以信|靠譜|安全)(嗎|不)|可信嗎|(不要|別|勿|千萬別)(點|加入|相信|匯款|上當|理)|冒充|假冒|165\s*(查證|反詐|專線)?|小心(詐騙|被騙|上當)|(有人|大家).{0,6}(被騙|遇過|知道.{0,6}(真假|詐騙))/;
-
-// ── 規則：每類命中加分，同一類只算一次 ──────────────────────────
-const RULES = [
-  { name: "LINE 邀請／加好友", score: 3, pattern: /line\.me\/(ti|R\/ti)|lin\.ee\/|加\s*(我\s*)?(賴|line|LINE|Line)|(line|LINE|賴)\s*(id|ID)\s*[:：]?|ID\s*[:：]\s*@?\w{3,}/ },
-  { name: "短網址", score: 3, pattern: /\b(bit\.ly|reurl\.cc|tinyurl\.com|pse\.is|lihi\d?\.(cc|com|me)|ppt\.cc|is\.gd|t\.co|shorturl\.at|cutt\.ly)\//i },
-  // 一般網址只加 1 分；常見技術、地圖、影音網站（benignDomains）先拿掉再判斷，不加分。
-  { name: "網址", score: 1, pattern: /https?:\/\/|www\./i, onBenignStripped: true },
-  { name: "投資帶單", score: 2, pattern: /飆股|帶單|老師帶|投顧老師|穩賺|保證(獲利|賺)|勝率\s*\d|漲停板?.{0,6}(分享|帶|跟)|主力.{0,4}(進場|拉抬)|內線(消息)?|出金|入金|翻倍|獲利\s*\d+\s*%|報(明)?牌/ },
-  // 虛擬貨幣本身是正常話題；要配上收益、帶單、入金等字眼才算。
-  { name: "虛幣引流", score: 2, pattern: /(虛擬貨幣|加密貨幣|虛幣|USDT|泰達幣|新幣|幣圈).{0,12}(帶單|保證|穩賺|翻倍|收益|日收|月收|套利|搬磚|出金|入金|認購|錢包地址|分紅)|(搬磚|套利).{0,8}(USDT|泰達幣|虛幣)/i },
-  { name: "假冒名人報牌", score: 2, pattern: /(退休|離職|資深)(的)?(半導體|台積電|鴻海)?(工程師|經理|主管).{0,15}(報股|報牌|明牌|內幕|內線|飆股)|訂單(已經)?接到\s*20\d\d|(財經|股市)(名人|大師).{0,10}(帶|群|分享|免費)/ },
-  { name: "假投資平台", score: 2, pattern: /下載.{0,6}(app|APP|App).{0,10}(投資|交易|入金|註冊)|(投資|交易)平台.{0,8}(註冊|入金|邀請碼)|洗碼量|(繳|付).{0,4}保證金.{0,6}(出金|提領|解凍)|IP\s*異常|帳號.{0,4}凍結.{0,8}(出金|客服)/i },
-  { name: "兼職刷單", score: 2, pattern: /兼職.{0,10}(日領|日結|月入|輕鬆|在家|加)|日領|日結|刷單|在家(工作|賺)|輕鬆賺|躺賺|零經驗.{0,6}(月入|日入|日領)|月入\s*\d+萬|按讚.{0,6}(賺|領)|墊付.{0,6}返(佣|傭)|領任務/ },
-  { name: "私下聯繫", score: 2, pattern: /私我|私聊|私訊我|密我|加我好友|單獨聯繫|私下聯繫|找我拿|點我頭像|頭像加|加好友.{0,6}(領|拿|送|詳談)/ },
-  { name: "貸款博弈", score: 2, pattern: /免審|免照會|快速撥款|當日撥款|小額貸|借貸|代辦貸款|(信用|聯徵)(瑕疵|不良).{0,6}(可貸|也能貸)|博弈|娛樂城|百家樂|運彩.{0,6}(帶|老師|穩)|老虎機|首儲|儲值送/ },
-  // 假搬家：冒充管理員要成員移到「新群」，新群裡才是投資詐騙或釣魚。真正的社群管理員不受守衛處理。
-  { name: "群組搬家", score: 6, pattern: /(移|搬|轉|遷)(至|到|往|去)\s*(新|備用|另一?個)?\s*\d*\s*(號)?\s*(群|社群)|新\s*\d+\s*(號)?\s*(群|社群)|重新\s*(➕|＋|\+|加入|加一下|入群|進群)|統一\s*(核准|核準|審核|通過)|舊群.{0,6}(解散|關閉|停用)|(群組|社群)\s*(搬家|遷移)|備用群|(另外|重新)(成立|建立?|開)(了)?(新)?(群|社群)|(機器人|廣告)(太多|很多|洗版).{0,15}(新群|新社群)|開啟新專案/ },
-  { name: "中獎客服", score: 2, pattern: /恭喜.{0,8}(中獎|抽中)|領取獎(金|品)|解除分期|誤設.{0,4}分期|重複扣款|客服通知|帳戶(異常|凍結)|驗證身分.{0,6}連結|實名驗證|開通金流|ATM.{0,6}(操作|解除)|無卡提款|遊戲點數/i },
-  { name: "愛情交友", score: 2, pattern: /(軍醫|戰地|聯合國|維和).{0,8}(醫生|軍官|官員|部隊)?.{0,15}(包裹|禮物|關稅|匯|投資)|(包裹|禮物).{0,8}(海關|關稅)|結婚基金/ },
-  { name: "盜帳號／收帳戶", score: 3, pattern: /(幫忙|幫我)投票.{0,15}(網址|連結|登入|https?:)|(傳|給|提供).{0,6}(簡訊)?(驗證碼|認證碼)|(驗證碼|認證碼).{0,10}(傳給我|給我|告訴我|截圖給我)|收購.{0,4}(帳戶|帳號|存摺)|(出租|租借|提供)(帳戶|存摺|提款卡)|出國.{0,4}(打工|工作).{0,6}高薪/ },
-  // 提醒或詢問詐騙（「這是詐騙嗎」「不要點」「有人冒充管理員」）：扣分，避免把好心提醒的人踢掉。
-  { name: "提醒／詢問詐騙", score: -4, pattern: ASK_SCAM },
-];
-
-// 正常技術、地圖、影音、官方網站：不因為「有網址」加分（短網址、LINE 邀請另外計）。
-const BENIGN_DOMAINS = config.benignDomains ?? ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "nvidia.com", "amd.com", "intel.com", "amazon.com", "aws.amazon.com", "cloudflare.com", "ibm.com", "oracle.com", "adobe.com", "samsung.com", "tsmc.com", "asus.com", "docker.com", "python.org", "nodejs.org", "mozilla.org", "kaggle.com", "arxiv.org", "mistral.ai", "deepseek.com", "perplexity.ai", "ollama.com", "openrouter.ai", "vercel.com", "azure.com", "bitbucket.org", "antigravity.google", "docs.", "developer."];
-// 網域前後要有邊界：fakenvidia.com、nvidia.com.evil.ru 這類仿冒不算一般網域（docs.／developer. 這類前綴除外）。
-const BENIGN_URL = new RegExp(`(?<![\\w.-])(https?:\\/\\/)?([\\w-]+\\.)*(${BENIGN_DOMAINS.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (d.endsWith(".") ? "" : "(?=$|[\\/?#:\\s，。）)」』])")).join("|")})[^\\s，。）)」』]*`, "gi");
+// 規則計分（含去空白正規化、短網址清單、假換群字眼）在 rules.mjs。
+const ruleScore = makeRuleScorer(config.benignDomains);
 
 function textOf(message) {
   if (message.text) return message.text;
@@ -132,19 +106,6 @@ function textOf(message) {
   if (card?.kind === "flex") return card.altText;
   if (card?.kind === "contact") return `［分享聯絡人：${card.name}］`;
   return "";
-}
-
-function ruleScore(message, text) {
-  const stripped = text.replace(BENIGN_URL, "［一般網站］");
-  const hits = RULES.filter((rule) => rule.pattern.test(rule.onBenignStripped ? stripped : text));
-  let score = Math.max(0, hits.reduce((sum, rule) => sum + rule.score, 0));
-  const names = hits.map((rule) => rule.name);
-  // 在群組裡丟聯絡人卡片，是常見的引流手法。
-  if (message.card?.kind === "contact") {
-    score += 3;
-    names.push("分享聯絡人");
-  }
-  return { score, names };
 }
 
 // ── 冒名偵測 ─────────────────────────────────────────────────
@@ -785,10 +746,10 @@ async function handle(ws, message) {
 // ── 圖片 QR code ─────────────────────────────────────────────
 const waiting = new Map(); // requestId → 等待伺服器回應的 resolve
 
-function call(ws, frame) {
+function call(ws, frame, timeoutMs = 30_000) {
   const requestId = `req${++requestSeq}`;
   return new Promise((done) => {
-    const timer = setTimeout(() => { waiting.delete(requestId); done({ type: "error", code: "TIMEOUT" }); }, 30_000);
+    const timer = setTimeout(() => { waiting.delete(requestId); done({ type: "error", code: "TIMEOUT" }); }, timeoutMs);
     waiting.set(requestId, (reply) => { clearTimeout(timer); done(reply); });
     ws.send(JSON.stringify({ ...frame, requestId }));
   });
@@ -1138,6 +1099,71 @@ async function drain(ws) {
   busy = false;
 }
 
+// ── 歷史訊息：認識管理員、補回 @、斷線補掃 ─────────────────────────
+// catchUp.scanMinutes：補掃多久以內的訊息（預設 30 分鐘；0＝不補掃）。水位檔只存聊天室 id 與時間。
+const catchUp = { scanMinutes: 30, ...config.catchUp };
+const watermarks = new Watermarks(resolve(logDir, catchUp.watermarkFile ?? "scan-watermarks.json"));
+const seenIds = new Set(); // 已進處理佇列的訊息 id（即時與補掃共用，避免同一則判兩次）
+function markSeen(messageId) {
+  seenIds.add(messageId);
+  if (seenIds.size > 5000) seenIds.delete(seenIds.values().next().value);
+}
+
+let historyRun = 0;
+/** 一次只抓一個聊天室（伺服器的社群歷史快取只放 5 個，同時抓 8 個會互相擠掉而失敗）。 */
+async function syncHistory(ws, channels) {
+  const run = ++historyRun;
+  // 水位先拍下來：抓歷史的這段時間若有新訊息即時進來，水位會被往前推，不能因此跳過斷線期間的訊息。
+  const base = new Map(channels.map((channel) => [channel.channelId, watermarks.get(channel.channelId)]));
+  for (const channel of channels) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (run !== historyRun || ws.readyState !== WebSocket.OPEN) return;
+      const page = await call(ws, { type: "history:fetch", chatId: channel.channelId, limit: 100 }, 180_000);
+      if (page.type === "history") { processHistory(ws, page, base.get(channel.channelId)); break; }
+      recordError("history", `${page.code ?? "unknown"}${attempt === 0 ? "（稍後重試）" : ""}`);
+      if (attempt === 0) await new Promise((done) => setTimeout(done, 15_000));
+    }
+  }
+}
+
+function processHistory(ws, frame, baseWatermark) {
+  // 斷線補掃：上次看到的最新訊息之後、catchUp.scanMinutes 分鐘內、還沒處理過的訊息，走一般判斷流程。
+  let toScan = [];
+  if (catchUp.scanMinutes > 0 && frame.chatId) {
+    const picked = selectCatchUp(frame.messages, {
+      watermark: baseWatermark ?? watermarks.get(frame.chatId), maxAgeMs: catchUp.scanMinutes * 60_000, handled: seenIds,
+      isSelf: (message) => message.senderId === me || isSelf(message.channelId, message.senderId),
+    });
+    toScan = picked.toScan;
+    if (picked.watermark !== undefined) watermarks.bump(frame.chatId, picked.watermark);
+  }
+  const scanning = new Set(toScan.map((message) => message.messageId));
+  for (const message of frame.messages) {
+    learnAdmin(message);
+    if (scanning.has(message.messageId)) continue; // 補掃的訊息交給 handle()，那裡會記住上下文
+    noteOwn(message);
+    const text = textOf(message);
+    if (text && !message.unsent) { remember(message, text); learnStyle(message, text); }
+  }
+  for (const message of toScan) {
+    markSeen(message.messageId);
+    caughtUp.add(message.messageId);
+    record({ action: "catch-up-scan", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, contentType: message.contentType, ageSeconds: Math.round((Date.now() - message.createdAt) / 1000) });
+    queue.push(message);
+  }
+  // 補回：守衛停機或還不認得本帳號時漏掉的 @（只補 chat.catchUpMinutes 分鐘內、沒回過的）。
+  for (const message of frame.messages) {
+    const age = Date.now() - (message.createdAt ?? 0);
+    if (age > (chat.catchUpMinutes ?? 10) * 60_000 || repliedIds.has(message.messageId) || caughtUp.has(message.messageId) || seenIds.has(message.messageId)) continue;
+    if (isSelf(message.channelId, message.senderId) || message.unsent || !textOf(message) || !question(message, textOf(message))) continue;
+    caughtUp.add(message.messageId);
+    markSeen(message.messageId);
+    record({ action: "catch-up", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ageSeconds: Math.round(age / 1000) });
+    queue.push(message);
+  }
+  void drain(ws);
+}
+
 function connect() {
   const ws = new WebSocket(process.env.LINEJS_URL ?? config.url ?? "ws://127.0.0.1:3789/api/ws", { headers: { Authorization: `Bearer ${token}` } });
   ws.on("open", () => {
@@ -1161,32 +1187,18 @@ function connect() {
         return;
       case "channels":
         console.log(`守護中的聊天室：${frame.channels.map((channel) => channel.name).join("、") || "（無，請檢查 config.yaml 的 api.chats）"}`);
-        // 從社群最近的訊息先認識管理員，冒名者一出現就認得出來。
-        for (const channel of frame.channels) {
-          if (channel.kind === "square") ws.send(JSON.stringify({ type: "history:fetch", requestId: `admins${++requestSeq}`, chatId: channel.channelId, limit: 100 }));
-        }
+        // 逐一抓各群最近訊息：認識管理員（冒名者一出現就認得出來）、補回漏掉的 @，並補掃斷線期間的訊息。
+        void syncHistory(ws, frame.channels);
         return;
       case "history":
-        for (const message of frame.messages) {
-          learnAdmin(message);
-          noteOwn(message);
-          const text = textOf(message);
-          if (text && !message.unsent) { remember(message, text); learnStyle(message, text); }
-        }
-        // 補回：守衛停機或還不認得本帳號時漏掉的 @（只補 chat.catchUpMinutes 分鐘內、沒回過的）。
-        for (const message of frame.messages) {
-          const age = Date.now() - (message.createdAt ?? 0);
-          if (age > (chat.catchUpMinutes ?? 10) * 60_000 || repliedIds.has(message.messageId) || caughtUp.has(message.messageId)) continue;
-          if (isSelf(message.channelId, message.senderId) || message.unsent || !textOf(message) || !question(message, textOf(message))) continue;
-          caughtUp.add(message.messageId);
-          record({ action: "catch-up", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ageSeconds: Math.round(age / 1000) });
-          queue.push(message);
-          void drain(ws);
-        }
+        processHistory(ws, frame);
         return;
       case "message": {
         const { message } = frame;
         if (message.senderId === me || message.contentType === "CHATEVENT" || message.unsent) return;
+        watermarks.bump(message.channelId, message.createdAt);
+        if (seenIds.has(message.messageId)) return;
+        markSeen(message.messageId);
         queue.push(message);
         void drain(ws);
         return;
