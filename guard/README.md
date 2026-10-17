@@ -239,3 +239,6 @@ Copyright 2026 TW_MARS（阿軒割割）。本資料夾採 Apache-2.0，屬於 [
 - 冒名比對以「社群」為單位：只比對同一社群學到的管理員，發言者本身是該社群管理員就不算冒名。
 - 斷線補掃 `catchUp`：`scanMinutes`（預設 360，補「上次看到的最新訊息之後」到現在，這是上限）、`retryDelaysSeconds`（預設 `[15, 30, 60]`）、`maxPages`（預設 5 頁 × 100 則）。一次只抓一個聊天室。守衛偵測到主機暫停醒來（時鐘跳 > 40 秒）時，75 秒後自動補掃一次。
 - **`scamLink.deleteOnConfirmed`**（預設 `false`）：打開後，在本帳號是管理員的群（不在 `questionRedact.noDeleteChats`、且在 `notify.chats`），地端＋Meta 都判 SCAM 且含外部連結（白名單連結不算；管理員、白名單成員不處理）→ 先引用回覆發「將刪除這則訊息」通知，等 `notify.beforeActionMs`（預設 2 秒）再刪除，不踢人。刪不掉就補發「請發文者自行收回，或請管理員處理」。刪不了的群只通知；Meta 不可用時只記錄（`scam-link-meta-unavailable`）。
+- **受保護成員 `protectedIds`**：`[{ "note": "…", "ids": ["<成員 ID>", …] }]`，依成員 ID、所有群適用，永遠不踢、不刪、不提醒、不判冒名（`whitelist` 與 `protectedMembers` 裡登記的 ID 也一樣）。社群成員 ID 每個社群不同，離開再加入會換新 ID，要一併登記。
+- **冒名預設只通知**：暱稱相似＋Meta 判 SCAM 只發通知請管理員確認；`impersonation.kick: true` 才會踢。
+- **`kickMode: "notify"`**：所有踢人改成只通知（不踢、不刪），出事時的暫時安全模式；預設 `"kick"`。

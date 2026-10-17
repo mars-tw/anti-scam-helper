@@ -36,7 +36,15 @@ if (!token) {
   console.error("缺少機器人 Token：請設定環境變數 LINEJS_TOKEN，或在設定檔填 tokenFile。");
   process.exit(1);
 }
-const whitelist = new Set(config.whitelist ?? []);
+// 受保護成員（依成員 ID，所有群適用）：whitelist、protectedIds（[{ note, ids }] 或 ID 字串）、protectedMembers 裡登記的 ID。
+// 這些 ID 永遠不踢、不刪、不提醒、不判冒名。社群成員 ID 每個社群不同，離開再加入也會換新 ID，要一併登記。
+const whitelist = new Set([
+  ...(config.whitelist ?? []),
+  ...(config.protectedIds ?? []).flatMap((entry) => (typeof entry === "string" ? [entry] : entry?.ids ?? [])),
+  ...(config.protectedMembers ?? []).flatMap((entry) => entry?.ids ?? []),
+]);
+// kickMode："kick"（預設）照常踢；"notify"：所有踢人改成只發通知請管理員確認（不踢、不刪），出事時的暫時安全模式。
+const kickMode = config.kickMode === "notify" ? "notify" : "kick";
 const logDir = resolve(dirname(configPath), config.logDir ?? "logs");
 mkdirSync(logDir, { recursive: true });
 const scamLlm = { backend: "local", ...config.llm };
@@ -665,6 +673,11 @@ async function remove(ws, message, entry) {
   if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || chatAdmins.get(message.channelId)?.has(message.senderId)) {
     return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
   }
+  if (kickMode === "notify") {
+    record({ action: "kick-suppressed", reason: "kickMode-notify", ...entry });
+    kicked.add(`${message.channelId} ${message.senderId}`);
+    return notifyAdmins(ws, { ...entry, noticeKind: undefined }, "suspect");
+  }
   kicked.add(`${message.channelId} ${message.senderId}`);
   // 先標記：不論之後踢人成功與否，紀錄裡都有這筆詐騙判定。
   record({ action: "flagged", ...entry });
@@ -727,11 +740,15 @@ async function handle(ws, message) {
   if (victim) {
     const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "IMPERSONATION", names: [`冒用「${victim}」`] };
     // 沒設 review（舊設定檔）：沿用舊流程，冒名直接移除。
-    if (!reviewLlm) return remove(ws, message, entry);
+    if (!reviewLlm) return config.impersonation?.kick === true ? remove(ws, message, entry) : record({ action: "impersonation-flag", ...entry, review: "NO_REVIEW" });
     // 冒名也要 Meta 覆核確認才踢；不可用或不確定就只記錄。
     const review = await metaReview(text || `［${message.contentType}］`, `發言者暱稱「${message.senderName}」和管理員「${victim}」幾乎一樣，但不是同一人（疑似冒名）。冒名加上任何引流、要求私聊、轉帳就是 SCAM。`);
-    if (review.verdict === "SCAM") remove(ws, message, { ...entry, review: review.verdict, reviewModel: review.model });
-    else record({ action: "impersonation-flag", ...entry, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
+    // 冒名只靠暱稱相似＋Meta，不夠當踢人依據（曾誤踢別社群的同名成員）：預設只通知請管理員確認；impersonation.kick=true 才踢。
+    if (review.verdict === "SCAM" && config.impersonation?.kick === true) remove(ws, message, { ...entry, review: review.verdict, reviewModel: review.model });
+    else if (review.verdict === "SCAM") {
+      record({ action: "impersonation-suspect", ...entry, review: review.verdict, reviewModel: review.model });
+      notifyAdmins(ws, { ...entry, review: review.verdict }, "suspect");
+    } else record({ action: "impersonation-flag", ...entry, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model });
     return;
   }
   const trusted = message.senderRole || whitelist.has(message.senderId);
@@ -1283,7 +1300,7 @@ function connect() {
   const ws = new WebSocket(process.env.LINEJS_URL ?? config.url ?? "ws://127.0.0.1:3789/api/ws", { headers: { Authorization: `Bearer ${token}` } });
   ws.on("open", () => {
     backoff = 1000;
-    console.log(`已連線 LINE.js${config.dryRun ? "（反詐試跑模式：只記錄、不踢人）" : ""}${chat.enabled ? (chat.mentionOnly ? "；@ 自動回應已啟用（只回 @ 本帳號或回覆本帳號訊息的那則）" : `；小助手已啟用（觸發詞：${chat.triggers.join("、")}${chat.onMention ? "，或 @ 本帳號" : ""}）`) : ""}`);
+    console.log(`已連線 LINE.js${config.dryRun ? "（反詐試跑模式：只記錄、不踢人）" : ""}${kickMode === "notify" ? "（踢人暫停：kickMode=notify，只通知）" : ""}${chat.enabled ? (chat.mentionOnly ? "；@ 自動回應已啟用（只回 @ 本帳號或回覆本帳號訊息的那則）" : `；小助手已啟用（觸發詞：${chat.triggers.join("、")}${chat.onMention ? "，或 @ 本帳號" : ""}）`) : ""}`);
   });
   ws.on("message", (data) => {
     const frame = JSON.parse(data.toString());
