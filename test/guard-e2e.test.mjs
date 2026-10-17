@@ -124,3 +124,14 @@ test("小助手：一般問題照常回答", async () => {
   assert.equal(r.sends.length, 1);
   assert.ok(r.sends[0].text.startsWith(OK_ANSWER));
 });
+
+test("小助手：模型替本人承諾（我再把規則調鬆）→ 固定句", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 剛剛怎麼了" }], { chatAnswer: "我再把規則調鬆一點，辛苦你重新進來了" });
+  assert.deepEqual(r.sends.map((f) => f.text), ["這要等本人回覆"]);
+});
+
+test("小助手：一般建議照常回答", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 這個連結安全嗎" }], { chatAnswer: "你可以先查證來源，不要匯款給陌生人" });
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.startsWith("你可以先查證來源"));
+});

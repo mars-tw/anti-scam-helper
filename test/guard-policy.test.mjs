@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideAction, findImpersonated, hasLink, hasScamSignal, isModerationAsk, isModerationClaim, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
+import { decideAction, findImpersonated, hasLink, hasScamSignal, isModerationAsk, isModerationClaim, isPromise, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
 import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
@@ -153,4 +153,16 @@ test("自動回覆：問到踢人／刪除／警告／封鎖／權限一律交�
   for (const ask of ["今天天氣如何", "這個連結安全嗎", "怎麼申請 API"]) assert.equal(isModerationAsk(ask), false, ask);
   for (const answer of ["我這邊沒有踢人", "我沒有管理員權限啦", "會不會是系統誤判", "我不是管理員"]) assert.ok(isModerationClaim(answer), answer);
   assert.equal(isModerationClaim("記得查證，必要時打 165"), false);
+});
+
+test("自動回覆：替本人承諾未來行動的句子會被擋", () => {
+  for (const answer of ["我再把規則調鬆一點，辛苦你重新進來了", "我會幫你處理", "下次我會注意", "我保證不會再發生", "我晚點匯給你", "改天我們約吃飯", "交給我", "我幫你問問看", "我來改設定", "我改一下就好", "我處理好再跟你說", "答應你", "我明天過去"]) {
+    assert.ok(isPromise(answer), answer);
+  }
+});
+
+test("自動回覆：一般建議與說明不擋", () => {
+  for (const answer of ["你可以先查證再說", "建議撥打 165 反詐騙專線", "不要匯款給陌生人", "沒有人能保證獲利", "我覺得這個工具不錯", "我會建議先看官方文件", "我來說明一下：這是官方公告", "這要看你的設定", "記得不要點陌生連結", "我也不知道耶", "可以到設定頁調整", "你再試一次看看", "跟家裡長輩約好一個原則，看到要匯款一律先問"]) {
+    assert.equal(isPromise(answer), false, answer);
+  }
 });
