@@ -62,6 +62,8 @@ export interface Hub {
   handleChecked(chatId: string): void;
   /** A message's reactions changed on LINE (undefined: nobody reacts now). */
   handleReactions(chatId: string, messageId: string, reactions: Reactions | undefined): void;
+  /** An OpenChat's notes changed: bots that may see one of its chats are told (they list notes themselves). */
+  handleNoteStatus(chatIds: string[], noteCount: number | undefined, latestCreatedAt: number | undefined): void;
   /** Names, pictures or members changed somewhere: the list is fetched again (settled and rate limited). */
   handleChatsChanged(): void;
   /** Announces (or clears) the newest known release to everyone connected and to later connections. */
@@ -94,6 +96,8 @@ const GENERIC = {
   MEDIA_FAILED: "無法取得這張圖片。",
   DELETE_UNSUPPORTED: "只有社群可以刪除他人訊息。",
   MESSAGE_DELETE_FAILED: "無法刪除這則訊息，請確認帳號有管理權限。",
+  NOTES_UNSUPPORTED: "這個聊天沒有記事本可讀。",
+  NOTES_FAILED: "無法讀取記事本。",
 } as const;
 
 function updateFrame(info: UpdateInfo): ServerFrame {
@@ -500,6 +504,29 @@ export function createHub(options: HubOptions): Hub {
     if (login.state === "ready") send(socket, { type: "message:deleted", requestId, chatId, messageId });
   }
 
+  /** Read-only: an OpenChat's recent notes (記事本) for a moderation bot, in a chat the bot may reach. */
+  async function handleNotes(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const requestId = requestIdOf(frame);
+    const chatId = typeof frame.chatId === "string" ? frame.chatId : undefined;
+    if (!requestId || !chatId) return fail(socket, "INVALID_REQUEST", requestId);
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square" || typeof provider.listNotes !== "function") return fail(socket, "NOTES_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const limit = Number.isInteger(frame.limit) && (frame.limit as number) > 0 ? Math.min(frame.limit as number, 50) : 20;
+      const notes = await provider.listNotes(chatId, limit);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "notes", requestId, chatId, notes });
+    } catch (error) {
+      if (account !== generation) return;
+      const code = String((error as Error)?.message ?? "").replace(/[^\w-]/g, "").slice(0, 40) || "UNKNOWN";
+      console.warn(`NOTES_FAILED chat=${chatId} code=${code}`);
+      return fail(socket, "NOTES_FAILED", requestId);
+    }
+  }
+
   /**
    * Hands a moderation bot the picture of an image message this server has shown (PNG, JPEG or GIF by
    * content, at most 5 MB), so it can look for scam QR codes. Nothing else: no videos, files or stickers.
@@ -745,6 +772,10 @@ export function createHub(options: HubOptions): Hub {
         case "message:delete":
           void handleBotDelete(socket, frame as Record<string, unknown>, botScope);
           return;
+        case "notes:list":
+          if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleNotes(socket, frame as Record<string, unknown>, botScope);
+          return;
         default:
           fail(socket, "UNKNOWN_TYPE");
       }
@@ -850,6 +881,11 @@ export function createHub(options: HubOptions): Hub {
     },
     handleMessage: ingest,
     handleUnsend: takeBack,
+    handleNoteStatus(chatIds, noteCount, latestCreatedAt) {
+      if (login.state !== "ready") return;
+      const visible = chatIds.filter((chatId) => botScope.has(chatId));
+      if (visible.length) broadcastBots({ type: "note:status", chatIds: visible, ...(noteCount !== undefined ? { noteCount } : {}), ...(latestCreatedAt !== undefined ? { latestCreatedAt } : {}) });
+    },
     handleReactions(chatId, messageId, reactions) {
       if (login.state === "ready") updateReactions(chatId, messageId, reactions);
     },

@@ -3,7 +3,7 @@ import { BaseClient, type Device, type FetchLike } from "@evex/linejs/base";
 import { LINEStruct } from "@evex/linejs/thrift";
 import type { Message as LineMessage, SquareMessage as LineSquareMessage } from "@evex/linejs-types";
 import { avatarMediaId, mp4DurationMs, sniffImage, sniffMedia, type AvatarHost, type MediaBytes } from "../media/service.js";
-import type { Channel, ChannelRef, HistoryPage, MemberRole, Mention, Message, Profile, ReactionKind, Reactions, ReadPosition, StickerPackage } from "../model/dto.js";
+import type { Note, Channel, ChannelRef, HistoryPage, MemberRole, Mention, Message, Profile, ReactionKind, Reactions, ReadPosition, StickerPackage } from "../model/dto.js";
 import { withMyReaction } from "../model/store.js";
 import { memberRole, mentionMetadata, parseMentions, replyTarget } from "./members.js";
 import { parseEmojis } from "./emoji.js";
@@ -34,6 +34,8 @@ export interface ProviderEvents {
    * Talk chats have no parsed live event: their reactions come with the message and with history.
    */
   onReactions: (chatId: string, messageId: string, reactions: Reactions | undefined) => void;
+  /** An OpenChat's note count changed (NOTIFIED_UPDATE_SQUARE_NOTE_STATUS); `chatIds` are its chats this account is in. */
+  onNoteStatus?: (chatIds: string[], noteCount: number | undefined, latestCreatedAt: number | undefined) => void;
   onStatus: (state: "listening" | "reconnecting") => void;
   onError: (code: "SESSION_WRITE_FAILED" | "LINE_LISTEN_FAILED" | "MESSAGE_PARSE_FAILED") => void;
   /**
@@ -88,6 +90,8 @@ export interface LineProvider {
   removeMember(channel: ChannelRef, memberId: string): Promise<void>;
   /** Deletes someone else's message for everyone; OpenChat only (as a manager). */
   deleteMessage(channel: ChannelRef, messageId: string): Promise<void>;
+  /** Recent OpenChat notes (記事本), read-only, newest first. Optional: providers without notes leave it out. */
+  listNotes?(chatId: string, limit?: number): Promise<Note[]>;
   close(): Promise<void>;
 }
 
@@ -310,6 +314,12 @@ export class EvexLineProvider implements LineProvider {
         if (typeof destroyed?.squareChatMid === "string" && typeof destroyed.messageId === "string" && /^\d{1,24}$/.test(destroyed.messageId)) {
           this.unsent(destroyed.squareChatMid, destroyed.messageId);
         }
+      } else if (type === "NOTIFIED_UPDATE_SQUARE_NOTE_STATUS" || type === "36") {
+        const update = event.payload?.notifiedUpdateSquareNoteStatus;
+        if (typeof update?.squareMid !== "string") return;
+        const count = Number(update.noteStatus?.noteCount);
+        const latest = Number(update.noteStatus?.latestCreatedAt);
+        this.events.onNoteStatus?.(this.chatsOfSquare(update.squareMid), Number.isFinite(count) ? count : undefined, Number.isFinite(latest) && latest > 0 ? latest : undefined);
       } else if (type === "NOTIFIED_UPDATE_MESSAGE_STATUS" || type === "46") {
         const update = event.payload?.notifiedUpdateMessageStatus;
         const status = update?.messageStatus?.contents?.messageReactionStatus;
@@ -334,6 +344,54 @@ export class EvexLineProvider implements LineProvider {
       onStale: (reason, detail) => { if (!this.stopped) this.events.onStale?.(reason, detail); },
     });
     this.liveness.start();
+  }
+
+  /** OpenChat chat → its OpenChat (square) mid, learned from the chat list. */
+  private readonly squareOfChat = new Map<string, string>();
+
+  private chatsOfSquare(squareMid: string): string[] {
+    return [...this.squareOfChat].filter(([, square]) => square === squareMid).map(([chat]) => chat);
+  }
+
+  /**
+   * Recent notes (記事本) of the OpenChat a chat belongs to, read-only, newest first. LINE serves OpenChat notes
+   * from the note gateway (`/sn`, homeId = the square mid); the reply shape is not a documented contract, so every
+   * field is read defensively and anything unparsable is dropped. Throws with LINE's code when the call fails.
+   */
+  async listNotes(chatId: string, limit = 20): Promise<Note[]> {
+    const client = this.client;
+    if (!client) throw new Error("NOT_READY");
+    let squareMid = this.squareOfChat.get(chatId);
+    if (!squareMid) {
+      const chat = await client.base.square.getSquareChat({ squareChatMid: chatId });
+      const mid = (chat as { squareChat?: { squareMid?: unknown } } | undefined)?.squareChat?.squareMid;
+      if (typeof mid !== "string") throw new Error("NO_SQUARE");
+      squareMid = mid;
+      this.squareOfChat.set(chatId, mid);
+    }
+    const reply = await client.base.timeline.listPost({ homeId: squareMid, sourceType: "TALKROOM" }) as { code?: unknown; message?: unknown; result?: { feeds?: unknown[] } };
+    if (reply?.code !== 0) throw new Error(`NOTES_${String(reply?.code ?? "NO_CODE").slice(0, 20)}`);
+    const notes: Note[] = [];
+    for (const feed of reply.result?.feeds ?? []) {
+      const post = (feed as { post?: Record<string, any> } | undefined)?.post;
+      const info = post?.postInfo ?? {};
+      const postId = typeof info.postId === "string" ? info.postId : undefined;
+      const text = typeof post?.contents?.text === "string" ? post.contents.text : "";
+      const createdAt = Number(info.createdTime);
+      if (!postId || !Number.isFinite(createdAt)) continue;
+      const updatedAt = Number(info.updatedTime);
+      const writer = post?.userInfo ?? {};
+      notes.push({
+        postId: postId.slice(0, 64),
+        ...(typeof writer.writerMid === "string" ? { authorId: writer.writerMid } : {}),
+        ...(typeof writer.nickname === "string" ? { authorName: writer.nickname.slice(0, 100) } : {}),
+        text: text.slice(0, 4000),
+        createdAt,
+        ...(Number.isFinite(updatedAt) ? { updatedAt } : {}),
+      });
+      if (notes.length >= limit) break;
+    }
+    return notes.sort((a, b) => b.createdAt - a.createdAt);
   }
 
   /** The message's media is no longer fetchable through us, and the hub replaces what it shows. */
@@ -1091,6 +1149,7 @@ export class EvexLineProvider implements LineProvider {
       if (squares.status === "fulfilled") for (const square of squares.value) squareNames[square.mid] = square.name;
       for (const chat of squareChats.value) {
         const squareName = squareNames[chat.raw.squareMid];
+        if (typeof chat.raw.squareMid === "string") this.squareOfChat.set(chat.raw.squareChatMid, chat.raw.squareMid);
         const chatName = chat.raw.name || "未命名聊天";
         const pictureId = avatarMediaId("obs", chat.raw.chatImageObsHash);
         channels.push({

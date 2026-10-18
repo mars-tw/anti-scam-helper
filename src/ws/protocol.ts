@@ -1,4 +1,4 @@
-import type { AuthState, Channel, Mention, Message, Profile, ReactionKind, Reactions, ReadPosition, ScamAnalysis, StickerPackage } from "../model/dto.js";
+import type { AuthState, Channel, Mention, Message, Note, Profile, ReactionKind, Reactions, ReadPosition, ScamAnalysis, StickerPackage } from "../model/dto.js";
 
 export type ListenState = "starting" | "listening" | "reconnecting";
 
@@ -47,6 +47,10 @@ export type ServerFrame =
   | { type: "message:deleted"; requestId: string; chatId: string; messageId: string }
   /** Answer to a bot's `media:fetch`: the picture of a received image message, base64. */
   | { type: "media"; requestId: string; chatId: string; messageId: string; mime: string; data: string }
+  /** Answer to a bot's `notes:list`: the OpenChat's recent notes (記事本), newest first. */
+  | { type: "notes"; requestId: string; chatId: string; notes: Note[] }
+  /** An OpenChat's note count changed (a note was posted or removed): bots may list notes again. */
+  | { type: "note:status"; chatIds: string[]; noteCount?: number; latestCreatedAt?: number }
   /** Answer to a client `ping`: lets the page tell a silent connection from a dead one. */
   | { type: "pong" }
   | { type: "error"; requestId?: string; code: string; message: string };
@@ -67,6 +71,8 @@ export type ClientFrame =
   | { type: "member:remove"; requestId: string; chatId: string; messageId: string; deleteMessage?: boolean }
   /** Bots only, with `api.moderation`: delete someone else's message for everyone (OpenChat, this account a manager). */
   | { type: "message:delete"; requestId: string; chatId: string; messageId: string }
+  /** Bots only, read-only: the OpenChat's recent notes (記事本). */
+  | { type: "notes:list"; requestId: string; chatId: string; limit?: number }
   /** Bots only, with `api.moderation`: the picture of an image message shown by this server (e.g. to read QR codes). */
   | { type: "media:fetch"; requestId: string; chatId: string; messageId: string }
   /** This account's own id, name and picture, on demand (pages and bots alike). */

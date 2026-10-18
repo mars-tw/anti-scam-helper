@@ -128,3 +128,14 @@ export interface Profile {
 }
 
 export type AuthState = "restoring" | "idle" | "authenticating" | "ready" | "error";
+
+/** An OpenChat note (記事本 post), as read for moderation bots. Text is LINE's own; ids are LINE's. */
+export interface Note {
+  postId: string;
+  authorId?: string;
+  authorName?: string;
+  text: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+

@@ -114,6 +114,11 @@ class FakeProvider {
     if (this.removeError) throw this.removeError;
   }
   deleteError = undefined;
+  async listNotes(chatId, limit) {
+    this.calls.push(["notes", chatId, limit]);
+    if (this.notesError) throw this.notesError;
+    return this.notes ?? [];
+  }
   async deleteMessage(channel, messageId) {
     this.calls.push(["delete", channel, messageId]);
     if (this.deleteError) throw this.deleteError;
@@ -1714,4 +1719,30 @@ test("a connection that stops answering pings is closed by the next heartbeat; o
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(healthy.socket.readyState, WebSocket.OPEN);
   assert.equal(pings, 2);
+});
+
+test("a bot lists an OpenChat's notes read-only, only with moderation on and in its own OpenChats; note changes reach bots", async (t) => {
+  const SQUARE = `m${"f".repeat(32)}`;
+  const env = await botEnv(t, { moderation: true, chats: [CHAT, SQUARE] });
+  env.provider.channels = [...env.provider.channels, { channelId: SQUARE, kind: "square", name: "社群" }];
+  env.provider.notes = [{ postId: "n1", authorName: "某人", text: "測試", createdAt: 5 }];
+  env.page.socket.send(JSON.stringify({ type: "channels:refresh" }));
+  await env.page.until((frame) => frame.type === "channels" && frame.channels.some((channel) => channel.channelId === SQUARE));
+  const bot = await env.open();
+  const ask = async (frame) => {
+    bot.socket.send(JSON.stringify(frame));
+    return bot.until((reply) => reply.requestId === frame.requestId);
+  };
+  assert.deepEqual(await ask({ type: "notes:list", requestId: "n1", chatId: SQUARE, limit: 999 }), { type: "notes", requestId: "n1", chatId: SQUARE, notes: env.provider.notes });
+  assert.deepEqual(env.provider.calls.filter((call) => call[0] === "notes"), [["notes", SQUARE, 50]]);
+  assert.equal((await ask({ type: "notes:list", requestId: "n2", chatId: CHAT })).code, "NOTES_UNSUPPORTED");
+  assert.equal((await ask({ type: "notes:list", requestId: "n3", chatId: "m-other" })).code, "UNKNOWN_CHAT");
+  env.provider.notesError = new Error("NOTES_403");
+  assert.equal((await ask({ type: "notes:list", requestId: "n4", chatId: SQUARE })).code, "NOTES_FAILED");
+  env.hub.handleNoteStatus([SQUARE, "m-hidden"], 3, 9);
+  assert.deepEqual(await bot.until((frame) => frame.type === "note:status"), { type: "note:status", chatIds: [SQUARE], noteCount: 3, latestCreatedAt: 9 });
+  const off = await botEnv(t, { chats: [SQUARE] });
+  const plain = await off.open();
+  plain.socket.send(JSON.stringify({ type: "notes:list", requestId: "n5", chatId: SQUARE }));
+  assert.equal((await plain.until((reply) => reply.requestId === "n5")).code, "MODERATION_UNAVAILABLE");
 });

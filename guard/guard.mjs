@@ -21,6 +21,7 @@ import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAns
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
+import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
 
@@ -1662,6 +1663,83 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   return reply.type === "sent";
 }
 
+// ── 記事本巡查 ───────────────────────────────────────────────
+// 記事本貼文不會進訊息流：連線／醒來補掃後、收到記事本變動通知、以及每 intervalMinutes 分鐘，讀守護群的最近記事本。
+// 判斷走 decide()（規則 → 地端 → Meta）；處置見 notes.mjs decideNoteAction（不踢人；刪除需服務支援，目前沒有）。
+// 啟用前（baseline 之前）就存在的記事本只記錄判斷結果，不通知。
+const notesCfg = { ...NOTE_DEFAULTS, ...config.notes };
+const notesSeen = notesCfg.enabled ? new NotesSeen(resolve(logDir, notesCfg.seenFile), { maxSeen: notesCfg.maxSeen }) : undefined;
+const NOTE_DELETE_SUPPORTED = false; // 服務端沒有刪除記事本的 frame
+let notesRunning = false;
+let notesAgain = false;
+const notesUnsupported = new Set();
+
+function noteChats(channels = lastChannels) {
+  return channels.filter((channel) => channel.kind === "square" && !notesUnsupported.has(channel.channelId)).map((channel) => channel.channelId);
+}
+
+async function scanNotes(ws, chatIds = noteChats(), reason = "periodic") {
+  if (!notesSeen || ws?.readyState !== WebSocket.OPEN || !chatIds.length) return;
+  if (notesRunning) { notesAgain = true; return; }
+  notesRunning = true;
+  try {
+    for (const chatId of chatIds) {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const answer = await call(ws, { type: "notes:list", chatId, limit: notesCfg.limit }, 60_000);
+      if (answer.type !== "notes") {
+        if (answer.code === "NOTES_UNSUPPORTED" || answer.code === "UNKNOWN_TYPE") notesUnsupported.add(chatId);
+        record({ action: "notes-fetch-failed", chatId, reason, code: answer.code });
+        continue;
+      }
+      record({ action: "notes-fetched", chatId, reason, count: answer.notes.length, newest: answer.notes[0]?.createdAt });
+      for (const note of answer.notes) {
+        const key = noteKey(chatId, note);
+        if (notesSeen.has(key)) continue;
+        try { await handleNote(ws, chatId, note); } catch (error) { recordError("note", error.message); }
+        notesSeen.add(key);
+      }
+    }
+  } finally {
+    notesRunning = false;
+    if (notesAgain) { notesAgain = false; void scanNotes(ws, noteChats(), "again"); }
+  }
+}
+
+async function handleNote(ws, chatId, note) {
+  const text = noteText(note.text);
+  const at = note.updatedAt ?? note.createdAt;
+  const base = { chatId, notePostId: note.postId, senderId: note.authorId, senderName: note.authorName, noteCreatedAt: note.createdAt, ...contentRef(text) };
+  if (!text) return;
+  const message = { messageId: `note:${note.postId}`, channelId: chatId, senderId: note.authorId, senderName: note.authorName, contentType: "NOTE", createdAt: note.createdAt, text };
+  const protectedAuthor = Boolean(note.authorId) && (neverKick(message) || protectedMembers.some((entry) => entry.ids.has(note.authorId)) || botIds.has(note.authorId));
+  const result = await decide(message, text);
+  const old = at < notesSeen.baseline || Date.now() - at > notesCfg.maxAgeHours * 3_600_000;
+  const canDelete = notifyChats.has(chatId) && !noDeleteChats.has(chatId) && selfIsAdmin(chatId);
+  const action = decideNoteAction({ score: result.score, verdict: result.verdict, review: result.review, strongScore, notifyScore: config.notifyScore ?? 3,
+    protectedAuthor, deleteOnConfirmed: notesCfg.deleteOnConfirmed === true, canDelete, deleteSupported: NOTE_DELETE_SUPPORTED });
+  const entry = { ...base, score: result.score, names: result.names, verdict: result.verdict, review: result.review, noteAction: action, protectedAuthor };
+  if (action === "none") { if (result.score > 0 || result.verdict === "SCAM") record({ action: "note-checked", ...entry }); return; }
+  if (old) { record({ action: "note-flag-baseline", ...entry, reason: "建立於啟用前或太舊，只記錄不通知" }); return; }
+  await notifyNote(ws, entry, note, action === "delete");
+}
+
+async function notifyNote(ws, entry, note, deleting) {
+  if (!notify.enabled || !notifyChats.has(entry.chatId)) { record({ action: "note-flag", ...entry, notified: false, reason: "chat-not-allowed" }); return; }
+  const admins = adminsOf(entry.chatId);
+  const { text, mentions } = buildNoteNotice({ snippet: noteSnippet(note.text, blockedWords), reason: noticeReason(entry), authorName: note.authorName ? safeName(note.authorName, blockedWords) : undefined, admins, deleting }, blockedWords);
+  if (config.dryRun) {
+    console.log(`【試跑，未發通知】${text.replace(/\n/g, " ")}`);
+    record({ action: "note-notify-dry-run", ...entry, noticeChars: text.length });
+    return;
+  }
+  const { answer, tried } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions });
+  if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
+  record({ action: answer.type === "sent" ? "note-notified" : "note-notify-failed", ...entry, code: answer.code, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
+  if (deleting) record({ action: "note-delete-unsupported", chatId: entry.chatId, notePostId: entry.notePostId });
+}
+
+if (notesSeen) setInterval(() => { if (currentWs) void scanNotes(currentWs, noteChats(), "periodic"); }, Math.max(5, notesCfg.intervalMinutes) * 60_000).unref?.();
+
 async function drain(ws) {
   if (busy) return;
   busy = true;
@@ -1712,6 +1790,7 @@ async function syncHistory(ws, channels) {
       if (!last) await sleep(delays[attempt] * 1000);
     }
   }
+  if (run === historyRun) void scanNotes(ws, noteChats(channels), "catch-up");
 }
 
 /** 一頁 100 則不夠蓋住斷線期間時，往前翻頁（最多 catchUp.maxPages 頁），直到碰到水位或超過補掃上限。 */
@@ -1832,6 +1911,9 @@ function connect() {
         if (entry && !entry.preNotified) notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
         return;
       }
+      case "note:status":
+        if (Array.isArray(frame.chatIds)) void scanNotes(ws, noteChats().filter((chatId) => frame.chatIds.includes(chatId)), "note-status");
+        return;
       case "sent":
         return;
       case "error": {
