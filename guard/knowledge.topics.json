@@ -1,0 +1,48 @@
+{
+  "_說明": "小助手的「先查資料再回答」主題清單。只放公開官方網址。match：觸發的正規式（不分大小寫）；strong：命中就一定算，不看 exclude；exclude：排除誤觸發（例如 HTML 的 h3 標籤、HTTP/3）；hints：中文問題對應的英文關鍵字，幫地端挑出相關段落。",
+  "topics": [
+    {
+      "id": "minimax-h3",
+      "title": "MiniMax H3（MiniMax 開源的影片生成模型）",
+      "match": [
+        "minimax[\\s\\-_]*h3",
+        "海螺\\s*(ai\\s*)?h3",
+        "(?<![a-z0-9<\\/#._\\-])h3(?![a-z0-9_>])"
+      ],
+      "strong": [
+        "minimax[\\s\\-_]*h3",
+        "海螺\\s*(ai\\s*)?h3",
+        "h3[\\s\\-_]*(base|fl2va|ref2va|context[\\s\\-_]*ir|regenerate)"
+      ],
+      "exclude": [
+        "<\\s*\\/?\\s*h3",
+        "h3\\s*(標籤|標題|tag|元素|element|heading|字級|字體)",
+        "(標籤|標題|tag|heading)\\s*h3",
+        "\\b(html|css|markdown|dom|jsx|tailwind)\\b",
+        "http\\s*\\/?\\s*3|\\bquic\\b|\\balpn\\b",
+        "\\buber\\b|六角(格|網格)|hexagon|geospatial|地理索引",
+        "流感|禽流感|病毒",
+        "\\bh3\\s*(電池|鋼|鋼材|鋼構)"
+      ],
+      "hints": [
+        { "when": "解析度|畫質|2k|768|4k|高清", "add": "resolution 768 2K Regenerate short side" },
+        { "when": "秒|長度|多長|時長", "add": "duration seconds 4 15" },
+        { "when": "聲音|音訊|音效|配音|語音|對白|語言", "add": "audio stereo 32 kHz dialogue languages" },
+        { "when": "授權|商用|免費|收費|license|版權", "add": "license community commercial royalty free revenue" },
+        { "when": "顯卡|gpu|vram|記憶體|硬體|跑得動|本機|地端|部署|自架|安裝", "add": "GPU hardware B200 deploy local self-host install ComfyUI SGLang Diffusers vLLM" },
+        { "when": "下載|權重|模型檔|checkpoint", "add": "download weights checkpoint Hugging Face FL2VA Ref2VA" },
+        { "when": "comfy", "add": "ComfyUI workflow templates" },
+        { "when": "參考|首尾幀|首幀|尾幀|圖生|文生|圖片", "add": "first last frame reference image video FL2VA Ref2VA text-to-video" },
+        { "when": "架構|參數|多大|幾b|encoder|transformer", "add": "architecture Omni-Transformer encoder Qwen3-VL VAE parameters" },
+        { "when": "api|線上|網頁|app|海螺", "add": "API online app Hailuo platform" }
+      ],
+      "sources": [
+        { "label": "Hugging Face 模型卡（MiniMaxAI/MiniMax-H3）", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/README.md" },
+        { "label": "GitHub 官方 README（MiniMax-AI/MiniMax-H3）", "url": "https://raw.githubusercontent.com/MiniMax-AI/MiniMax-H3/main/README.md" },
+        { "label": "MiniMax 官方開源公告", "url": "https://www.minimax.io/news/minimax-h3-open-source" },
+        { "label": "MiniMax 官方自架部署文件", "url": "https://platform.minimax.io/docs/guides/local-deploy-h3" },
+        { "label": "MiniMax 官方 H3 教學與常見問題", "url": "https://design.minimax.io/h3" }
+      ]
+    }
+  ]
+}

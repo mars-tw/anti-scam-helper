@@ -9,18 +9,19 @@ import { join } from "node:path";
 import test from "node:test";
 import QRCode from "qrcode";
 import { WebSocketServer } from "../guard/node_modules/ws/wrapper.mjs";
+import { KnowledgeCache } from "../guard/knowledge.mjs";
 
 const SCAM_TEXT = "通知：本群明天要刪除了，請大家加入新群 https://scam-site.xyz/join 快點";
 const NORMAL_TEXT = "我剛剛醒，睡很久";
 const now = Date.now();
 
-async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, media } = {}) {
+async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, media, setup } = {}) {
   const llm = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
       // 小助手的提示裡有「回答範圍」；其餘（詐騙判斷、覆核）一律回 SCAM。
-      const content = chatAnswer && body.includes("回答範圍") ? (typeof chatAnswer === "function" ? chatAnswer(JSON.parse(body)) : chatAnswer) : "SCAM\n測試";
+      const content = chatAnswer && (body.includes("回答範圍") || body.includes("資料整理員")) ? (typeof chatAnswer === "function" ? chatAnswer(JSON.parse(body)) : chatAnswer) : "SCAM\n測試";
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });
@@ -50,8 +51,9 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
     dryRun: false, localScreenAll: true, kickPolicy: "strict", strongScore: 6, reviewScore: 3, notifyScore: 3, deleteMessage: true,
     llm: model, review: model, patterns: { enabled: false }, qr: { enabled: false }, logDir: join(dir, "logs"),
     notify: { enabled: true, chats: ["cA", "cB"], cooldownSeconds: 0, beforeActionMs: 10 }, scamLink: { deleteOnConfirmed: true },
-    catchUp: { scanMinutes: 0 }, ...extraConfig,
+    catchUp: { scanMinutes: 0 }, knowledge: { prefetch: false }, ...extraConfig,
   };
+  if (setup) setup(dir, config);
   writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
   const child = spawn(process.execPath, ["guard/guard.mjs", join(dir, "guard.config.json")], { env: { ...process.env, LINEJS_TOKEN: "test", LINEJS_URL: `ws://127.0.0.1:${wss.address().port}` }, stdio: "ignore" });
   await new Promise((done) => setTimeout(done, waitMs));
@@ -320,4 +322,35 @@ test("正式組合：別的群的管理員來購物再犯也不踢", async () =>
     { messageId: "m2", channelId: "cB", senderId: "pAdmin", senderName: "阿明", text: SHOP_AD.replace("/a", "/b") },
   ], { history: ADMIN_HISTORY, waitMs: 3500 });
   assert.equal(r.removes.length, 0);
+});
+
+// 查資料主題（H3）：官方頁面抓不到 → 用本機快取；地端整理後的事實要出現在第二層回覆模型的系統提示裡。
+function seedKnowledge(dir, config, { seed = true } = {}) {
+  const url = "https://127.0.0.1:1/h3-readme";
+  writeFileSync(join(dir, "topics.json"), JSON.stringify({ topics: [{ id: "minimax-h3", title: "MiniMax H3", match: ["(?<![a-z0-9<\\/#._\\-])h3(?![a-z0-9_>])"], exclude: ["<\\s*\\/?\\s*h3"], sources: [{ label: "官方 README", url }] }] }));
+  config.knowledge = { prefetch: false, topicsFile: join(dir, "topics.json"), fetchTimeoutMs: 500 };
+  writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
+  if (seed) new KnowledgeCache(join(dir, "logs", "knowledge")).write(url, `# MiniMax H3\nMiniMax H3 is an open-weight video model. SEEDFACT output duration 4-15 seconds at 24 FPS.\n${"x ".repeat(120)}`);
+}
+const groundedAnswer = (req) => {
+  const prompt = JSON.stringify(req);
+  if (prompt.includes("資料整理員")) return prompt.includes("SEEDFACT") ? "- 影片長度 4 到 15 秒，24 FPS [1] LOCALSUMMARY" : "沒有資料";
+  if (prompt.includes("查證資料") && prompt.includes("LOCALSUMMARY") && prompt.includes("SEEDFACT")) return "H3 影片長度 4 到 15 秒（官方資料）";
+  if (prompt.includes("查證資料") && prompt.includes("查不到")) return "官方資料我這邊暫時查不到";
+  return "沒有查證資料";
+};
+
+test("小助手：問 H3 → 地端用快取整理 → 雲端依查證資料回答，結尾（AI代理）", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 H3 影片最長幾秒？" }], { chatAnswer: groundedAnswer, setup: seedKnowledge, waitMs: 4000 });
+  assert.deepEqual(r.sends.map((f) => f.text), ["H3 影片長度 4 到 15 秒（官方資料）（AI代理）"]);
+});
+
+test("小助手：問 H3 但抓不到也沒快取 → 提示要謹慎、不編造", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 H3 要多少顯卡" }], { chatAnswer: groundedAnswer, setup: (dir, config) => seedKnowledge(dir, config, { seed: false }), waitMs: 4000 });
+  assert.deepEqual(r.sends.map((f) => f.text), ["官方資料我這邊暫時查不到（AI代理）"]);
+});
+
+test("小助手：HTML 的 <h3> 問題不走查資料", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 <h3> 標題怎麼置中" }], { chatAnswer: groundedAnswer, setup: seedKnowledge });
+  assert.deepEqual(r.sends.map((f) => f.text), ["沒有查證資料（AI代理）"]);
 });

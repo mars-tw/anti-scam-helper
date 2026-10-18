@@ -19,6 +19,7 @@ import { allLinksLegit, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop
 import { labelReply } from "./policy.mjs";
 import { buildGuardFacts, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
+import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
 process.on("unhandledRejection", (error) => {
@@ -110,6 +111,21 @@ const questionRedact = {
   warnedTtlDays: 7,
   ...config.questionRedact,
 };
+
+// 小助手「先查資料再回答」（knowledge.mjs）：問題提到主題清單（預設 guard/knowledge.topics.json，只有公開官方網址）裡的主題，
+// 先由地端抓官方頁面（快取 ttlHours）並用地端模型整理事實，再把事實交給回覆模型回答。chat.knowledge 可覆寫：
+// { enabled, topicsFile, ttlHours, prefetch, localLlm, localTimeoutMs, ... }（也可寫在最上層 knowledge）。localLlm 省略＝用 llm 鏈裡第一個本機模型。
+const knowledge = { enabled: true, topicsFile: "knowledge.topics.json", prefetch: true, ...KNOWLEDGE_DEFAULTS, ...config.knowledge, ...chat.knowledge };
+const knowledgeTopics = knowledge.enabled ? loadTopics(resolve(here, knowledge.topicsFile)) : [];
+const knowledgeCache = knowledgeTopics.length ? new KnowledgeCache(join(logDir, "knowledge"), { ttlHours: knowledge.ttlHours, maxChars: knowledge.maxChars, fetchOptions: { timeoutMs: knowledge.fetchTimeoutMs, maxBytes: knowledge.maxBytes } }) : undefined;
+const knowledgeLocalLlm = (() => {
+  let node = knowledge.localLlm;
+  if (!node) for (let n = scamLlm; n; n = n.fallback) if (isLocalModel({ ...n, fallback: undefined })) { node = n; break; }
+  if (!node) return undefined;
+  const single = { ...node, fallback: undefined, timeoutMs: knowledge.localTimeoutMs };
+  return isLocalModel(single) ? single : undefined; // 第一層一定要在本機
+})();
+const knowledgeMemo = new Map(); // 主題＋問題 → { at, grounding }：同樣的問題 6 小時內不重跑地端整理
 
 // 規則計分（含去空白正規化、短網址清單、假換群字眼）在 rules.mjs。
 const ruleScore = makeRuleScorer(config.benignDomains);
@@ -574,6 +590,25 @@ function sendLabeled(ws, message, text) {
   return send(ws, message, labelReply(text, replyLabel));
 }
 
+async function groundForReply(topic, ask) {
+  const key = `${topic.id}|${ask.toLowerCase().replace(/@\S+/g, "").replace(/\s+/g, " ").trim()}`;
+  const hit = knowledgeMemo.get(key);
+  if (hit && Date.now() - hit.at < 6 * 3_600_000) return { ...hit.grounding, memo: true };
+  const summarize = knowledgeLocalLlm ? (system, user, maxTokens) => complete(knowledgeLocalLlm, system, user, maxTokens) : undefined;
+  let grounding;
+  try {
+    grounding = await groundTopic({ topic, question: ask, cache: knowledgeCache, summarize, limits: knowledge });
+  } catch (error) {
+    recordError("knowledge", String(error?.message ?? error).slice(0, 80));
+    grounding = { ok: false, facts: "", excerpts: "", sources: [], via: "error", stale: false };
+  }
+  if (grounding.ok && grounding.via === "local-summary") {
+    knowledgeMemo.set(key, { at: Date.now(), grounding });
+    while (knowledgeMemo.size > 50) knowledgeMemo.delete(knowledgeMemo.keys().next().value);
+  }
+  return grounding;
+}
+
 async function reply(ws, message, ask) {
   if (repliedIds.has(message.messageId)) return;
   markReplied(message.messageId);
@@ -610,7 +645,11 @@ async function reply(ws, message, ask) {
   // 一般閒聊、技術問題不帶硬規則，避免模型過度保守。
   const commitmentAsk = chat.noCommitment !== false && COMMITMENT_ASK.test(ask);
   const isAdmin = selfIsAdmin(message.channelId);
-  const baseSystem = `${CHAT_SYSTEM}\n\n${guardFactsFor(message.channelId)}`;
+  // 主題問題（例如 H3）：第一層地端查資料整理，結果當查證資料交給第二層回覆模型。
+  const topic = matchTopic(ask, knowledgeTopics);
+  const grounding = topic ? await groundForReply(topic, ask) : undefined;
+  if (topic) log("knowledge-grounded", { topic: topic.id, ok: grounding.ok, via: grounding.via, sources: grounding.sources.length, stale: grounding.stale, memo: grounding.memo === true });
+  const baseSystem = `${CHAT_SYSTEM}\n\n${guardFactsFor(message.channelId)}${topic ? `\n\n${groundingPrompt(topic, grounding)}` : ""}`;
   const system = commitmentAsk ? `${baseSystem}\n\n【硬規則】對方在要求${ownerLabel}答應或安排事情（約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、時間安排）。絕對不要替${ownerLabel}答應，只回「這個要等本人親自回覆喔。」` : baseSystem;
   const used = {};
   let answer = await complete(chatLlm, system, user, 400, undefined, used);
@@ -1578,4 +1617,9 @@ if (questionRedact.enabled) console.log(`詢問者遮蔽已啟用：問詐騙＋
 if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "沒有 QR 的截圖只記錄，不通知、不移除"}）`);
 if (!reviewLlm) console.log("提醒：設定檔沒有 review（覆核模型），沿用分層巡邏之前的舊流程：不經覆核，依模型判定與規則分數踢人（kickPolicy 預設：模型判 SCAM 就踢；strict：還要規則分數達 strongScore），冒名與 LINE 邀請 QR 直接移除。要改成覆核才踢，請加上 review 區段，見 guard/README.md〈分層巡邏〉。");
 if (!scamLlmLocal) console.log("提醒：llm 的端點不在本機（127.0.0.1／localhost／::1 以外，含 fallback），訊息送出前一律先去識別化（網址只留網域，手機／email／帳號／LINE ID 換成代號）。");
+if (knowledgeTopics.length) {
+  console.log(`查資料主題：${knowledgeTopics.map((t) => t.id).join("、")}（第一層地端：${knowledgeLocalLlm ? "抓官方頁面＋地端模型整理" : "只抓官方頁面，沒有本機模型可整理"}；快取 ${knowledge.ttlHours} 小時）`);
+  // 啟動時先在背景更新過期的頁面快取（只抓清單內的官方網址；失敗不影響守衛）。
+  if (knowledge.prefetch) for (const topic of knowledgeTopics) for (const source of topic.sources) knowledgeCache.get(source, topic.allowHosts).catch(() => {});
+}
 connect();
