@@ -20,6 +20,7 @@ import { labelReply } from "./policy.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
+import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
@@ -380,6 +381,38 @@ const ABUSE = /你現在是|從現在(起|開始)你是|沒有(任何)?限制|�
 // 本人的暱稱（chat.ownerNames，例如 ["小明"]）：用在個資／承諾判斷與回覆清理。預設空陣列＝只用「你／我」判斷。
 const ownerNames = (chat.ownerNames ?? []).filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim());
 const ownerLabel = ownerNames[0] ?? "本人";
+// 叫名字就回應（name-trigger.mjs）：文字裡直接叫本人（「阿軒你好」「問一下軒哥」）跟 @ 一樣回；只是在講他不回。
+// names 預設＝ownerNames，加上「阿X」的常見叫法「X哥」「X割」「X割割」。chat.nameTrigger 可覆寫：
+// { enabled, names, groupCooldownSeconds（每個聊天室叫名字觸發的冷卻，預設 120 秒）, maxAgeMinutes（超過就不回，預設 10） }。
+const nameTrigger = {
+  enabled: true,
+  names: ownerNames.flatMap((name) => (/^阿.$/.test(name) ? [name, `${name[1]}哥`, `${name[1]}割`, `${name[1]}割割`] : [name])),
+  groupCooldownSeconds: 120,
+  // 防其他群組機器人互叫：同一人叫名字觸發，30 分鐘內只回一次；同一人 90 秒內已連發 3 則以上（像機器人）就不因叫名字回。
+  senderCooldownSeconds: 1800,
+  burstMessages: 3,
+  burstSeconds: 90,
+  maxAgeMinutes: chat.catchUpMinutes ?? 10,
+  ...chat.nameTrigger,
+};
+const callsOwner = nameTrigger.enabled ? makeNameMatcher(nameTrigger.names) : () => false;
+const nameCooldown = makeGroupCooldown(nameTrigger.groupCooldownSeconds);
+const nameTriggered = new Set(); // 因叫名字觸發的訊息 id
+const senderActivity = new Map(); // 「聊天室 成員」→ 最近發言時間（只記時間，判斷連發）
+const nameRepliedAt = new Map(); // 「聊天室 成員」→ 上次因叫名字回覆的時間
+function noteActivity(message) {
+  const key = `${message.channelId} ${message.senderId}`;
+  const at = message.createdAt ?? Date.now();
+  const list = (senderActivity.get(key) ?? []).filter((item) => at - item.at < nameTrigger.burstSeconds * 1000 && item.id !== message.messageId);
+  list.push({ id: message.messageId, at });
+  senderActivity.set(key, list);
+  if (senderActivity.size > 3000) senderActivity.delete(senderActivity.keys().next().value);
+}
+/** 這則之前 burstSeconds 內同一人已經發了幾則（不含這則）。 */
+function burstBefore(message) {
+  const at = message.createdAt ?? Date.now();
+  return (senderActivity.get(`${message.channelId} ${message.senderId}`) ?? []).filter((item) => item.id !== message.messageId && item.at <= at && at - item.at < nameTrigger.burstSeconds * 1000).length;
+}
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const ownerAlt = ownerNames.map(escapeRegExp);
 const altWith = (base, extra) => `(${[...base, ...extra].join("|")})`;
@@ -530,13 +563,23 @@ function mentionsSelfByName(message, mention) {
   return true;
 }
 
+const staleLogged = new Set();
 function question(message, text) {
   if (!chat.enabled || !message.text) return undefined;
   if (chat.chats && !chat.chats.includes(message.channelId)) return undefined;
   if (chat.mentionOnly) {
     const mentioned = message.mentions?.some((mention) => isSelf(message.channelId, mention.userId) || mentionsSelfByName(message, mention));
     const repliedToMe = message.replyTo && ownMessages.has(message.replyTo);
-    return mentioned || repliedToMe ? text : undefined;
+    const named = !mentioned && !repliedToMe && callsOwner(text, message.mentions);
+    if (!mentioned && !repliedToMe && !named) return undefined;
+    // 補掃（斷線、電腦暫停後）撈到的舊訊息：超過 maxAgeMinutes 就不回，免得隔很久才冒出來回。
+    if (message.createdAt && Date.now() - message.createdAt > nameTrigger.maxAgeMinutes * 60_000) {
+      if (staleLogged.size > 2000) staleLogged.clear();
+      if (!staleLogged.has(message.messageId)) { staleLogged.add(message.messageId); record({ action: "reply-skipped", reason: named ? "stale-name" : "stale", chatId: message.channelId, messageId: message.messageId, ageSeconds: Math.round((Date.now() - message.createdAt) / 1000) }); }
+      return undefined;
+    }
+    if (named) { nameTriggered.add(message.messageId); if (nameTriggered.size > 2000) nameTriggered.delete(nameTriggered.values().next().value); }
+    return text;
   }
   for (const word of chat.triggers) {
     if (text.startsWith(word)) return text.slice(word.length).replace(/^[\s,，:：、]+/, "") || text;
@@ -614,9 +657,18 @@ async function reply(ws, message, ask) {
   if (repliedIds.has(message.messageId)) return;
   markReplied(message.messageId);
   const senderKey = `${message.channelId} ${message.senderId}`;
+  const byName = nameTriggered.has(message.messageId);
+  // 叫名字觸發：每個聊天室有自己的冷卻，避免大家一直叫名字洗版。
+  if (byName) {
+    const skip = (reason) => record({ action: "reply-skipped", reason, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+    if (burstBefore(message) >= nameTrigger.burstMessages) return skip("name-burst");
+    if (Date.now() - (nameRepliedAt.get(senderKey) ?? 0) < nameTrigger.senderCooldownSeconds * 1000) return skip("name-sender-cooldown");
+    if (!nameCooldown(message.channelId)) return skip("name-cooldown");
+    nameRepliedAt.set(senderKey, Date.now());
+  }
   if (!allowedToReply(senderKey)) return;
   // 日誌不記訊息文字：問題只留短雜湊與長度。
-  const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(ask, "ask"), ...extra });
+  const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(ask, "ask"), ...(byName ? { trigger: "name" } : {}), ...extra });
   if (!withinDailyQuota(senderKey)) return log("quota-exceeded");
   if (ask.length > chat.maxQuestionChars) {
     sendLabeled(ws, message, `問題有點長，可以濃縮在 ${chat.maxQuestionChars} 字內再問我嗎？`);
@@ -1072,6 +1124,7 @@ async function handle(ws, message) {
     return;
   }
   learnAdmin(message);
+  noteActivity(message);
   // 冒名＋外部連結（同一則或前後 2 分鐘內）：確認詐騙。圖片的 QR 在 checkImage 解碼後判斷。
   if (text && !message.senderRole && !whitelist.has(message.senderId)) {
     const cleaned = sanitizeLinks(text).text;
@@ -1661,7 +1714,7 @@ function connect() {
   const ws = new WebSocket(process.env.LINEJS_URL ?? config.url ?? "ws://127.0.0.1:3789/api/ws", { headers: { Authorization: `Bearer ${token}` } });
   ws.on("open", () => {
     backoff = 1000;
-    console.log(`已連線 LINE.js${config.dryRun ? "（反詐試跑模式：只記錄、不踢人）" : ""}${kickMode === "notify" ? "（踢人暫停：kickMode=notify，只通知）" : ""}${chat.enabled ? (chat.mentionOnly ? "；@ 自動回應已啟用（只回 @ 本帳號或回覆本帳號訊息的那則）" : `；小助手已啟用（觸發詞：${chat.triggers.join("、")}${chat.onMention ? "，或 @ 本帳號" : ""}）`) : ""}`);
+    console.log(`已連線 LINE.js${config.dryRun ? "（反詐試跑模式：只記錄、不踢人）" : ""}${kickMode === "notify" ? "（踢人暫停：kickMode=notify，只通知）" : ""}${chat.enabled ? (chat.mentionOnly ? `；@ 自動回應已啟用（只回 @ 本帳號、回覆本帳號訊息${nameTrigger.enabled && nameTrigger.names.length ? "，或直接叫名字" : ""}的那則）` : `；小助手已啟用（觸發詞：${chat.triggers.join("、")}${chat.onMention ? "，或 @ 本帳號" : ""}）`) : ""}`);
   });
   ws.on("message", (data) => {
     const frame = JSON.parse(data.toString());

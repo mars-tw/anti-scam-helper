@@ -402,3 +402,58 @@ test("小助手：HTML 的 <h3> 問題不走查資料", async () => {
   const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 <h3> 標題怎麼置中" }], { chatAnswer: groundedAnswer, setup: seedKnowledge });
   assert.deepEqual(r.sends.map((f) => f.text), ["沒有查證資料（AI代理）"]);
 });
+
+// 叫名字就回應（mentionOnly 模式）：文字裡直接叫本人，跟 @ 一樣回；只是在講他、別人的名字、本帳號自己、太舊的訊息都不回。
+const NAMED = { chat: { enabled: true, mentionOnly: true, systemPrompt: "你是本人的代理。回答範圍：一般問題。", hardRefusal: "這個要等本人親自回覆喔。", ownerNames: ["阿軒"], selfIds: { cA: ["pSelf"], cB: ["pSelf"] }, userCooldownSeconds: 0 } };
+const askName = (text, extra = {}) => ({ messageId: `n${Math.random().toString(36).slice(2, 8)}`, channelId: "cA", senderId: "pAsk", senderName: "成員", text, ...extra });
+
+test("叫名字：「阿軒你好」「問一下軒哥」「轩割」都回，結尾（AI代理）", async () => {
+  for (const text of ["阿軒你好，這個連結安全嗎", "問一下軒哥 H3 好用嗎", "轩割 在吗"]) {
+    const r = await runGuard({ ...NAMED, protectedIds: ["pAsk"] }, [askName(text)], { chatAnswer: OK_ANSWER });
+    assert.deepEqual(r.sends.map((f) => f.text), [`${OK_ANSWER}（AI代理）`], text);
+  }
+});
+
+test("叫名字：只是在講他、別人的名字、引號裡、本帳號自己說 → 不回", async () => {
+  const r = await runGuard({ ...NAMED, protectedIds: ["pAsk"] }, [
+    askName("阿軒的機器人剛剛踢人了"),
+    askName("子軒哥你好", { senderId: "pAsk2" }),
+    askName("他寫「阿軒你好」好好笑", { senderId: "pAsk3" }),
+    askName("阿軒你好", { senderId: "pSelf", channelId: "cB" }),
+  ], { chatAnswer: OK_ANSWER });
+  assert.equal(r.sends.length, 0, JSON.stringify(r.sends));
+});
+
+test("叫名字：同一群冷卻（兩個人連續叫只回一次），不同群各回一次", async () => {
+  const r = await runGuard({ ...NAMED, protectedIds: ["pAsk", "pAsk2"] }, [
+    askName("阿軒在嗎"),
+    askName("阿軒 這是詐騙嗎", { senderId: "pAsk2" }),
+    askName("軒哥你好", { channelId: "cB" }),
+  ], { chatAnswer: OK_ANSWER, waitMs: 3500 });
+  assert.equal(r.sends.length, 2, JSON.stringify(r.sends));
+  assert.deepEqual(r.sends.map((f) => f.chatId).sort(), ["cA", "cB"]);
+});
+
+test("補掃到超過 10 分鐘的舊訊息：叫名字、@ 都不回", async () => {
+  const old = Date.now() - 20 * 60_000;
+  const r = await runGuard({ ...NAMED, protectedIds: ["pAsk"] }, [
+    askName("阿軒你好", { createdAt: old }),
+    askName("@本人 你好", { createdAt: old, senderId: "pAsk2", mentions: [{ userId: "pSelf", start: 0, end: 3 }] }),
+  ], { chatAnswer: OK_ANSWER });
+  assert.equal(r.sends.length, 0);
+});
+
+test("對照：@ 本帳號（新訊息）照常回", async () => {
+  const r = await runGuard({ ...NAMED, protectedIds: ["pAsk"] }, [askName("@本人 你好", { mentions: [{ userId: "pSelf", start: 0, end: 3 }] })], { chatAnswer: OK_ANSWER });
+  assert.equal(r.sends.length, 1);
+});
+
+test("叫名字：像機器人連發（90 秒內已 3 則）不回；同一人 30 分鐘內只因叫名字回一次", async () => {
+  const burst = await runGuard({ ...NAMED, protectedIds: ["pBot"] }, [
+    askName("大家快投票", { senderId: "pBot" }), askName("目前票數 1 比 1", { senderId: "pBot" }), askName("還差一票", { senderId: "pBot" }),
+    askName("阿軒，快投 1 或 2 吧！", { senderId: "pBot" }),
+  ], { chatAnswer: OK_ANSWER });
+  assert.equal(burst.sends.length, 0, JSON.stringify(burst.sends));
+  const repeat = await runGuard({ ...NAMED, chat: { ...NAMED.chat, nameTrigger: { groupCooldownSeconds: 0 } }, protectedIds: ["pAsk"] }, [askName("阿軒你好"), askName("阿軒在嗎")], { chatAnswer: OK_ANSWER, waitMs: 3500 });
+  assert.equal(repeat.sends.length, 1, JSON.stringify(repeat.sends));
+});
