@@ -324,6 +324,54 @@ test("正式組合：別的群的管理員來購物再犯也不踢", async () =>
   assert.equal(r.removes.length, 0);
 });
 
+// ── 假冒管理員（暱稱）──────────────────────────────────────────
+const FAKE = { ...PROD, fakeAdmin: { enabled: true, avatar: false } };
+
+test("假冒管理員：暱稱「管理員小美」只閒聊 → 只記錄，不通知、不刪、不踢", async () => {
+  const r = await runGuard({ ...FAKE, localScreenAll: false }, [{ messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "管 理 員 小美", text: NORMAL_TEXT }]);
+  assert.equal(r.sends.length + r.removes.length + r.deletes.length, 0);
+});
+
+test("假冒管理員＋換群內容（無連結）→ 通知一次（冷卻），不刪不踢", async () => {
+  const r = await runGuard({ ...FAKE }, [
+    { messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "小幫手-小美", text: "本群即將關閉，請大家搬到新群" },
+    { messageId: "m2", channelId: "cA", senderId: "pFake", senderName: "小幫手-小美", text: "請大家私我拿新群資訊" },
+  ], { waitMs: 3500 });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.equal(r.sends.length, 1);
+});
+
+test("假冒管理員＋外部 LINE 邀請 → kickWithInvite 踢（即使 kickMode=notify）", async () => {
+  const r = await runGuard({ ...FAKE }, [{ messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "官方客服", text: INVITE }]);
+  assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
+});
+
+test("空白（Hangul 填充字）暱稱＋外部 LINE 邀請 → 踢", async () => {
+  const r = await runGuard({ ...FAKE }, [{ messageId: "m1", channelId: "cA", senderId: "pBlank", senderName: "\u3164", text: INVITE }]);
+  assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
+});
+
+test("假冒管理員暱稱＋一般技術網站連結（GitHub）→ 不踢", async () => {
+  const r = await runGuard({ ...FAKE, localScreenAll: false }, [{ messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "客服小王", text: "參考 https://github.com/openai/codex" }]);
+  assert.equal(r.removes.length, 0);
+});
+
+test("假冒管理員暱稱：真管理員、受保護成員、別群管理員都排除（不踢不刪不通知）", async () => {
+  const r = await runGuard({ ...FAKE, localScreenAll: false, protectedIds: [{ note: "群主的機器人", ids: ["pBot"] }] }, [
+    { messageId: "m1", channelId: "cA", senderId: "pRealAdm", senderName: "管理員小美", senderRole: "coAdmin", text: INVITE },
+    { messageId: "m2", channelId: "cA", senderId: "pBot", senderName: "小幫手", text: "本群即將關閉，請大家搬到新群 " + INVITE },
+    { messageId: "m3", channelId: "cB", senderId: "pAdmin", senderName: "官方阿明", text: INVITE },
+  ], { history: ADMIN_HISTORY, waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+  // 真管理員與受保護成員的訊息完全不處理（別群管理員在這群貼連結，照原本的詐騙連結流程走，不屬於假冒管理員）。
+  assert.equal(r.frames.filter((f) => ["m1", "m2"].includes(f.replyTo) || ["m1", "m2"].includes(f.messageId)).length, 0);
+});
+
+test("fakeAdmin 沒開（公開版預設）→ 假管理員暱稱＋換群不走這條", async () => {
+  const r = await runGuard({ ...PROD, localScreenAll: false, review: undefined }, [{ messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "小幫手", text: "嗨" }]);
+  assert.equal(r.removes.length, 0);
+});
+
 // 查資料主題（H3）：官方頁面抓不到 → 用本機快取；地端整理後的事實要出現在第二層回覆模型的系統提示裡。
 function seedKnowledge(dir, config, { seed = true } = {}) {
   const url = "https://127.0.0.1:1/h3-readme";

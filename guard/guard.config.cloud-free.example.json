@@ -79,5 +79,10 @@
   "impersonation": {
     "kick": false,
     "kickWithInvite": false
+  },
+  "fakeAdmin": {
+    "enabled": false,
+    "avatar": true,
+    "cooldownHours": 12
   }
 }

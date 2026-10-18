@@ -1,6 +1,7 @@
 // 規則計分（反詐守衛第一層）：每類命中加分，同一類只算一次。純函式，方便測試（test/guard-rules.test.mjs）。
 // 比對前先做正規化：全形轉半形（NFKC），並另外準備一份「去掉所有空白」的版本（含全形空白、零寬字元），
 // 「本 群 明 天 要 刪 除」「換　群」這類用空格拆字躲關鍵字的寫法也會命中。原文或去空白版任一命中就算。
+import { analyzeName } from "./fakeadmin.mjs";
 
 // 常見短網址服務（貼這些等於看不到真正的目的地）。
 export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.co", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im"];
@@ -71,7 +72,7 @@ export function makeRuleScorer(benignDomains) {
       names.push("分享聯絡人");
     }
     // 一般成員把暱稱取成「管理員小美」「官方客服」：冒充管理員發公告的常見手法。單獨出現不到覆核門檻，只是加權。
-    if (score > 0 && !message?.senderRole && STAFF_NICKNAME.test(String(message?.senderName ?? "").normalize("NFKC").replace(/\s/g, ""))) {
+    if (score > 0 && !message?.senderRole && (STAFF_NICKNAME.test(String(message?.senderName ?? "").normalize("NFKC").replace(/\s/g, "")) || analyzeName(message?.senderName).signals.some((signal) => signal.type === "staff"))) {
       score += 2;
       names.push("暱稱自稱管理員");
     }

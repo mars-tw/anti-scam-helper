@@ -13,10 +13,11 @@ import { complete, onModelError } from "./llm.mjs";
 import { isLineInvite, readQr, shrinkForModel } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
-import { ASK_SCAM, makeRuleScorer } from "./rules.mjs";
+import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { allLinksLegit, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
 import { labelReply } from "./policy.mjs";
+import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
@@ -143,7 +144,7 @@ function textOf(message) {
 // 其他名字相同或極相似的人一律視為冒名。
 function normalizeName(name) {
   // 全形轉半形、去掉空白、標點、符號、表情與看不見的字元。
-  return String(name ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}]/gu, "");
+  return String(name ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}\u115F\u1160\u3164\uFFA0]/gu, "");
 }
 
 function editDistance(a, b) {
@@ -800,8 +801,14 @@ function impersonatedAnyCommunity(message) {
   return undefined;
 }
 /** 記下冒名者這則（invite：是否含外部連結／QR），湊滿條件就處理。有處理回 true。 */
-async function checkImpersonationInvite(ws, message, { invite }) {
-  const victim = impersonatedAnyCommunity(message);
+async function checkImpersonationInvite(ws, message, { invite, strictInvite = invite }) {
+  let victim = impersonatedAnyCommunity(message);
+  if (!victim && fakeAdmin.enabled) {
+    // 假冒管理員（暱稱自稱管理員／小幫手、空白或看不見的暱稱…）也走這條；連結要是外部引流（一般技術網站不算）。
+    if (strictInvite) await ensureAvatar(message);
+    const fa = fakeAdminOf(message);
+    if (fa?.byName) { victim = FAKE_ADMIN_VICTIM; invite = strictInvite; }
+  }
   if (!victim) return false;
   const key = `${message.channelId} ${message.senderId}`;
   const at = message.createdAt ?? Date.now();
@@ -815,6 +822,113 @@ async function checkImpersonationInvite(ws, message, { invite }) {
   comboHandled.set(key, Date.now());
   await punishImpersonationInvite(ws, message, victim, invites.at(-1).messageId, list.map((item) => item.messageId));
   return true;
+}
+// ── 假冒管理員（暱稱＋頭像）──────────────────────────────────
+// fakeAdmin.enabled：一般成員暱稱自稱管理員／官方／小幫手（含「管 理 員」、全形、假字母），
+// 暱稱是空白或夾看不見的字元、假徽章符號，或頭像放假的管理員皇冠（地端看圖模型判斷，依頭像快取）。
+// 排除：有管理員身分的人、任何受守護群的管理員、受保護成員、本帳號。
+// 處置：只有名字／頭像 → 只記錄；強訊號（兩種以上）或內容有換群／要錢／私聊 → 引用回覆通知管理員（不刪不踢，每人冷卻）；
+// 再加外部引流連結／QR → 走「冒名＋邀請」那條（impersonation.kickWithInvite 才踢，踢前仍擋管理員與受保護成員）。
+const fakeAdmin = { enabled: false, avatar: true, cooldownHours: 12, logEveryHours: 6, ...config.fakeAdmin };
+const FAKE_ADMIN_VICTIM = "管理員身分";
+const benignUrl = benignUrlPattern(config.benignDomains ?? DEFAULT_BENIGN_DOMAINS);
+const avatarFile = resolve(logDir, fakeAdmin.avatarCacheFile ?? "avatar-verdicts.json");
+const avatarCache = pruneAvatarCache((() => { try { return JSON.parse(readFileSync(avatarFile, "utf8")); } catch { return {}; } })());
+const avatarPending = new Map();
+const fakeAdminNotified = new Map(); // 聊天室＋發言者 → 上次通知時間
+const fakeAdminLogged = new Map(); // 聊天室＋發言者 → 上次記錄時間
+const avatarKey = (pictureId) => createHash("sha256").update(String(pictureId)).digest("hex").slice(0, 20);
+function saveAvatarCache() {
+  try {
+    pruneAvatarCache(avatarCache);
+    const temp = `${avatarFile}.tmp`;
+    writeFileSync(temp, JSON.stringify(avatarCache), { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, avatarFile);
+  } catch (error) { recordError("avatar-cache", error.message); }
+}
+function fakeAdminExcluded(message) {
+  const id = message.senderId;
+  if (!id || message.senderRole || whitelist.has(id) || id === me || isSelf(message.channelId, id)) return true;
+  for (const admins of chatAdmins.values()) if (admins.has(id)) return true;
+  for (const names of learnedAdmins.values()) for (const admin of names.values()) if (admin.ids.has(id)) return true;
+  for (const list of Object.values(notify.admins ?? {})) if ((list ?? []).some((admin) => admin?.id === id)) return true;
+  return false;
+}
+/** 依暱稱與（已快取的）頭像判定；被排除的人回 undefined。 */
+function fakeAdminOf(message) {
+  if (fakeAdminExcluded(message)) return undefined;
+  const { signals } = analyzeName(message.senderName);
+  const cached = message.senderPictureId ? avatarCache[avatarKey(message.senderPictureId)] : undefined;
+  return fakeAdminVerdict(signals, cached?.crown);
+}
+/** 頭像沒查過就查一次（只在地端模型、公開 CDN 唯讀抓圖；同一張頭像只問一次）。 */
+async function ensureAvatar(message) {
+  if (!fakeAdmin.avatar || !message.senderPictureId || fakeAdminExcluded(message)) return;
+  const key = avatarKey(message.senderPictureId);
+  if (avatarCache[key]) return;
+  if (avatarPending.has(key)) return avatarPending.get(key);
+  const model = fakeAdmin.llm ?? vision.llm ?? scamLlm;
+  if (!isLocalModel(model)) return; // 頭像不送雲端
+  const url = avatarUrl(message.senderPictureId);
+  if (!url) return;
+  const task = (async () => {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(fakeAdmin.fetchTimeoutMs ?? 6000), redirect: "error" });
+      if (!response.ok) { avatarCache[key] = { crown: false, at: Date.now(), none: true }; return; }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > 3_000_000) return;
+      const mime = bytes[0] === 0x89 ? "image/png" : bytes[0] === 0xff ? "image/jpeg" : bytes[0] === 0x47 ? "image/gif" : bytes.subarray(8, 12).toString() === "WEBP" ? "image/webp" : undefined;
+      const small = mime ? shrinkForModel(mime, bytes, Math.min(vision.maxSide ?? 768, 512)) : undefined;
+      if (!small) return;
+      const used = {};
+      const answer = await complete(model, AVATAR_SYSTEM, "這是一位社群成員的大頭貼，請判斷。", 40, small, used);
+      const crown = parseAvatarAnswer(answer);
+      if (crown === undefined) return; // 看不懂就不快取，下次再問
+      avatarCache[key] = { crown, at: Date.now() };
+      saveAvatarCache();
+      if (crown) record({ action: "fake-admin-avatar", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, model: used.model ?? "none" });
+    } catch (error) { recordError("avatar", String(error.message).slice(0, 60)); } finally { avatarPending.delete(key); }
+  })();
+  avatarPending.set(key, task);
+  return task;
+}
+/** 內容有沒有「換群／要錢／私聊／投資」這類訊號（只有一般網址不算）。 */
+function riskyContent(message, text) {
+  if (!text) return false;
+  const cleaned = sanitizeLinks(text).text;
+  if (hasLineInfo(text)) return true;
+  const { names } = ruleScore({ ...message, senderName: "" }, cleaned);
+  return names.some((name) => name !== "網址");
+}
+/** 有發通知回 true（呼叫端就不再走一般流程，避免重複通知）。 */
+async function checkFakeAdmin(ws, message, text) {
+  if (fakeAdminExcluded(message)) return false;
+  const pre = analyzeName(message.senderName).signals;
+  const risky = riskyContent(message, text);
+  if (pre.length > 0 || risky) await ensureAvatar(message);
+  const fa = fakeAdminOf(message);
+  if (!fa || (!fa.fake && !fa.weak)) return false;
+  const key = `${message.channelId} ${message.senderId}`;
+  const now = Date.now();
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "FAKE_ADMIN", names: ["假冒管理員", ...fa.labels] };
+  if (fa.fake && (risky || fa.strong)) {
+    if (now - (fakeAdminNotified.get(key) ?? 0) < fakeAdmin.cooldownHours * 3_600_000) {
+      record({ action: "fake-admin-cooldown", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, risky });
+      return false;
+    }
+    fakeAdminNotified.set(key, now);
+    if (fakeAdminNotified.size > 2000) fakeAdminNotified.delete(fakeAdminNotified.keys().next().value);
+    record({ action: "fake-admin-notify", ...entry, risky, strong: fa.strong });
+    if (!config.dryRun) await notifyAdmins(ws, entry, "suspect");
+    return true;
+  }
+  if (now - (fakeAdminLogged.get(key) ?? 0) >= fakeAdmin.logEveryHours * 3_600_000) {
+    fakeAdminLogged.set(key, now);
+    if (fakeAdminLogged.size > 2000) fakeAdminLogged.delete(fakeAdminLogged.keys().next().value);
+    record({ action: fa.fake ? "fake-admin-name" : "fake-admin-weak", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: entry.names });
+  }
+  return false;
 }
 // 這兩條（冒名＋邀請、購物再犯）直接送踢人、不經 remove()，送出前再擋一次：受保護成員、管理員、群主、本帳號絕不踢。
 function neverKick(message) {
@@ -960,8 +1074,11 @@ async function handle(ws, message) {
   learnAdmin(message);
   // 冒名＋外部連結（同一則或前後 2 分鐘內）：確認詐騙。圖片的 QR 在 checkImage 解碼後判斷。
   if (text && !message.senderRole && !whitelist.has(message.senderId)) {
-    if (await checkImpersonationInvite(ws, message, { invite: hasLink(sanitizeLinks(text).text) })) return;
+    const cleaned = sanitizeLinks(text).text;
+    if (await checkImpersonationInvite(ws, message, { invite: hasLink(cleaned), strictInvite: hasLineInfo(text) || hasLink(cleaned.replace(benignUrl, " ")) })) return;
   }
+  // 假冒管理員：光暱稱／頭像只記錄；內容有換群、要錢、私聊這類訊號，或訊號很強，才通知（不刪、不踢）。
+  if (fakeAdmin.enabled && await checkFakeAdmin(ws, message, text)) return;
   // 冒名不看內容：連貼圖、圖片也算，先處理。
   const victim = impersonated(message);
   if (victim) {
@@ -1012,6 +1129,11 @@ async function handle(ws, message) {
     // 地端判 SCAM＋含連結，但 Meta 不可用：不處置，只記錄。
     if (result.verdict === "SCAM" && result.link && result.review === "UNAVAILABLE") record({ action: "scam-link-meta-unavailable", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: result.score, names: result.names });
     if (result.action === "notice") {
+      // 同一位假冒管理員剛被通知過（冷卻中）：只通知類的結果不再重發（刪除／踢人不受影響）。
+      if (fakeAdmin.enabled && Date.now() - (fakeAdminNotified.get(key) ?? 0) < fakeAdmin.cooldownHours * 3_600_000) {
+        record({ action: "suspect-cooldown", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, reason: "fake-admin-notified" });
+        return;
+      }
       record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
       notifyAdmins(ws, entry, "suspect");
       return;
