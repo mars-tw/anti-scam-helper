@@ -457,3 +457,37 @@ test("叫名字：像機器人連發（90 秒內已 3 則）不回；同一人 3
   const repeat = await runGuard({ ...NAMED, chat: { ...NAMED.chat, nameTrigger: { groupCooldownSeconds: 0 } }, protectedIds: ["pAsk"] }, [askName("阿軒你好"), askName("阿軒在嗎")], { chatAnswer: OK_ANSWER, waitMs: 3500 });
   assert.equal(repeat.sends.length, 1, JSON.stringify(repeat.sends));
 });
+
+// 閒聊玩笑：不硬塞防詐提醒、踢人封鎖、轉給本人；踢人現況說錯 → 換成依設定的正確說明。
+test("小助手：玩笑話被回長篇防詐＋踢人＋轉給本人 → 只留切題的那句", async () => {
+  let sawCasualPrompt = false;
+  const answer = (req) => {
+    const prompt = JSON.stringify(req);
+    if (prompt.includes("這則是閒聊或玩笑") && !prompt.includes("守衛現況")) sawCasualPrompt = true;
+    return "哈哈，網路慢真的很煩！不過提醒大家，確認為詐騙將會執行踢除與封鎖。這個我會轉給本人處理。";
+  };
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你的太慢了🤣" }], { chatAnswer: answer });
+  assert.ok(sawCasualPrompt);
+  assert.deepEqual(r.sends.map((f) => f.text), ["哈哈，網路慢真的很煩！（AI代理）"]);
+});
+
+test("小助手：閒聊回覆全離題、重問也離題 → 不回", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 哈哈哈" }], { chatAnswer: "請小心詐騙，可疑連結請打 165。" });
+  assert.equal(r.sends.length, 0);
+});
+
+test("小助手：一般回答結尾夾「轉給本人處理」→ 拿掉那句", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 怎麼刪 git branch" }], { chatAnswer: "用 git branch -d 分支名稱 就可以。這個我會轉給本人處理。" });
+  assert.deepEqual(r.sends.map((f) => f.text), ["用 git branch -d 分支名稱 就可以。（AI代理）"]);
+});
+
+test("小助手：問踢人，模型只說「踢人暫停」漏掉例外 → 換成完整現況；提示裡有過去誤判", async () => {
+  let sawIncident = false;
+  const answer = (req) => { if (JSON.stringify(req).includes("過去誤判")) sawIncident = true; return "踢人功能目前是暫停中。"; };
+  const r = await runGuard({ ...CHAT, kickMode: "notify", impersonation: { kickWithInvite: true }, scamShop: { enabled: true, kickRepeat: true }, chat: { ...CHAT.chat, incidentFacts: ["過去誤判：某機器人曾被誤踢，已加進保護名單。"] }, protectedIds: ["pAsk"] },
+    [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 你昨晚才把某某給踢出去" }], { chatAnswer: answer });
+  assert.ok(sawIncident);
+  assert.equal(r.sends.length, 1);
+  const text = r.sends[0].text;
+  assert.ok(text.includes("暫停") && text.includes("冒用管理員名字") && text.includes("一頁式詐騙購物") && text.endsWith("（AI代理）"), text);
+});

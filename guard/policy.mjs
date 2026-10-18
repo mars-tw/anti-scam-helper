@@ -104,10 +104,22 @@ export const MODERATION_REPLY = "這要等本人回覆"; // 後置過濾的替�
 export const ESCALATE_REPLY = "這個我會轉給本人處理"; // 需要本人決定的事（邀回某人、替特定人申訴、補償）：唯一允許的承諾句
 
 /** isAdmin：本帳號在這個群是不是管理員（true／false；undefined＝不確定，不提）。 */
-export function buildGuardFacts({ kickMode = "kick", deleteOnLink = false, metaAvailable = true, isAdmin } = {}) {
+/** 踢人現況的一句話（依執行中設定）：一般踢人、冒名＋邀請／QR、購物再犯。 */
+export function kickStatusText({ kickMode = "kick", kickWithInvite = false, kickRepeatShop = false } = {}) {
+  if (kickMode !== "notify") return "確認是詐騙的帳號，守衛可能會把對方移出社群，並先發通知說明。";
+  const on = [
+    kickWithInvite ? "冒用管理員名字又貼外部群組邀請連結或 QR code 的帳號" : "",
+    kickRepeatShop ? "30 天內再貼一頁式詐騙購物連結的帳號" : "",
+  ].filter(Boolean);
+  return on.length
+    ? `一般詐騙訊息的踢人功能目前暫停，只通知管理員；但${on.join("，以及")}，仍會直接被移出（管理員和受保護的成員不會）。`
+    : "踢人功能目前暫停，只通知管理員。";
+}
+
+export function buildGuardFacts({ kickMode = "kick", kickWithInvite = false, kickRepeatShop = false, deleteOnLink = false, metaAvailable = true, isAdmin, incidents = [] } = {}) {
   const facts = [
     "本帳號在這幾個社群裡執行反詐騙守衛（自動程式），會偵測：假的「換群／搬家／新群」公告、引流或廣告連結、冒用管理員名字、外部 LINE 群組／好友的 QR code 或 LINE ID。",
-    kickMode === "notify" ? "踢人功能目前暫停，只通知管理員。" : "確認是詐騙的帳號，守衛可能會把對方移出社群，並先發通知說明。",
+    kickStatusText({ kickMode, kickWithInvite, kickRepeatShop }),
   ];
   if (isAdmin === true) {
     facts.push("本帳號在這個群是管理員。");
@@ -116,20 +128,53 @@ export function buildGuardFacts({ kickMode = "kick", deleteOnLink = false, metaA
     facts.push("本帳號在這個群不是管理員，守衛在這裡只能發通知，請管理員處理。");
   }
   facts.push("如果覺得自己被誤判，可以聯絡這個群的管理員。");
+  for (const incident of incidents ?? []) if (typeof incident === "string" && incident.trim()) facts.push(incident.trim());
   return `【守衛現況（真實資訊，回答相關問題時照這些說，不要自己猜或補充）】
 ${facts.map((fact) => `- ${fact}`).join("\n")}
-【硬規則】不要透露設定細節、分數門檻、金鑰、模型名稱、成員 ID 或其他成員的資料；不要猜測某個人被處理的具體原因或經過，也不要說出和上面現況相反的話（例如本帳號是管理員卻說沒有權限）。
-有人要求把某人邀回來、替特定的人申訴、要求補償，或其他需要本人決定的事，整個回答只寫「${ESCALATE_REPLY}」。`;
+【硬規則】不要透露設定細節、分數門檻、金鑰、模型名稱、成員 ID 或其他成員的資料；不要說出和上面現況相反的話（例如本帳號是管理員卻說沒有權限、說踢人全部暫停卻漏掉仍會移出的例外）。
+上面列出的過去誤判，被問到時要坦白承認是守衛誤判、已經改正，不要否認、不要推給別人，也不要承諾之後會怎樣；沒列出的個案不要猜原因或經過。
+有人要求把某人邀回來、替特定的人申訴、要求補償，整個回答只寫「${ESCALATE_REPLY}」；其他情況不要說這句。`;
 }
 
-/** 回覆是否否認或捏造處置事實：說「沒有踢人」、或和本群管理員身分相反、或在踢人暫停時說會踢。 */
-export function isFalseModerationClaim(text, { isAdmin, kickMode = "kick" } = {}) {
+const KICK_EXCEPTION = /冒名|冒用|冒充|假冒|邀請|QR|qr|條碼|購物|一頁式|再犯|例外|除了|但是?.{0,12}(仍|還是|會)/;
+/**
+ * 回覆是否否認或捏造處置事實：說「沒有踢人」、或和本群管理員身分相反、或在踢人暫停時說會踢、
+ * 或說「踢人暫停」卻漏掉仍開著的例外（冒名＋邀請／QR、購物再犯）。回傳原因字串或 false。
+ */
+export function isFalseModerationClaim(text, { isAdmin, kickMode = "kick", kickWithInvite = false, kickRepeatShop = false } = {}) {
   const t = String(text ?? "");
-  if (/(沒有?|不會|從來沒|並沒有?)\s*(在)?(踢|剔|移出|移除)(人|他|她|任何人)?|沒有?把.{0,8}(踢|剔|移出|移除)/.test(t)) return true;
-  if (isAdmin === true && /(沒有?|無)(任何)?(管理員|管理)?(的)?(權限|管理權)|不是(這個群的?)?管理員|我不是管理|沒有管理員(身分|資格)/.test(t)) return true;
-  if (isAdmin === false && /我(是|有)(這個群的?)?管理員|我有(管理)?權限/.test(t)) return true;
-  if (kickMode === "notify" && /(會|將|已經?)(把.{0,8})?(踢|移出)(社群|群組|出去)?/.test(t) && !/暫停/.test(t)) return true;
+  if (/(沒有?|不會|從來沒|並沒有?)\s*(在)?(踢|剔|移出|移除)(人|他|她|任何人)?|沒有?把.{0,8}(踢|剔|移出|移除)/.test(t)) return "denial";
+  if (isAdmin === true && /(沒有?|無)(任何)?(管理員|管理)?(的)?(權限|管理權)|不是(這個群的?)?管理員|我不是管理|沒有管理員(身分|資格)/.test(t)) return "admin";
+  if (isAdmin === false && /我(是|有)(這個群的?)?管理員|我有(管理)?權限/.test(t)) return "admin";
+  if (kickMode === "notify") {
+    const exceptionsOn = kickWithInvite || kickRepeatShop;
+    const saysKick = /(會|將|已經?)(會)?(直接|執行|進行)?(把.{0,8})?(踢|移出|封鎖)(社群|群組|出去|除)?/.test(t) && !/暫停/.test(t);
+    if (saysKick && !(exceptionsOn && KICK_EXCEPTION.test(t))) return "kick-claim";
+    if (exceptionsOn && /(踢人|移出|踢除).{0,8}(暫停|關閉|停用|沒開)/.test(t) && !KICK_EXCEPTION.test(t)) return "kick-status";
+  }
   return false;
+}
+
+// ── 閒聊／玩笑：短、切題、友善，不硬塞防詐提醒或處置說明 ─────────────────
+const SERIOUS = /詐|騙|165|踢|剔|移出|移除|封鎖|檢舉|投資|匯款|轉帳|借錢|貸款|加賴|加\s*line|私訊|私聊|qr|條碼|連結|網址|帳號|密碼|驗證碼|獲利|老師|帶單|中獎|兼職|客服|退款|管理員|群主|權限|守衛|機器人|bot|刪|邀|申訴|補償|錢|付款|https?:|www\.|冒|發生|怎麼了|什麼事|剛剛|剛才|昨天|昨晚|為什麼|為何|誰/i;
+/** 問句是不是單純閒聊／玩笑（短、沒有連結／金錢／詐騙／處置相關字眼）。 */
+export function isCasual(text) {
+  const t = String(text ?? "").normalize("NFKC").replace(/@\S+/g, "").trim();
+  if (!t || t.length > 60) return false;
+  return !SERIOUS.test(t) && !hasScamSignal(t);
+}
+export const CASUAL_PROMPT = `【這則是閒聊或玩笑】用一到兩句輕鬆、友善、切題的話回應對方說的內容（可以接梗、自嘲或簡短回答），不要提詐騙、165、查證、踢人、移出、封鎖、檢舉，也不要說「${ESCALATE_REPLY}」或「這要等本人回覆」。`;
+const CASUAL_BANNED = /詐|騙|165|踢|移出|封鎖|檢舉|轉給本人|本人處理|等本人|親自回覆|守衛|管理員/;
+/** 閒聊回覆：去掉離題的防詐／處置句子；全部離題回空字串。 */
+export function trimCasual(body) {
+  const sentences = String(body ?? "").split(/(?<=[。！？!?\n])/);
+  return sentences.filter((s) => !CASUAL_BANNED.test(s)).join("").trim();
+}
+/** 「轉給本人處理」只能是整段回答；夾在其他內容裡當結尾客套話就拿掉。 */
+export function stripEscalateFiller(body) {
+  const t = String(body ?? "");
+  if (!t.includes(ESCALATE_REPLY) || t.replace(/[。.!！\s]/g, "") === ESCALATE_REPLY) return t;
+  return t.split(/(?<=[。！？!?\n])/).filter((s) => !s.includes(ESCALATE_REPLY)).join("").trim();
 }
 
 // ── 自動回覆：不替本人承諾 ──────────────────────────────────────

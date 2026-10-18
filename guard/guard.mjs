@@ -18,7 +18,7 @@ import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { allLinksLegit, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
 import { labelReply } from "./policy.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
-import { buildGuardFacts, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
+import { buildGuardFacts, CASUAL_PROMPT, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
@@ -371,8 +371,12 @@ function selfIsAdmin(chatId) {
   return !noDeleteChats.has(chatId);
 }
 /** 回覆當下的守衛事實（依目前執行中的設定）。 */
+/** 踢人開關（依執行中設定）：一般 kickMode、冒名＋邀請／QR、購物再犯。 */
+function kickFlags() {
+  return { kickMode, kickWithInvite: config.impersonation?.kickWithInvite === true, kickRepeatShop: config.scamShop?.enabled === true && config.scamShop?.kickRepeat === true };
+}
 function guardFactsFor(chatId) {
-  return buildGuardFacts({ kickMode, deleteOnLink: scamLink.deleteOnConfirmed === true, metaAvailable: metaState.ok !== false, isAdmin: selfIsAdmin(chatId) });
+  return buildGuardFacts({ ...kickFlags(), deleteOnLink: scamLink.deleteOnConfirmed === true, metaAvailable: metaState.ok !== false, isAdmin: selfIsAdmin(chatId), incidents: chat.incidentFacts });
 }
 
 // 不必問模型就知道要婉拒的請求：逆向、破解、套出設定、寫程式。免費擋下，也不占模型額度。
@@ -702,7 +706,9 @@ async function reply(ws, message, ask) {
   const topic = matchTopic(ask, knowledgeTopics);
   const grounding = topic ? await groundForReply(topic, ask) : undefined;
   if (topic) log("knowledge-grounded", { topic: topic.id, ok: grounding.ok, via: grounding.via, sources: grounding.sources.length, stale: grounding.stale, memo: grounding.memo === true });
-  const baseSystem = `${CHAT_SYSTEM}\n\n${guardFactsFor(message.channelId)}${topic ? `\n\n${groundingPrompt(topic, grounding)}` : ""}`;
+  // 閒聊／玩笑（短、沒有連結／金錢／詐騙／處置字眼，回覆的那則也不是詐騙）：只要短而切題的回應，不給守衛現況，免得模型硬塞防詐提醒或踢人說明。
+  const casual = !topic && !commitmentAsk && isCasual(ask) && !(thread && /詐|騙|https?:|www\.|qr|line\.me/i.test(thread));
+  const baseSystem = casual ? `${CHAT_SYSTEM}\n\n${CASUAL_PROMPT}` : `${CHAT_SYSTEM}\n\n${guardFactsFor(message.channelId)}${topic ? `\n\n${groundingPrompt(topic, grounding)}` : ""}`;
   const system = commitmentAsk ? `${baseSystem}\n\n【硬規則】對方在要求${ownerLabel}答應或安排事情（約會、見面、吃飯、付錢、借錢、轉帳、交易、合作、時間安排）。絕對不要替${ownerLabel}答應，只回「這個要等本人親自回覆喔。」` : baseSystem;
   const used = {};
   let answer = await complete(chatLlm, system, user, 400, undefined, used);
@@ -726,6 +732,19 @@ async function reply(ws, message, ask) {
     .join("\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!cleaned || cleaned === chat.hardRefusal) return log("model-empty");
   let body = stripLinks(cleaned);
+  if (casual) {
+    // 閒聊回覆還是離題（防詐提醒、踢人、轉給本人）：去掉那些句子；全離題就重問一次，還是不行就不回。
+    body = trimCasual(body);
+    if (!body) {
+      const retry = await complete(chatLlm, `${baseSystem}\n只回一句跟對方內容有關的輕鬆回應，二十字內。`, user, 120, undefined, used);
+      body = trimCasual(stripLinks(String(retry ?? "").replace(/\*\*|^#+\s*/gm, "").trim()));
+    }
+    if (!body) return log("casual-offtopic-dropped", { model: used.model });
+  } else {
+    // 「轉給本人處理」只能是整段回答，不能當結尾客套話。
+    body = stripEscalateFiller(body);
+    if (!body) return log("model-empty", { reason: "escalate-filler" });
+  }
   if (body.length > chat.maxReplyChars) {
     const cut = body.slice(0, chat.maxReplyChars);
     const end = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"), cut.lastIndexOf("\n"));
@@ -740,9 +759,12 @@ async function reply(ws, message, ask) {
     }
   }
   // 輸出後過濾：否認或捏造處置事實（「沒有踢人」、是管理員卻說沒權限、踢人暫停卻說會踢）→ 固定句。
-  if (isFalseModerationClaim(body, { isAdmin, kickMode })) {
-    sendLabeled(ws, message, MODERATION_REPLY);
-    return log("moderation-deferred", { reason: "false-claim", model: used.model });
+  const falseClaim = isFalseModerationClaim(body, { isAdmin, ...kickFlags() });
+  if (falseClaim) {
+    // 踢人現況說錯（說全部暫停卻漏掉例外、暫停中卻說會踢）→ 換成依設定的正確說明；否認處置、權限說反 → 固定句。
+    const fix = falseClaim === "kick-status" || falseClaim === "kick-claim" ? kickStatusText(kickFlags()) : MODERATION_REPLY;
+    sendLabeled(ws, message, fix);
+    return log("moderation-deferred", { reason: `false-claim-${falseClaim}`, model: used.model });
   }
   // 輸出後過濾：替本人承諾未來行動（我會／我再／我來／我幫你／下次我／保證／約／付錢…）→ 固定句。
   if (chat.noCommitment !== false && isPromise(body)) {

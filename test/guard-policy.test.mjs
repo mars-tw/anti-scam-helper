@@ -198,3 +198,40 @@ test("回覆標記：結尾一個（AI代理），不留「自動回覆」", () 
   assert.equal(labelReply("好的 (自動回覆)（AI代理）"), "好的（AI代理）");
   assert.equal(labelReply("這是自動回覆喔"), "這是喔（AI代理）");
 });
+
+// ── 閒聊不硬塞防詐、踢人現況要完整 ─────────────────────────────
+import { CASUAL_PROMPT, isCasual, kickStatusText, stripEscalateFiller, trimCasual } from "../guard/policy.mjs";
+
+test("閒聊判斷：玩笑、打招呼算；有連結／錢／詐騙／踢人／管理員字眼不算", () => {
+  for (const t of ["你的太慢了🤣", "哈哈哈笑死", "@阿軒 早安", "你今天吃什麼", "這也太強了吧"]) assert.equal(isCasual(t), true, t);
+  for (const t of ["這是詐騙嗎", "看這個 https://x.y/abc", "你昨晚把某某踢出去", "要不要一起投資", "管理員在嗎", "加賴 abc123", "x".repeat(61), "怎麼刪 git branch"]) assert.equal(isCasual(t), false, t);
+  assert.ok(!CASUAL_PROMPT.includes("165 或"));
+});
+
+test("閒聊回覆：去掉防詐提醒、踢人封鎖、轉給本人的句子", () => {
+  const bad = "哈哈，網路慢真的很煩！不過提醒大家，確認為詐騙將會執行踢除與封鎖。遇到可疑連結請打 165。這個我會轉給本人處理。";
+  assert.equal(trimCasual(bad), "哈哈，網路慢真的很煩！");
+  assert.equal(trimCasual("確認為詐騙將會執行踢除與封鎖。這個我會轉給本人處理。"), "");
+});
+
+test("「轉給本人處理」只能整段，當結尾客套話就拿掉", () => {
+  assert.equal(stripEscalateFiller(`可以先重開機看看。${ESCALATE_REPLY}。`), "可以先重開機看看。");
+  assert.equal(stripEscalateFiller(`${ESCALATE_REPLY}。`), `${ESCALATE_REPLY}。`);
+  assert.equal(stripEscalateFiller("一般回答"), "一般回答");
+});
+
+test("踢人現況：一般暫停，但冒名＋邀請／QR 與購物再犯仍會踢（依設定）", () => {
+  const flags = { kickMode: "notify", kickWithInvite: true, kickRepeatShop: true };
+  const status = kickStatusText(flags);
+  assert.ok(status.includes("暫停") && status.includes("冒用管理員名字") && status.includes("QR") && status.includes("30 天內再貼一頁式詐騙購物"), status);
+  assert.equal(kickStatusText({ kickMode: "notify" }), "踢人功能目前暫停，只通知管理員。");
+  const facts = buildGuardFacts({ ...flags, isAdmin: true, incidents: ["過去誤判：某機器人曾被誤踢，已加進保護名單。"] });
+  assert.ok(facts.includes("冒用管理員名字") && facts.includes("過去誤判") && facts.includes("坦白承認"));
+  // 只說「踢人暫停」漏掉例外 → 說錯；有提到例外 → 沒問題。
+  assert.equal(isFalseModerationClaim("踢人功能目前是暫停中", { isAdmin: true, ...flags }), "kick-status");
+  assert.equal(isFalseModerationClaim(status, { isAdmin: true, ...flags }), false);
+  assert.equal(isFalseModerationClaim("冒用管理員名字又貼邀請連結的會直接被移出", { isAdmin: true, ...flags }), false);
+  assert.equal(isFalseModerationClaim("確認為詐騙將會執行踢除與封鎖", { isAdmin: true, ...flags }), "kick-claim");
+  // 沒開例外時，「踢人暫停」是正確的。
+  assert.equal(isFalseModerationClaim("踢人功能目前是暫停中", { isAdmin: true, kickMode: "notify" }), false);
+});
