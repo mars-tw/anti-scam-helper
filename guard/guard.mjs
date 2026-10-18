@@ -151,7 +151,8 @@ function learnCommunity(message, text, { fromHistory = false } = {}) {
   if (verdict === "SCAM" || verdict === "UNSURE") return;
   const { score } = ruleScore(message, sanitizeLinks(text).text);
   // 即時訊息已經過詐騙判斷：規則 2 分以上不收；歷史訊息沒經過模型：有任何規則訊號就不收。
-  if (score >= (fromHistory ? 1 : 2)) return;
+  // 受保護的機器人（自己人）：歷史訊息也用 2 分門檻（它們常帶連結介紹功能）。
+  if (score >= (fromHistory && !bot ? 1 : 2)) return;
   if (fromHistory && !bot && hasScamSignal(text)) return;
   const names = [...new Set([...(recent.get(message.channelId) ?? []).map((item) => item.name), message.senderName, ...ownerNames])].filter((n) => n && !(bot && n === message.senderName));
   try { memory.learn(message, text, { bot, names, allowDomains: memoryAllowDomains }); } catch (error) { recordError("community", String(error?.message ?? error).slice(0, 80)); }
