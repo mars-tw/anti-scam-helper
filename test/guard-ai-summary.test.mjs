@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_BLOCKED_WORDS } from "../guard/notice.mjs";
@@ -100,6 +100,7 @@ test("冷卻：每群 10 分鐘一次、存檔重啟不歸零、冷卻中只回�
   state.start("c1");
   assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(state.check("c1", 600_000).running, true);
+  state.commit("c1");
   state.finish("c1");
   now = T + 60_000;
   const first = state.check("c1", 600_000);
@@ -147,4 +148,41 @@ test("點位格式：價格區間不會被當成電話；免責聲明只出現�
   assert.ok(!long[0].includes(SUMMARY_DISCLAIMER));
   assert.ok(long[1].includes(SUMMARY_DISCLAIMER));
   for (const part of long) assert.ok(part.length <= 2000);
+});
+
+test("SummaryState：沒送出就不佔冷卻；重啟時清掉進行中標記", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "sum-")), "state.json");
+  const T = 2_000_000_000;
+  let now = T;
+  const state = new SummaryState(file, { now: () => now });
+  state.start("c1");
+  now += 30_000;
+  state.finish("c1"); // 失敗：沒 commit
+  assert.ok(state.check("c1", 600_000).ok);
+  state.start("c2"); // 當機：沒 finish
+  const reloaded = new SummaryState(file, { now: () => now });
+  assert.ok(reloaded.check("c2", 600_000).ok);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).c2, undefined);
+  reloaded.start("c3");
+  now += 70_000;
+  reloaded.commit("c3");
+  reloaded.finish("c3");
+  const after = reloaded.check("c3", 600_000);
+  assert.equal(after.ok, false);
+  assert.equal(after.remainingMs, 600_000 - 70_000); // 從開始整理起算
+});
+
+test("SummaryState：本人不受冷卻限制，其他人照舊；同一群整理中仍只跑一份", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "sum-")), "state.json");
+  let now = 3_000_000_000;
+  const state = new SummaryState(file, { now: () => now });
+  state.start("g"); state.commit("g"); state.finish("g");
+  now += 60_000;
+  assert.equal(state.check("g", 600_000).ok, false);
+  assert.equal(state.check("g", 600_000, { owner: true }).ok, true);
+  state.markTold("g");
+  assert.equal(state.check("g", 600_000, { owner: true }).ok, true);
+  state.start("g");
+  assert.equal(state.check("g", 600_000, { owner: true }).running, true);
+  state.finish("g");
 });

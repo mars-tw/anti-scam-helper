@@ -261,23 +261,50 @@ export function selfSummaryCommand(text, { messageId, sentIds, isBotText = () =>
   return parseSummaryCommand(text, now);
 }
 
-/** 每群冷卻狀態（存檔，重啟不歸零）：lastAt＝上次開始整理；toldAt＝這個冷卻期已回過「X 分鐘後可再用」。 */
+/**
+ * 每群冷卻狀態（存檔，重啟不歸零）：lastAt＝上次「成功送出」的整理開始時間；toldAt＝這個冷卻期已回過「X 分鐘後可再用」；
+ * inflightAt＝正在整理（存檔標記）。整理送出後 commit() 才開始冷卻；失敗、當機或重啟都不佔冷卻：啟動時清掉所有 inflightAt。
+ */
 export class SummaryState {
   constructor(file, { now = Date.now } = {}) {
     this.file = file;
     this.now = now;
     try { this.data = JSON.parse(readFileSync(file, "utf8")); } catch { this.data = {}; }
+    let cleared = false;
+    for (const [chatId, entry] of Object.entries(this.data)) {
+      if (entry?.inflightAt === undefined) continue;
+      const { inflightAt, ...rest } = entry;
+      if (Object.keys(rest).length) this.data[chatId] = rest; else delete this.data[chatId];
+      cleared = true;
+    }
     this.running = new Set();
+    if (cleared) this.save();
   }
-  check(chatId, cooldownMs) {
+  /** owner：本人（同一個帳號）不受冷卻限制；只有同一群已在整理時才等那一份。 */
+  check(chatId, cooldownMs, { owner = false } = {}) {
     if (this.running.has(chatId)) return { ok: false, running: true };
+    if (owner) return { ok: true, owner: true };
     const entry = this.data[chatId] ?? {};
     const remaining = (entry.lastAt ?? 0) + cooldownMs - this.now();
     if (remaining > 0) return { ok: false, remainingMs: remaining, told: entry.toldAt !== undefined && entry.toldAt >= (entry.lastAt ?? 0) };
     return { ok: true };
   }
-  start(chatId) { this.running.add(chatId); this.data[chatId] = { lastAt: this.now() }; this.save(); }
-  finish(chatId) { this.running.delete(chatId); }
+  start(chatId) { this.running.add(chatId); this.data[chatId] = { ...this.data[chatId], inflightAt: this.now() }; this.save(); }
+  /** 整理已送出：從這次開始的時間起算冷卻。 */
+  commit(chatId) {
+    const { inflightAt } = this.data[chatId] ?? {};
+    this.data[chatId] = { lastAt: inflightAt ?? this.now() };
+    this.save();
+  }
+  /** 結束（成功或失敗）：沒 commit 的話冷卻維持原狀。 */
+  finish(chatId) {
+    this.running.delete(chatId);
+    const entry = this.data[chatId];
+    if (entry?.inflightAt === undefined) return;
+    const { inflightAt, ...rest } = entry;
+    if (Object.keys(rest).length) this.data[chatId] = rest; else delete this.data[chatId];
+    this.save();
+  }
   markTold(chatId) { this.data[chatId] = { ...this.data[chatId], toldAt: this.now() }; this.save(); }
   save() {
     try {

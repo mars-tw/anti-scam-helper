@@ -727,9 +727,10 @@ function send(ws, message, text) {
     console.log(`【試跑，未回覆】${message.senderName}：${text.replace(/\n/g, " ").slice(0, 120)}`);
     return record({ action: "reply-dry-run", chatId: message.channelId, messageId: message.messageId, replyChars: text.length });
   }
-  void call(ws, { type: "message:send", chatId: message.channelId, text: scrubNotice(text, blockedWords), replyTo: message.messageId }).then((reply) => {
+  return call(ws, { type: "message:send", chatId: message.channelId, text: scrubNotice(text, blockedWords), replyTo: message.messageId }).then((reply) => {
     if (reply.type === "sent" && reply.messageId) { sentWaiting.set(reply.messageId, message.channelId); ownMessages.add(reply.messageId); sentByBot.add(reply.messageId); }
     else record({ action: "reply-failed", chatId: message.channelId, code: reply.code });
+    return reply;
   });
 }
 
@@ -931,6 +932,9 @@ function record(entry) {
 let me;
 let requestSeq = 0;
 const kicked = new Set();
+// 真的送出踢人請求的人（聊天室＋發言者 → 時間）：他在前後 30 分鐘內的其他訊息，之後才輪到處理的也一併刪除。
+const removedAt = new Map();
+const markRemoved = (message) => { removedAt.set(`${message.channelId} ${message.senderId}`, Date.now()); if (removedAt.size > 2000) removedAt.delete(removedAt.keys().next().value); };
 const pending = new Map();
 const queue = [];
 let busy = false;
@@ -950,6 +954,7 @@ async function remove(ws, message, entry) {
     return notifyAdmins(ws, { ...entry, noticeKind: undefined }, "suspect");
   }
   kicked.add(`${message.channelId} ${message.senderId}`);
+  markRemoved(message);
   // 先標記：不論之後踢人成功與否，紀錄裡都有這筆詐騙判定。
   record({ action: "flagged", ...entry });
   const kind = entry.noticeKind ?? "removed";
@@ -1147,6 +1152,7 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets) 
     }
     if (kick) {
       kicked.add(`${message.channelId} ${message.senderId}`);
+      markRemoved(message);
       const requestId = `kick${++requestSeq}`;
       pending.set(requestId, { ...entry, preNotified: true });
       ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: replyTo, deleteMessage: true }));
@@ -1214,6 +1220,7 @@ async function checkScamShop(ws, message, rawText) {
   const notified = await notifyThenAct(() => notifyAdmins(ws, entry, kick ? "removed" : repeat ? "shop-repeat" : "shop", { force: true }), async () => {
     if (kick) {
       kicked.add(`${message.channelId} ${message.senderId}`);
+      markRemoved(message);
       const requestId = `kick${++requestSeq}`;
       pending.set(requestId, { ...entry, preNotified: true });
       ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: true }));
@@ -1251,10 +1258,20 @@ async function deleteScamLink(ws, message, entry) {
   }
 }
 
+/** 已被踢的人前後 30 分鐘內、晚一步才處理到的訊息（例如連發三則的第三則）：一併刪除。管理員、白名單、自己不碰。 */
+async function deleteFollowup(ws, message, key) {
+  const at = removedAt.get(key);
+  if (at === undefined || config.dryRun || config.deleteMessage === false || noDeleteChats.has(message.channelId) || !message.messageId) return;
+  if (Math.abs((message.createdAt ?? Date.now()) - at) > 30 * 60_000) return;
+  if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)) return;
+  const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
+  record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
+}
+
 async function handle(ws, message) {
   const text = textOf(message);
   const key = `${message.channelId} ${message.senderId}`;
-  if (kicked.has(key)) return;
+  if (kicked.has(key)) { await deleteFollowup(ws, message, key); return; }
   noteOwn(message);
   if (isSelf(message.channelId, message.senderId)) {
     const own = textOf(message);
@@ -1789,7 +1806,9 @@ async function requestSummary(ws, message, command) {
   const age = Date.now() - (message.createdAt ?? Date.now());
   if (age > summaryCfg.maxAgeMinutes * 60_000) return record({ action: "ai-summary-skipped", reason: "stale", chatId, messageId: message.messageId, ageSeconds: Math.round(age / 1000) });
   if (repliedIds.has(message.messageId)) return;
-  const state = summaryState.check(chatId, summaryCfg.cooldownMinutes * 60_000);
+  // 本人（本帳號）不限速；其他人每群 cooldownMinutes 分鐘一次。
+  const owner = message.senderId === me || isSelf(chatId, message.senderId);
+  const state = summaryState.check(chatId, summaryCfg.cooldownMinutes * 60_000, { owner });
   if (!state.ok) {
     record({ action: "ai-summary-skipped", reason: state.running ? "running" : state.told ? "cooldown-told" : "cooldown", chatId, messageId: message.messageId });
     if (!state.running && !state.told) {
@@ -1803,8 +1822,11 @@ async function requestSummary(ws, message, command) {
   summaryState.start(chatId);
   try {
     const result = await runSummary(ws, chatId, command);
-    for (const part of result.parts) sendLabeled(ws, message, part);
-    record({ action: "ai-summary", chatId, messageId: message.messageId, ...result.stats });
+    let sent = 0;
+    for (const part of result.parts) { const reply = await sendLabeled(ws, message, part); if (reply?.type === "sent") sent++; }
+    // 冷卻只在整理真的送出後才算；沒送出（失敗、當機、重啟）就不佔冷卻。
+    if (sent) summaryState.commit(chatId);
+    record({ action: "ai-summary", chatId, messageId: message.messageId, sent, ...result.stats });
   } catch (error) {
     record({ action: "ai-summary-failed", chatId, messageId: message.messageId, code: String(error?.message ?? error).slice(0, 40) });
     sendLabeled(ws, message, "抱歉，這次整理沒有完成，請過一陣子再試。");
@@ -1906,7 +1928,65 @@ async function exportNoteLinks(ws, chatId) {
   record({ action: "note-links-export", chatId, notes: answer.notes.length, withLinks: notes.length });
 }
 
+// 補刪（一次性，人工觸發）：logs/ 放 followup-delete.json（{"chatId": "...", "messageIds": [...]}），送 SIGUSR2。
+// 只刪「今天或昨天的日誌裡已經被踢（action: removed）的同一個人」在這個聊天室的訊息；其他人的訊息一律不動。
+async function followupDelete(ws, request) {
+  const { chatId, messageIds } = request;
+  if (typeof chatId !== "string" || !Array.isArray(messageIds) || !messageIds.length) return;
+  const removedSenders = new Set();
+  for (const offset of [0, 1]) {
+    const day = new Date(Date.now() - offset * 86_400_000).toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
+    let lines = [];
+    try { lines = readFileSync(join(logDir, `guard-${day}.jsonl`), "utf8").split("\n"); } catch {}
+    for (const line of lines) { try { const e = JSON.parse(line); if (e.action === "removed" && e.chatId === chatId && e.senderId) removedSenders.add(e.senderId); } catch {} }
+  }
+  const page = await call(ws, { type: "history:fetch", chatId, limit: 100 }, 60_000);
+  if (page.type !== "history") return record({ action: "followup-delete-failed", chatId, code: page.code ?? page.type });
+  for (const messageId of messageIds) {
+    const message = page.messages.find((m) => m.messageId === messageId);
+    if (!message) { record({ action: "followup-delete-skipped", chatId, messageId, reason: "not-found" }); continue; }
+    if (!removedSenders.has(message.senderId) || message.senderRole || whitelist.has(message.senderId) || isSelf(chatId, message.senderId)) { record({ action: "followup-delete-skipped", chatId, messageId, reason: "not-removed-sender" }); continue; }
+    const answer = await call(ws, { type: "message:delete", chatId, messageId });
+    record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId, messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
+  }
+}
+
+// 本人手動要求的整理（會發到 LINE）：logs/ 放 ai-summary-post.json（{"chatId": "...", "replyTo": "訊息 id，可省略"}），送 SIGUSR2。
+// 視同本人下指令：不受冷卻限制，同一群正在整理時不重複跑。
+async function postSummaryNow(ws, request) {
+  const chatId = request?.chatId;
+  if (typeof chatId !== "string") return;
+  if (summaryState.check(chatId, 0, { owner: true }).running) return record({ action: "ai-summary-post-skipped", chatId, reason: "running" });
+  summaryState.start(chatId);
+  try {
+    const result = await runSummary(ws, chatId, parseSummaryCommand(`/ai整理 ${request.arg ?? ""}`) ?? { label: "全部" });
+    const target = { channelId: chatId, messageId: typeof request.replyTo === "string" ? request.replyTo : undefined, senderName: "manual" };
+    let sent = 0;
+    for (const part of result.parts) { const reply = await sendLabeled(ws, target, part); if (reply?.type === "sent") sent++; }
+    if (sent) summaryState.commit(chatId);
+    record({ action: "ai-summary-post", chatId, sent, ...result.stats });
+  } catch (error) {
+    record({ action: "ai-summary-post-failed", chatId, code: String(error?.message ?? error).slice(0, 60) });
+  } finally { summaryState.finish(chatId); }
+}
+
 process.on("SIGUSR2", () => {
+  const postFile = join(logDir, "ai-summary-post.json");
+  if (existsSync(postFile)) {
+    let postReq;
+    try { postReq = JSON.parse(readFileSync(postFile, "utf8")); } catch {}
+    try { unlinkSync(postFile); } catch {}
+    if (postReq && currentWs?.readyState === WebSocket.OPEN) void postSummaryNow(currentWs, postReq).catch((error) => recordError("ai-summary-post", error.message));
+    return;
+  }
+  const followupFile = join(logDir, "followup-delete.json");
+  if (existsSync(followupFile)) {
+    let followupReq;
+    try { followupReq = JSON.parse(readFileSync(followupFile, "utf8")); } catch {}
+    try { unlinkSync(followupFile); } catch {}
+    if (followupReq && currentWs?.readyState === WebSocket.OPEN) void followupDelete(currentWs, followupReq).catch((error) => recordError("followup-delete", error.message));
+    return;
+  }
   const exportFile = join(logDir, "note-links-export.json");
   if (existsSync(exportFile)) {
     let exportReq;
@@ -2115,7 +2195,9 @@ function processHistory(ws, frame, baseWatermark) {
   if (catchUp.scanMinutes > 0 && frame.chatId) {
     const picked = selectCatchUp(frame.messages, {
       watermark: baseWatermark ?? watermarks.get(frame.chatId), maxAgeMs: catchUp.scanMinutes * 60_000, handled: seenIds,
-      isSelf: (message) => message.senderId === me || isSelf(message.channelId, message.senderId),
+      // 本人帳號的訊息不補掃，只有 /ai整理 例外（10 分鐘過期與冷卻在 requestSummary 處理）。
+      isSelf: (message) => (message.senderId === me || isSelf(message.channelId, message.senderId))
+        && !(summaryCfg.enabled && selfSummaryCommand(textOf(message), { messageId: message.messageId, sentIds: sentByBot, isBotText })),
     });
     toScan = picked.toScan;
     if (picked.watermark !== undefined) watermarks.bump(frame.chatId, picked.watermark);
