@@ -2,7 +2,7 @@
 // 空的工作目錄＋沙箱設定檔（只讀系統路徑與 ~/.grok，讀不到專案、設定與 env），關掉所有工具、網路搜尋與子代理。
 // 不讀、不碰 CLI 的登入檔；登入由 CLI 自己更新。環境變數只給 HOME 與 PATH（不把任何金鑰傳給它）。
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -111,4 +111,30 @@ export async function grokCliText(llm, system, user, maxTokens, image, options =
     return `${v} ${String(result.structured.reason ?? "").slice(0, 200)}`;
   }
   return result.text;
+}
+
+/** Grok CLI 的工作階段目錄名稱：把 cwd 的「/」編成 %2F（~/.grok/sessions/%2Ftmp%2Fgrok-guard）。 */
+export function grokSessionDir(workDir = GROK_CLI_DEFAULTS.workDir, home = homedir()) {
+  return join(home, ".grok", "sessions", encodeURIComponent(workDir));
+}
+
+/**
+ * 清掉守衛自己（cwd = workDir）留下、超過 maxAgeDays 天沒動的 Grok 工作階段。
+ * 只動 grokSessionDir(workDir) 底下的子目錄／檔案，其他專案的工作階段不碰。回傳刪掉的數量。
+ */
+export function cleanGrokSessions({ workDir = GROK_CLI_DEFAULTS.workDir, maxAgeDays = 7, home = homedir(), now = Date.now() } = {}) {
+  const dir = grokSessionDir(workDir, home);
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
+  const cutoff = now - maxAgeDays * 86_400_000;
+  let removed = 0;
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    try {
+      if (statSync(path).mtimeMs >= cutoff) continue;
+      rmSync(path, { recursive: true, force: true });
+      removed++;
+    } catch {}
+  }
+  return removed;
 }

@@ -5,7 +5,7 @@
 // - 小助手：訊息以觸發詞開頭或 @ 本帳號時，用語言模型回覆；只答範圍內的問題，並有每日上限。
 // 用法：node guard/guard.mjs [設定檔路徑]（預設 guard/guard.config.json）
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
@@ -23,6 +23,7 @@ import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand } from "./ai-summary.mjs";
 import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
+import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
@@ -289,6 +290,21 @@ function isLocalModel(llm) {
   }
   return true;
 }
+// Grok CLI 每次呼叫都會在 ~/.grok/sessions/<編碼後的工作目錄> 留一份工作階段：啟動時與之後每 7 天，清掉守衛自己工作目錄底下超過 7 天的（其他專案的不碰）。
+function grokWorkDirs() {
+  const dirs = new Set();
+  const walk = (llm) => { for (let node = llm; node; node = node.fallback) if (node.backend === "grok-cli") dirs.add(node.workDir ?? GROK_CLI_DEFAULTS.workDir); };
+  for (const llm of [config.review, config.chat?.llm, config.vision?.reviewLlm, config.aiSummary?.llm]) walk(llm);
+  return [...dirs];
+}
+function cleanGrokSessionsNow() {
+  for (const workDir of grokWorkDirs()) {
+    const removed = cleanGrokSessions({ workDir, maxAgeDays: 7 });
+    if (removed) record({ action: "grok-sessions-cleaned", removed });
+  }
+}
+setTimeout(cleanGrokSessionsNow, 60_000).unref();
+setInterval(cleanGrokSessionsNow, 7 * 86_400_000).unref();
 const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
 
 function learnAdmin(message) {
@@ -1868,7 +1884,32 @@ async function runSummary(ws, chatId, command, { collectOnly = false } = {}) {
 
 // 本機試跑（不發到 LINE）：在 logs/ 放 ai-summary-dryrun.json（{"chatId": "..."}，可加 "arg": "3天"），送 SIGUSR2 給守衛。
 // 結果寫到 logs/ai-summary/（600），不動冷卻狀態。
+// 記事本連結匯出（唯讀、不發到 LINE）：logs/ 放 note-links-export.json（{"chatId": "..."}），送 SIGUSR2。
+// 把該群最近記事本裡的連結（不論作者）連同規則分數／仿冒網域判斷寫到 logs/note-links-export-*.json（600），供人工審核後加進 groupPolicies.linkAllow。
+async function exportNoteLinks(ws, chatId) {
+  const answer = await call(ws, { type: "notes:list", chatId, limit: notesCfg.limit }, 60_000);
+  if (answer.type !== "notes") return record({ action: "note-links-export-failed", chatId, code: answer.code });
+  const notes = answer.notes.map((note) => {
+    const text = noteText(note.text);
+    const urls = extractUrls(text);
+    if (!urls.length) return undefined;
+    const scored = ruleScore({}, text);
+    return { postId: note.postId, authorId: note.authorId, createdAt: note.createdAt, score: scored.score, rules: scored.names, lookalike: lookalikeExchange(text) || null, urls };
+  }).filter(Boolean);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  writeFileSync(join(logDir, `note-links-export-${stamp}.json`), JSON.stringify({ chatId, notes: answer.notes.length, strongScore, withLinks: notes }, null, 2), { mode: 0o600 });
+  record({ action: "note-links-export", chatId, notes: answer.notes.length, withLinks: notes.length });
+}
+
 process.on("SIGUSR2", () => {
+  const exportFile = join(logDir, "note-links-export.json");
+  if (existsSync(exportFile)) {
+    let exportReq;
+    try { exportReq = JSON.parse(readFileSync(exportFile, "utf8")); } catch {}
+    try { unlinkSync(exportFile); } catch {}
+    if (typeof exportReq?.chatId === "string" && currentWs?.readyState === WebSocket.OPEN) void exportNoteLinks(currentWs, exportReq.chatId).catch((error) => recordError("note-links-export", error.message));
+    return;
+  }
   let request;
   try { request = JSON.parse(readFileSync(join(logDir, "ai-summary-dryrun.json"), "utf8")); } catch { return console.error("找不到 logs/ai-summary-dryrun.json"); }
   const chatIds = request.chatIds === "all" ? lastChannels.map((c) => c.channelId) : Array.isArray(request.chatIds) ? request.chatIds : [request.chatId];

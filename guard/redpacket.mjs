@@ -71,12 +71,17 @@ export function extractUrls(text) {
   return (String(text ?? "").match(URL_RE) ?? []).map((url) => url.replace(/[.,，。!！]+$/, ""));
 }
 
-/** 連結鍵：去掉協定、www、查詢字串與結尾斜線；主機轉小寫，路徑保留大小寫（短網址代碼分大小寫）。 */
+// 少數網站的「哪一個內容」寫在查詢字串（YouTube 的 v、Drive 的 id）：這些參數留在鍵裡，避免白名單一條影片就放行整個網站。
+const IDENTITY_QUERY = { "youtube.com": ["v"], "m.youtube.com": ["v"], "music.youtube.com": ["v"], "drive.google.com": ["id"] };
+
+/** 連結鍵：去掉協定、www、查詢字串（IDENTITY_QUERY 例外）與結尾斜線；主機轉小寫，路徑保留大小寫（短網址代碼分大小寫）。 */
 export function linkKey(url) {
   try {
     const parsed = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
     if (parsed.username || parsed.password) return undefined;
-    return `${parsed.hostname.toLowerCase().replace(/^www\./, "")}${parsed.pathname.replace(/\/+$/, "")}`;
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const keep = (IDENTITY_QUERY[host] ?? []).filter((name) => parsed.searchParams.get(name)).map((name) => `${name}=${parsed.searchParams.get(name)}`);
+    return `${host}${parsed.pathname.replace(/\/+$/, "")}${keep.length ? `?${keep.join("&")}` : ""}`;
   } catch { return undefined; }
 }
 

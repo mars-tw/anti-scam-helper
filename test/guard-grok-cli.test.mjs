@@ -69,3 +69,26 @@ test("圖片：用 ACP image 區塊、改用看圖模型；太大就不送", asy
   assert.equal(JSON.parse(args[args.indexOf("--prompt-json") + 1])[0].type, "image");
   await assert.rejects(grokCli({ ...cfg(), maxImageBase64: 3 }, "S", "x", { image: { mime: "image/png", base64: "AAAA" }, spawnImpl: fakeSpawn() }), /IMAGE_TOO_LARGE/);
 });
+
+test("cleanGrokSessions 只清守衛工作目錄底下超過 7 天的工作階段", async () => {
+  const { mkdtempSync, mkdirSync, utimesSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { cleanGrokSessions, grokSessionDir } = await import("../guard/grok-cli.mjs");
+  const home = mkdtempSync(join(tmpdir(), "grok-home-"));
+  const mine = grokSessionDir("/tmp/grok-guard", home);
+  const other = grokSessionDir("/workspace", home);
+  assert.ok(mine.endsWith("%2Ftmp%2Fgrok-guard"));
+  const now = Date.now();
+  const old = (now - 8 * 86_400_000) / 1000;
+  for (const [dir, name, stale] of [[mine, "a", true], [mine, "b", false], [other, "c", true]]) {
+    mkdirSync(join(dir, name), { recursive: true });
+    if (stale) utimesSync(join(dir, name), old, old);
+  }
+  assert.equal(cleanGrokSessions({ workDir: "/tmp/grok-guard", home, now }), 1);
+  assert.equal(existsSync(join(mine, "a")), false);
+  assert.equal(existsSync(join(mine, "b")), true);
+  assert.equal(existsSync(join(other, "c")), true);
+  assert.equal(cleanGrokSessions({ workDir: "/tmp/nope", home, now }), 0);
+  rmSync(home, { recursive: true, force: true });
+});

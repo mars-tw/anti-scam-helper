@@ -60,3 +60,13 @@ test("記事本連結白名單：只認完全相同的連結（短網址代碼�
   assert.equal(allLinksKnown("沒有連結", known).reason, "no-link");
   assert.equal(allLinksKnown("https://lihi2.me/AbC12", new Set()).reason, "empty");
 });
+
+test("記事本連結白名單：YouTube 影片／Drive 檔案只認同一支（v、id 參數留在鍵裡）", async () => {
+  const { allLinksKnown, linkKey } = await import("../guard/redpacket.mjs");
+  assert.equal(linkKey("https://www.youtube.com/watch?v=abcDEF123&t=8s&list=PLx"), "youtube.com/watch?v=abcDEF123");
+  assert.equal(linkKey("https://drive.google.com/open?id=XyZ&usp=sharing"), "drive.google.com/open?id=XyZ");
+  const known = new Set([linkKey("https://www.youtube.com/watch?v=abcDEF123&t=8s")]);
+  assert.equal(allLinksKnown("教學 https://youtube.com/watch?v=abcDEF123", known).ok, true);
+  assert.equal(allLinksKnown("教學 https://youtube.com/watch?v=other999", known).reason, "other-link");
+  assert.equal(allLinksKnown("https://youtube.com/watch", known).reason, "other-link");
+});
