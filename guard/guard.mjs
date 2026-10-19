@@ -22,7 +22,7 @@ import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand } from "./ai-summary.mjs";
-import { isRedPacketOnly } from "./redpacket.mjs";
+import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
@@ -99,11 +99,44 @@ const notifyChats = new Set(notify.chats ?? []);
 // 依群的設定：groupPolicies[聊天室 id] = { mention: false（通知不 @ 任何管理員）, redPacket: true（官方紅包連結／QR 不當詐騙）, redPacketHosts: [] }。
 const groupPolicies = config.groupPolicies ?? {};
 const policyOf = (chatId) => groupPolicies[chatId] ?? {};
+// noteLinks: true → 群主／管理員／受保護成員在記事本貼的連結，加進這個群自己的白名單（存 logs/note-links.json，600）；
+// linkAllow: [...] 可手動加。只比完全相同的連結。
+const noteLinksFile = join(logDir, "note-links.json");
+const noteLinks = new Map(Object.entries((() => { try { return JSON.parse(readFileSync(noteLinksFile, "utf8")); } catch { return {}; } })()).map(([chatId, keys]) => [chatId, new Set(keys)]));
+function saveNoteLinks() {
+  try { writeFileSync(noteLinksFile, JSON.stringify(Object.fromEntries([...noteLinks].map(([k, v]) => [k, [...v].slice(-500)]))), { mode: 0o600 }); chmodSync(noteLinksFile, 0o600); } catch {}
+}
+function groupKnownLinks(chatId) {
+  const policy = policyOf(chatId);
+  const keys = new Set(policy.noteLinks === true ? noteLinks.get(chatId) ?? [] : []);
+  for (const url of policy.linkAllow ?? []) { const key = linkKey(url); if (key) keys.add(key); }
+  return keys;
+}
 function redPacketAllowed(chatId, text) {
   const policy = policyOf(chatId);
-  if (policy.redPacket !== true || !text) return undefined;
-  const result = isRedPacketOnly(text, { extra: policy.redPacketHosts ?? [] });
-  return result.ok ? result : undefined;
+  if (!text) return undefined;
+  if (policy.redPacket === true) {
+    const result = isRedPacketOnly(text, { extra: policy.redPacketHosts ?? [] });
+    if (result.ok) return result;
+  }
+  if (policy.noteLinks === true || policy.linkAllow?.length) {
+    const known = allLinksKnown(text, groupKnownLinks(chatId));
+    if (known.ok) return { ok: true, rules: ["group-note-link"] };
+  }
+  return undefined;
+}
+/** 記事本作者是群主／管理員／受保護成員時，記下裡面的連結（內容本身看起來是詐騙或仿冒網域就不收）。 */
+function learnNoteLinks(chatId, note) {
+  if (policyOf(chatId).noteLinks !== true || !note.authorId || !note.text) return 0;
+  const staff = [...(chatAdmins.get(chatId)?.keys() ?? [])].includes(note.authorId) || protectedMembers.some((entry) => entry.ids.has(note.authorId)) || whitelist.has(note.authorId);
+  if (!staff) return 0;
+  const text = noteText(note.text);
+  if (ruleScore({}, text).score >= strongScore || lookalikeExchange(text)) return 0;
+  if (!noteLinks.has(chatId)) noteLinks.set(chatId, new Set());
+  const set = noteLinks.get(chatId);
+  let added = 0;
+  for (const url of extractUrls(text)) { const key = linkKey(url); if (key && !set.has(key)) { set.add(key); added++; } }
+  return added;
 }
 // LINE 群組的禁止關鍵字（含禁字的訊息別人看不到）：所有自動發出的訊息送出前先替換。notify.blockedWords 可覆寫。
 const blockedWords = notify.blockedWords ?? DEFAULT_BLOCKED_WORDS;
@@ -239,6 +272,7 @@ const squareOf = (chatId) => channelSquare.get(chatId) ?? chatId;
 function hasCloudModel(llm) {
   for (let node = llm; node; node = node.fallback) {
     if ((node.backend === "openai" || node.backend === "responses") && node.apiKeyEnv && process.env[node.apiKeyEnv]) return true;
+    if (node.backend === "grok-cli") return true; // 主機上已登入的 Grok CLI（訂閱）
   }
   return false;
 }
@@ -246,6 +280,7 @@ function hasCloudModel(llm) {
 /** 這條模型鏈（含 fallback）的端點是不是全都在本機（127.0.0.1／localhost／::1）；只要有一個不是，或網址讀不懂，就當雲端。 */
 function isLocalModel(llm) {
   for (let node = llm; node; node = node.fallback) {
+    if (node.backend === "grok-cli") return false; // 送到 xAI 雲端
     const remote = node.backend === "openai" || node.backend === "responses";
     const endpoint = remote ? (node.baseUrl ?? "https://api.openai.com/v1") : (node.url ?? "http://127.0.0.1:11440");
     let host;
@@ -1884,6 +1919,15 @@ async function scanNotes(ws, chatIds = noteChats(), reason = "periodic") {
         continue;
       }
       record({ action: "notes-fetched", chatId, reason, count: answer.notes.length, newest: answer.notes[0]?.createdAt });
+      let learned = 0;
+      if (policyOf(chatId).noteLinks === true) {
+        const withLinks = answer.notes.filter((note) => extractUrls(note.text).length);
+        const staffIds = new Set(chatAdmins.get(chatId)?.keys() ?? []);
+        const fromStaff = withLinks.filter((note) => staffIds.has(note.authorId) || protectedMembers.some((entry) => entry.ids.has(note.authorId)) || whitelist.has(note.authorId)).length;
+        record({ action: "note-links-scan", chatId, notesWithLinks: withLinks.length, fromStaff, staffKnown: staffIds.size });
+      }
+      for (const note of answer.notes) learned += learnNoteLinks(chatId, note);
+      if (learned) { saveNoteLinks(); record({ action: "note-links-learned", chatId, added: learned, total: noteLinks.get(chatId)?.size ?? 0 }); }
       for (const note of answer.notes) {
         const key = noteKey(chatId, note);
         if (notesSeen.has(key)) continue;

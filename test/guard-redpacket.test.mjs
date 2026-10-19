@@ -47,3 +47,16 @@ test("規則：假紅包引流、仿冒交易所網域會加分；官方紅包�
   assert.equal(lookalikeExchange("https://binance-gift.xyz/a"), true);
   assert.equal(lookalikeExchange("https://www.binance.com/a"), false);
 });
+
+test("記事本連結白名單：只認完全相同的連結（短網址代碼分大小寫）、沒有引流字眼", async () => {
+  const { allLinksKnown, linkKey } = await import("../guard/redpacket.mjs");
+  const known = new Set([linkKey("https://lihi2.me/AbC12"), linkKey("https://www.example.org/course/intro?ref=1")]);
+  assert.equal(linkKey("http://www.Example.org/course/intro/"), "example.org/course/intro");
+  assert.equal(allLinksKnown("課程介紹 https://example.org/course/intro", known).ok, true);
+  assert.equal(allLinksKnown("看這裡 lihi2.me/AbC12", known).ok, true);
+  assert.equal(allLinksKnown("看這裡 lihi2.me/abc12", known).reason, "other-link");
+  assert.equal(allLinksKnown("https://lihi2.me/AbC12 https://reurl.cc/x", known).reason, "other-link");
+  assert.equal(allLinksKnown("https://lihi2.me/AbC12 有問題私訊我", known).reason, "lure");
+  assert.equal(allLinksKnown("沒有連結", known).reason, "no-link");
+  assert.equal(allLinksKnown("https://lihi2.me/AbC12", new Set()).reason, "empty");
+});

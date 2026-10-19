@@ -4,6 +4,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { scrubNotice } from "./notice.mjs";
+import { grokCli } from "./grok-cli.mjs";
 
 export const SUMMARY_DEFAULTS = {
   enabled: false,
@@ -129,6 +130,11 @@ export const REDUCE_SYSTEM = `你會拿到同一個 LINE 群組不同時段的�
 
 /** OpenAI 相容的 chat/completions，回傳文字與 usage。金鑰只從環境變數讀，不記錄。 */
 export async function chatComplete(llm, system, user, maxTokens, { fetchImpl = fetch } = {}) {
+  // 主機上已登入的 Grok CLI（訂閱，不用 API 金鑰）。
+  if (llm.backend === "grok-cli") {
+    const result = await grokCli(llm, system, user, {});
+    return { text: result.text, usage: result.usage };
+  }
   const key = llm.apiKeyEnv ? process.env[llm.apiKeyEnv] : undefined;
   if (llm.apiKeyEnv && !key) throw new Error(`NO_KEY`);
   const response = await fetchImpl(`${String(llm.baseUrl).replace(/\/$/, "")}/chat/completions`, {
@@ -147,7 +153,8 @@ export async function chatComplete(llm, system, user, maxTokens, { fetchImpl = f
 /** 費用估算（美元）：calls＝[{ input, output }]。 */
 export function estimateCost(calls, price = SUMMARY_DEFAULTS.price) {
   let usd = 0;
-  for (const { input, output } of calls) {
+  for (const { input, output, costUsd } of calls) {
+    if (Number.isFinite(costUsd) && costUsd > 0) { usd += costUsd; continue; } // CLI 自己回報的等值費用
     const long = input >= price.longThreshold;
     usd += (input * (long ? price.longInput : price.input) + output * (long ? price.longOutput : price.output)) / 1e6;
   }

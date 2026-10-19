@@ -8,6 +8,7 @@
 //   { "backend": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "model": "qwen3-vl-2b", "apiKeyEnv": "", "maxTokensField": "max_tokens" }
 // apiKeyEnv 設成空字串＝不帶金鑰（主機上自己跑的模型）。
 // 推理型模型會把一部分 token 花在思考上，回答被截斷時把 maxTokens 調高。
+import { grokCliText } from "./grok-cli.mjs";
 
 /**
  * 回傳模型的文字回答；連不上、逾時或格式不對時回 undefined（呼叫端自行退回保守處理）。
@@ -43,7 +44,9 @@ async function completeOne(llm, system, user, maxTokens, image) {
   lastFailureThrown = false;
   try {
     const backend = llm.backend ?? "local";
-    const answer = backend === "openai"
+    const answer = backend === "grok-cli"
+      ? await grokCliText(llm, system, user, maxTokens, image, { onAuthError: () => console.error("Grok CLI 登入失效或無法更新，30 分鐘內略過 Grok（請在主機上重新 grok login）") })
+      : backend === "openai"
       ? await openai(llm, system, user, maxTokens, image)
       : backend === "responses"
         ? await responses(llm, system, user, maxTokens, image)

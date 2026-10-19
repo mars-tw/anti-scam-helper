@@ -150,6 +150,7 @@
 `groupPolicies` 的鍵是聊天室 id：
 - `"mention": false`：這個群的通知一律不 @ 群主／管理員（只引用那則訊息）。沒設時：本帳號在該群是群主／共同管理員（能踢人）就不 @，不是管理員才 @。
 - `"redPacket": true`：官方紅包連結與紅包 QR（派網 pionex.com 紅包頁、幣安 s.binance.com／app.binance.com/uni-qr／官網紅包頁、OKX、Bybit 紅包頁、LINE Pay pay.line.me）不當詐騙：不通知、不刪、不踢。只認官方網域本身或子網域＋紅包路徑；夾帶加賴／私訊／先付費等字眼、短網址或其他連結就照一般流程。`redPacketHosts` 可加網域。
+- `"noteLinks": true`：群主／管理員／受保護成員在這個群記事本貼的連結，自動加進這個群自己的白名單（`logs/note-links.json`，600）；同一個連結（主機＋路徑完全一樣，短網址代碼分大小寫）再出現就不當詐騙，夾帶引流字眼或混了其他連結照常判斷。`"linkAllow": [...]` 可手動加。
 - 另有規則「假紅包」（紅包＋引流／付費）與「仿冒交易所網域」（pi0nex、binance-gift.xyz、bybit.com.evil.io 這類）。
 
 覆核鏈可以接任意層 `fallback`，例如 Meta 之後接 xAI Grok（`"baseUrl": "https://api.x.ai/v1"`, `"apiKeyEnv": "XAI_API_KEY"`）；哪一層回答就記在日誌的 `reviewModel`，判定效力相同；沒金鑰的層直接跳過、不送請求。

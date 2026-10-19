@@ -63,3 +63,30 @@ export function lookalikeExchange(text) {
   }
   return false;
 }
+
+// ── 記事本連結白名單（依群）─────────────────────────────────────
+// 群主／管理員／受保護成員在記事本貼的連結，是這個群自己的正式資源：同一個連結（主機＋路徑完全一樣，大小寫算）
+// 在這個群再出現，不當詐騙。只比對完全相同的連結，換個短網址代碼就不算。
+export function extractUrls(text) {
+  return (String(text ?? "").match(URL_RE) ?? []).map((url) => url.replace(/[.,，。!！]+$/, ""));
+}
+
+/** 連結鍵：去掉協定、www、查詢字串與結尾斜線；主機轉小寫，路徑保留大小寫（短網址代碼分大小寫）。 */
+export function linkKey(url) {
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    if (parsed.username || parsed.password) return undefined;
+    return `${parsed.hostname.toLowerCase().replace(/^www\./, "")}${parsed.pathname.replace(/\/+$/, "")}`;
+  } catch { return undefined; }
+}
+
+/** 訊息裡「全部」連結都在 known（linkKey 集合）裡、至少一個、沒有引流字眼。 */
+export function allLinksKnown(text, known) {
+  const content = String(text ?? "");
+  if (!known?.size) return { ok: false, reason: "empty" };
+  if (RED_PACKET_LURE.test(content.normalize("NFKC"))) return { ok: false, reason: "lure" };
+  const urls = extractUrls(content);
+  if (!urls.length) return { ok: false, reason: "no-link" };
+  for (const url of urls) if (!known.has(linkKey(url))) return { ok: false, reason: "other-link" };
+  return { ok: true, count: urls.length };
+}
