@@ -135,6 +135,25 @@
 
 預設不啟用，也不會建立 `data/chat-training/`。啟用時守衛啟動會印出警告。其他欄位：`chat.training.dir`（存放位置，預設 `data/chat-training`）、`chat.training.examples`（每次最多放幾則範例，預設 3）、`chat.training.examplesForLocal`（`true`＝地端模型也放範例，預設不放）。
 
+## 群組整理指令 `/ai整理`（`aiSummary`，預設關閉）
+
+成員在守護的群組打 `/ai整理`（全形 `／` 也可以；可加範圍：`今天`、`昨天`、`3天`、`12小時`、`2週`），守衛回覆一則（最多兩則）整理：主要話題、重要結論／資源、待回答的問題、提醒。
+
+- 每群 `cooldownMinutes`（預設 10）分鐘最多一次，狀態存在 `data/ai-summary-state.json`（600），重啟不歸零；冷卻中只回一次「X 分鐘後可再用」，同群同時只跑一個。補掃到超過 `maxAgeMinutes`（10）分鐘的指令不理。
+- 來源：伺服器歷史（往回翻頁，社群伺服器端最多約 5000 則）、記事本、本機去識別化社群摘錄（伺服器拿不到的較早部分），預算 `budgetTokens`（預設 400 萬，粗估 token）。被守衛標記或規則判疑似詐騙的訊息只留標記，不送內容；網址、ID、電話、邀請碼送出前與輸出時都拿掉。
+- 模型：`llm`（預設 xAI `grok-4.20-0309-non-reasoning`，`XAI_API_KEY`）。每塊 `chunkTokens`（預設 18 萬，低於 20 萬的長上下文加價門檻）平行摘要（`concurrency`、`retries`），再合併；總時限 `timeoutMs`（8 分鐘），失敗回一句抱歉。
+- 日誌只記則數、token、費用估算（`price`）、耗時，不記內容。
+- 本機試跑（不發到 LINE）：在 `guard/logs/ai-summary-dryrun.json` 寫 `{"chatId":"…","arg":"3天"}`，對守衛程序送 `SIGUSR2`，結果寫到 `guard/logs/ai-summary/`。
+
+## 依群設定 `groupPolicies`（選用）
+
+`groupPolicies` 的鍵是聊天室 id：
+- `"mention": false`：這個群的通知一律不 @ 群主／管理員（只引用那則訊息）。沒設時：本帳號在該群是群主／共同管理員（能踢人）就不 @，不是管理員才 @。
+- `"redPacket": true`：官方紅包連結與紅包 QR（派網 pionex.com 紅包頁、幣安 s.binance.com／app.binance.com/uni-qr／官網紅包頁、OKX、Bybit 紅包頁、LINE Pay pay.line.me）不當詐騙：不通知、不刪、不踢。只認官方網域本身或子網域＋紅包路徑；夾帶加賴／私訊／先付費等字眼、短網址或其他連結就照一般流程。`redPacketHosts` 可加網域。
+- 另有規則「假紅包」（紅包＋引流／付費）與「仿冒交易所網域」（pi0nex、binance-gift.xyz、bybit.com.evil.io 這類）。
+
+覆核鏈可以接任意層 `fallback`，例如 Meta 之後接 xAI Grok（`"baseUrl": "https://api.x.ai/v1"`, `"apiKeyEnv": "XAI_API_KEY"`）；哪一層回答就記在日誌的 `reviewModel`，判定效力相同；沒金鑰的層直接跳過、不送請求。
+
 ## 先試跑再開踢人
 
 新設定一律先 `dryRun: true` 跑幾天：只記錄「會踢誰」，並在主控台顯示「會發的通知」與「會回的內容」，不真的踢、不發通知、不回覆。看 `guard/logs/guard-日期.jsonl`（誰被判定、為什麼）確認沒有誤判（特別是管理員、貼本群連結的人、問「這是詐騙嗎」的人）後再改成 `false`。看圖模型（尤其 2B 這類小模型）容易誤判，建議維持 `vision.action: "report"`。

@@ -16,11 +16,13 @@ import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { allLinksLegit, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { labelReply } from "./policy.mjs";
+import { labelReply, mentionTargets, selfIsChatAdmin } from "./policy.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
+import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand } from "./ai-summary.mjs";
+import { isRedPacketOnly } from "./redpacket.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
@@ -94,6 +96,15 @@ const chatLlm = { ...scamLlm, ...chat.llm };
 // 只會發到 notify.chats 列出的聊天室（留空＝不發）；試跑模式只記錄要發的內容，不送出。
 const notify = { enabled: false, chats: [], admins: {}, mentionLearned: true, cooldownSeconds: 30, ...config.notify };
 const notifyChats = new Set(notify.chats ?? []);
+// 依群的設定：groupPolicies[聊天室 id] = { mention: false（通知不 @ 任何管理員）, redPacket: true（官方紅包連結／QR 不當詐騙）, redPacketHosts: [] }。
+const groupPolicies = config.groupPolicies ?? {};
+const policyOf = (chatId) => groupPolicies[chatId] ?? {};
+function redPacketAllowed(chatId, text) {
+  const policy = policyOf(chatId);
+  if (policy.redPacket !== true || !text) return undefined;
+  const result = isRedPacketOnly(text, { extra: policy.redPacketHosts ?? [] });
+  return result.ok ? result : undefined;
+}
 // LINE 群組的禁止關鍵字（含禁字的訊息別人看不到）：所有自動發出的訊息送出前先替換。notify.blockedWords 可覆寫。
 const blockedWords = notify.blockedWords ?? DEFAULT_BLOCKED_WORDS;
 // 詢問者遮蔽：有人「問是不是詐騙」，同時（前後 windowSeconds 內）貼了外部 LINE 群／加好友 QR 或 LINE ID／邀請連結，
@@ -246,7 +257,11 @@ function isLocalModel(llm) {
 const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
 
 function learnAdmin(message) {
-  if (!message.senderRole) return;
+  // 本帳號的訊息沒帶管理身分＝已不是管理員（被降級）：忘掉，之後通知恢復 @ 管理員。
+  if (!message.senderRole) {
+    if (message.channelId && message.senderId && isSelf(message.channelId, message.senderId)) chatAdmins.get(message.channelId)?.delete(message.senderId);
+    return;
+  }
   if (message.channelId && message.senderId) {
     if (!chatAdmins.has(message.channelId)) chatAdmins.set(message.channelId, new Map());
     const admins = chatAdmins.get(message.channelId);
@@ -1197,6 +1212,11 @@ async function handle(ws, message) {
   }
   learnAdmin(message);
   noteActivity(message);
+  // /ai整理：任何成員都能叫（含管理員）；工作在背景跑，不卡住巡邏佇列。
+  if (text && summaryCfg.enabled) {
+    const command = parseSummaryCommand(text);
+    if (command) { void requestSummary(ws, message, command); return; }
+  }
   // 冒名＋外部連結（同一則或前後 2 分鐘內）：確認詐騙。圖片的 QR 在 checkImage 解碼後判斷。
   if (text && !message.senderRole && !whitelist.has(message.senderId)) {
     const cleaned = sanitizeLinks(text).text;
@@ -1228,6 +1248,13 @@ async function handle(ws, message) {
       // 這位詢問者剛被遮蔽過（同一段時間內）：之後補貼的圖片也一併刪除（deleteAllImagesInWindow）。
       if (questionRedact.enabled && !isStaff(message) && !kicked.has(key)) await redactIfAsker(ws, message);
     }
+    return;
+  }
+  // 紅包白名單群：只有官方紅包連結、沒有引流字眼 → 不判詐騙、不通知、不刪、不踢。
+  const redPacket = !trusted ? redPacketAllowed(message.channelId, text) : undefined;
+  if (redPacket) {
+    record({ action: "none", verdict: "RED_PACKET_ALLOWED", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, rules: redPacket.rules, ...contentRef(text) });
+    remember(message, text);
     return;
   }
   if (!trusted && repeatOffense(message) && hasLineInfo(text)) return punishRepeat(ws, message, { ...contentRef(text) });
@@ -1314,11 +1341,12 @@ async function checkImage(ws, message) {
   // 日誌只記 QR 內容的短雜湊與字數，不記解碼出來的內容。
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE_QR", ...contentRef(content) };
   // 社群自己的正式 QR（例如官方邀請）可以加進 qr.allow。
-  if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).officialOnly) {
+  const qrRedPacket = redPacketAllowed(message.channelId, content);
+  if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).officialOnly || qrRedPacket) {
     // 自家群 QR：詢問者遮蔽「刪這段時間所有圖片」時也不刪。
     const item = askerLog.get(`${message.channelId} ${message.senderId}`)?.items.get(message.messageId);
     if (item) item.safe = true;
-    return record({ action: "none", verdict: "QR_ALLOWED", ...entry });
+    return record({ action: "none", verdict: qrRedPacket ? "QR_RED_PACKET" : "QR_ALLOWED", ...entry });
   }
   // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
@@ -1548,7 +1576,7 @@ async function remindAsker(ws, message, failed, { replyTo = message.messageId, f
   const mentions = [{ userId: message.senderId, start: 0, end: label.length }];
   text += failed ? questionRedact.failedMessage : questionRedact.message;
   if (failed) {
-    const admins = adminsOf(message.channelId).filter(([id]) => id !== message.senderId).slice(0, 19);
+    const admins = noticeAdmins(message.channelId).filter(([id]) => id !== message.senderId).slice(0, 19);
     if (admins.length) {
       text += "\n";
       for (const [id, admin] of admins) {
@@ -1575,6 +1603,19 @@ async function remindAsker(ws, message, failed, { replyTo = message.messageId, f
 
 // ── 通知群主與管理員 ─────────────────────────────────────────
 const lastNotified = new Map(); // 聊天室 id → 上次通知時間
+
+/**
+ * 本帳號在這個群確定是群主／共同管理員（能踢人）：從帶身分的社群訊息學到（不是預設值）。
+ * 這種群的通知不再 @ 群主／管理員（本人 10/19 要求），只引用那則訊息；不是管理員的群照舊 @。
+ */
+function selfCanKick(chatId) {
+  return selfIsChatAdmin(chatAdmins.get(chatId), (id) => isSelf(chatId, id));
+}
+/** 通知要 @ 的人：本帳號能踢人的群不 @。 */
+function noticeAdmins(chatId) {
+  if (policyOf(chatId).mention === false) return [];
+  return mentionTargets(adminsOf(chatId), selfCanKick(chatId));
+}
 
 function adminsOf(chatId) {
   const list = new Map();
@@ -1647,7 +1688,7 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   const now = Date.now();
   if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", chatId: entry.chatId, senderName: entry.senderName }); return false; }
   lastNotified.set(entry.chatId, now);
-  const admins = adminsOf(entry.chatId);
+  const admins = noticeAdmins(entry.chatId);
   const { text, mentions } = buildNotice(entry, kind, admins);
   if (config.dryRun) {
     // 通知內容只在試跑時顯示在主控台，供檢視；日誌只記字數。
@@ -1662,6 +1703,157 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
   return reply.type === "sent";
 }
+
+// ── /ai整理 ───────────────────────────────────────────────
+// 每群 cooldownMinutes 分鐘最多一次（存檔），同群同時只跑一個；冷卻中只回一次「X 分鐘後可再用」。
+// 來源：伺服器歷史（往回翻頁）＋記事本＋本機去識別化社群摘錄；疑似詐騙的訊息只留標記。雲端模型 map-reduce 整理。
+const summaryCfg = { ...SUMMARY_DEFAULTS, ...config.aiSummary, llm: { ...SUMMARY_DEFAULTS.llm, ...config.aiSummary?.llm }, price: { ...SUMMARY_DEFAULTS.price, ...config.aiSummary?.price } };
+const summaryState = new SummaryState(resolve(here, "..", summaryCfg.stateFile));
+
+/** 近 30 天日誌裡被標記（踢、通知、可疑）的訊息 id。 */
+function flaggedMessageIds() {
+  const ids = new Set();
+  const cutoff = Date.now() - 30 * 86_400_000;
+  let files = [];
+  try { files = readdirSync(logDir).filter((name) => /^guard-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)); } catch { return ids; }
+  for (const name of files) {
+    if (Date.parse(name.slice(6, 16)) < cutoff) continue;
+    let content = "";
+    try { content = readFileSync(join(logDir, name), "utf8"); } catch { continue; }
+    for (const line of content.split("\n")) {
+      if (!line.includes("messageId")) continue;
+      try { const entry = JSON.parse(line); if (entry.messageId && FLAG_ACTIONS.test(entry.action ?? "")) ids.add(entry.messageId); } catch {}
+    }
+  }
+  return ids;
+}
+
+async function requestSummary(ws, message, command) {
+  const chatId = message.channelId;
+  const age = Date.now() - (message.createdAt ?? Date.now());
+  if (age > summaryCfg.maxAgeMinutes * 60_000) return record({ action: "ai-summary-skipped", reason: "stale", chatId, messageId: message.messageId, ageSeconds: Math.round(age / 1000) });
+  if (repliedIds.has(message.messageId)) return;
+  const state = summaryState.check(chatId, summaryCfg.cooldownMinutes * 60_000);
+  if (!state.ok) {
+    record({ action: "ai-summary-skipped", reason: state.running ? "running" : state.told ? "cooldown-told" : "cooldown", chatId, messageId: message.messageId });
+    if (!state.running && !state.told) {
+      summaryState.markTold(chatId);
+      markReplied(message.messageId);
+      sendLabeled(ws, message, `整理功能 ${Math.max(1, Math.ceil(state.remainingMs / 60_000))} 分鐘後可再用。`);
+    }
+    return;
+  }
+  markReplied(message.messageId);
+  summaryState.start(chatId);
+  try {
+    const result = await runSummary(ws, chatId, command);
+    for (const part of result.parts) sendLabeled(ws, message, part);
+    record({ action: "ai-summary", chatId, messageId: message.messageId, ...result.stats });
+  } catch (error) {
+    record({ action: "ai-summary-failed", chatId, messageId: message.messageId, code: String(error?.message ?? error).slice(0, 40) });
+    sendLabeled(ws, message, "抱歉，這次整理沒有完成，請過一陣子再試。");
+  } finally {
+    summaryState.finish(chatId);
+  }
+}
+
+/** 抓資料＋整理；回傳要送的訊息與統計（統計不含內容）。dryRun 的結果另寫本機檔。 */
+async function runSummary(ws, chatId, command, { collectOnly = false } = {}) {
+  const started = Date.now();
+  const deadline = started + summaryCfg.timeoutMs;
+  const since = command.since ?? 0;
+  const items = [];
+  const flagged = flaggedMessageIds();
+  let before;
+  let pages = 0;
+  let tokens = 0;
+  let oldestServer = Infinity;
+  let hasMore = false;
+  // 伺服器歷史：從最新往回翻，直到沒有更多、超過時間範圍、預算或頁數上限。
+  while (pages < summaryCfg.maxPages && Date.now() < deadline - 120_000) {
+    const page = await call(ws, { type: "history:fetch", chatId, limit: 100, ...(before ? { before } : {}) }, 180_000);
+    if (page.type !== "history") { if (pages === 0) throw new Error(`HISTORY_${page.code ?? "FAILED"}`); break; }
+    pages++;
+    for (const m of page.messages) {
+      oldestServer = Math.min(oldestServer, m.createdAt);
+      if (m.unsent || m.contentType === "CHATEVENT" || m.createdAt < since) continue;
+      const text = textOf(m);
+      if (!text) continue;
+      const scam = flagged.has(m.messageId) || ruleScore(m, sanitizeLinks(text).text).score >= strongScore;
+      items.push({ at: m.createdAt, name: isSelf(chatId, m.senderId) || m.senderId === me ? ownerLabel : safeName(m.senderName, blockedWords), text, flagged: scam });
+      tokens += Math.ceil(text.length * 1.1);
+    }
+    hasMore = Boolean(page.hasMore && page.cursor);
+    if (!hasMore || oldestServer < since || tokens > summaryCfg.budgetTokens) break;
+    before = page.cursor;
+  }
+  // 記事本。
+  let notes = 0;
+  const noteAnswer = await call(ws, { type: "notes:list", chatId, limit: 20 }, 60_000);
+  if (noteAnswer.type === "notes") for (const note of noteAnswer.notes) {
+    const at = note.updatedAt ?? note.createdAt;
+    if (at < since || !note.text) continue;
+    notes++;
+    const text = noteText(note.text);
+    items.push({ at, kind: "note", text, flagged: ruleScore({}, text).score >= strongScore });
+  }
+  // 伺服器拿不到的較早部分：本機去識別化摘錄（已排除被判詐騙的發言者）。
+  let older = 0;
+  if (memory) for (const entry of memory.older(chatId, oldestServer, since)) { older++; items.push({ at: entry.at, kind: "memory", text: entry.text }); }
+  const transcript = buildTranscript(items, summaryCfg.budgetTokens);
+  if (!transcript.lines.length) throw new Error("NO_CONTENT");
+  const chunks = chunkLines(transcript.lines, summaryCfg.chunkTokens);
+  if (collectOnly) {
+    // 只估算：每塊一次 map（輸入≈塊大小＋提示）＋一次 reduce（輸入≈各塊摘要），輸出用上限估。
+    const est = chunks.length === 1 ? [{ input: transcript.tokens + 600, output: summaryCfg.reduceMaxTokens }]
+      : [...chunks.map((c) => ({ input: estimateTokens(c) + 600, output: summaryCfg.mapMaxTokens })), { input: chunks.length * summaryCfg.mapMaxTokens + 600, output: summaryCfg.reduceMaxTokens }];
+    return { parts: [], stats: { collectOnly: true, serverPages: pages, serverHasMore: hasMore, messages: items.length - notes - older, notes, olderLocal: older,
+      flagged: items.filter((item) => item.flagged).length, transcriptLines: transcript.lines.length, transcriptTokens: transcript.tokens, oldestAt: transcript.oldest, newestAt: transcript.newest,
+      chunks: chunks.length, estCostUsd: estimateCost(est, summaryCfg.price), ms: Date.now() - started } };
+  }
+  const header = `整理範圍：${command.label}（${transcript.lines.length} 則，台北時間 ${new Date(transcript.oldest).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" })} 起）。`;
+  const reduced = await mapReduce(chunks, {
+    complete: (system, user, maxTokens) => chatComplete(summaryCfg.llm, system, user, maxTokens),
+    concurrency: summaryCfg.concurrency, retries: summaryCfg.retries, deadline, chunkTokens: summaryCfg.chunkTokens,
+    mapMaxTokens: summaryCfg.mapMaxTokens, reduceMaxTokens: summaryCfg.reduceMaxTokens, maxChars: summaryCfg.maxChars, header,
+  });
+  const fmt = (at) => new Date(at).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  const title = `📋 群組整理（${fmt(transcript.oldest)}～${fmt(transcript.newest)}，共 ${transcript.lines.length} 則）`;
+  const parts = finalizeSummary(reduced.text, { blockedWords, label: replyLabel, maxChars: summaryCfg.maxChars, maxMessages: summaryCfg.maxMessages, title });
+  const inputTokens = reduced.calls.reduce((n, c) => n + c.input, 0);
+  const outputTokens = reduced.calls.reduce((n, c) => n + c.output, 0);
+  const stats = {
+    model: summaryCfg.llm.model, serverPages: pages, serverHasMore: hasMore, messages: items.length - notes - older, notes, olderLocal: older,
+    flagged: items.filter((item) => item.flagged).length, transcriptLines: transcript.lines.length, transcriptTokens: transcript.tokens,
+    oldestAt: transcript.oldest, newestAt: transcript.newest, chunks: chunks.length, calls: reduced.calls.length,
+    inputTokens, outputTokens, costUsd: estimateCost(reduced.calls, summaryCfg.price), ms: Date.now() - started, outChars: parts.reduce((n, p) => n + p.length, 0), outMessages: parts.length,
+  };
+  return { parts, stats };
+}
+
+// 本機試跑（不發到 LINE）：在 logs/ 放 ai-summary-dryrun.json（{"chatId": "..."}，可加 "arg": "3天"），送 SIGUSR2 給守衛。
+// 結果寫到 logs/ai-summary/（600），不動冷卻狀態。
+process.on("SIGUSR2", () => {
+  let request;
+  try { request = JSON.parse(readFileSync(join(logDir, "ai-summary-dryrun.json"), "utf8")); } catch { return console.error("找不到 logs/ai-summary-dryrun.json"); }
+  const chatIds = request.chatIds === "all" ? lastChannels.map((c) => c.channelId) : Array.isArray(request.chatIds) ? request.chatIds : [request.chatId];
+  if (!currentWs || currentWs.readyState !== WebSocket.OPEN || !chatIds.every((id) => typeof id === "string")) return console.error("試跑：尚未連線或缺 chatId");
+  const command = parseSummaryCommand(`/ai整理 ${request.arg ?? ""}`) ?? { label: "全部" };
+  void (async () => {
+    for (const chatId of chatIds) {
+      record({ action: "ai-summary-dryrun-start", chatId, collectOnly: request.collectOnly === true });
+      try {
+        const { parts, stats } = await runSummary(currentWs, chatId, command, { collectOnly: request.collectOnly === true });
+        const dir = join(logDir, summaryCfg.outDir);
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        if (parts.length) writeFileSync(join(dir, `dryrun-${stamp}.txt`), parts.join("\n\n=====\n\n"), { mode: 0o600 });
+        writeFileSync(join(dir, `dryrun-${stamp}.json`), JSON.stringify({ chatId, ...stats }, null, 2), { mode: 0o600 });
+        record({ action: "ai-summary-dryrun", chatId, ...stats });
+      } catch (error) { record({ action: "ai-summary-dryrun-failed", chatId, code: String(error?.message ?? error).slice(0, 60) }); }
+    }
+  })();
+});
 
 // ── 記事本巡查 ───────────────────────────────────────────────
 // 記事本貼文不會進訊息流：連線／醒來補掃後、收到記事本變動通知、以及每 intervalMinutes 分鐘，讀守護群的最近記事本。
@@ -1711,6 +1903,7 @@ async function handleNote(ws, chatId, note) {
   const base = { chatId, notePostId: note.postId, senderId: note.authorId, senderName: note.authorName, noteCreatedAt: note.createdAt, ...contentRef(text) };
   if (!text) return;
   const message = { messageId: `note:${note.postId}`, channelId: chatId, senderId: note.authorId, senderName: note.authorName, contentType: "NOTE", createdAt: note.createdAt, text };
+  if (redPacketAllowed(chatId, text)) return record({ action: "note-checked", ...base, verdict: "RED_PACKET_ALLOWED" });
   const protectedAuthor = Boolean(note.authorId) && (neverKick(message) || protectedMembers.some((entry) => entry.ids.has(note.authorId)) || botIds.has(note.authorId));
   const result = await decide(message, text);
   const old = at < notesSeen.baseline || Date.now() - at > notesCfg.maxAgeHours * 3_600_000;
@@ -1725,7 +1918,7 @@ async function handleNote(ws, chatId, note) {
 
 async function notifyNote(ws, entry, note, deleting) {
   if (!notify.enabled || !notifyChats.has(entry.chatId)) { record({ action: "note-flag", ...entry, notified: false, reason: "chat-not-allowed" }); return; }
-  const admins = adminsOf(entry.chatId);
+  const admins = noticeAdmins(entry.chatId);
   const { text, mentions } = buildNoteNotice({ snippet: noteSnippet(note.text, blockedWords), reason: noticeReason(entry), authorName: note.authorName ? safeName(note.authorName, blockedWords) : undefined, admins, deleting }, blockedWords);
   if (config.dryRun) {
     console.log(`【試跑，未發通知】${text.replace(/\n/g, " ")}`);
@@ -1790,7 +1983,10 @@ async function syncHistory(ws, channels) {
       if (!last) await sleep(delays[attempt] * 1000);
     }
   }
-  if (run === historyRun) void scanNotes(ws, noteChats(channels), "catch-up");
+  if (run === historyRun) {
+    record({ action: "self-admin-status", canKick: channels.filter((c) => selfCanKick(c.channelId)).map((c) => c.channelId), notAdmin: channels.filter((c) => !selfCanKick(c.channelId)).map((c) => c.channelId) });
+    void scanNotes(ws, noteChats(channels), "catch-up");
+  }
 }
 
 /** 一頁 100 則不夠蓋住斷線期間時，往前翻頁（最多 catchUp.maxPages 頁），直到碰到水位或超過補掃上限。 */

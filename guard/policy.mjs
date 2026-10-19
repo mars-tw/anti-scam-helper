@@ -199,3 +199,14 @@ export function labelReply(text, label = AGENT_LABEL) {
   const body = String(text ?? "").replace(/\s*[（(]\s*(自動回覆|AI\s*代理)\s*[）)]/gi, "").replace(/自動回覆/g, "").trim();
   return `${body}${label}`;
 }
+
+// ── 通知要不要 @ 管理員 ───────────────────────────────────────
+/** admins：Map(成員 id → { role })，只收帶管理身分的訊息學到的；本帳號在裡面且有身分＝能踢人。 */
+export function selfIsChatAdmin(admins, isSelf) {
+  for (const [id, admin] of admins ?? []) if (admin?.role && isSelf(id)) return true;
+  return false;
+}
+/** 本帳號能踢人的群：通知只引用訊息，不再 @ 群主／管理員；其他群照舊。 */
+export function mentionTargets(admins, selfCanKick) {
+  return selfCanKick ? [] : admins;
+}

@@ -86,3 +86,37 @@ test("Meta 覆核鏈：contributor、wonder 都失敗 → 改用標準版 muse-s
   assert.equal(used.model, "muse-spark-1.3");
   assert.deepEqual(seen, ["muse-spark-1.3-contributor", "muse-wonder-1.0", "muse-spark-1.3"]);
 });
+
+test("覆核鏈第 4 層 xAI Grok：Meta 三個都失敗 → Grok 判定（文字與圖片），Grok 沒金鑰就整串失敗只記錄", async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      const json = JSON.parse(body);
+      seen.push({ path: req.url, model: json.model, image: JSON.stringify(json.messages ?? "").includes("image_url") });
+      if (req.url.startsWith("/meta")) { res.statusCode = 404; return res.end("{}"); }
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ choices: [{ message: { content: "SCAM 假紅包" } }] }));
+    });
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const meta = (model, fallback) => ({ backend: "responses", baseUrl: `${base}/meta/v1`, model, apiKeyEnv: "", fallback });
+  const grok = { backend: "openai", baseUrl: `${base}/xai/v1`, model: "grok-4.20-0309-non-reasoning", apiKeyEnv: "TEST_FAKE_XAI_KEY", maxTokensField: "max_tokens" };
+  const chain = meta("muse-spark-1.3-contributor", meta("muse-wonder-1.0", meta("muse-spark-1.3", grok)));
+  process.env.TEST_FAKE_XAI_KEY = "fake";
+  const used = {};
+  assert.equal(await complete(chain, "sys", "訊息", 20, undefined, used), "SCAM 假紅包");
+  assert.equal(used.model, "grok-4.20-0309-non-reasoning");
+  const usedImage = {};
+  assert.equal(await complete(chain, "sys", "圖", 20, { mime: "image/png", base64: "AAAA" }, usedImage), "SCAM 假紅包");
+  assert.equal(seen.at(-1).image, true);
+  delete process.env.TEST_FAKE_XAI_KEY;
+  seen.length = 0;
+  const none = {};
+  assert.equal(await complete(chain, "sys", "訊息", 20, undefined, none), undefined);
+  assert.equal(none.model, undefined);
+  assert.ok(seen.every((s) => s.path.startsWith("/meta")), "沒金鑰不送 xAI");
+  server.close();
+});

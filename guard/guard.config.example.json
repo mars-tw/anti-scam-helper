@@ -83,5 +83,17 @@
     "enabled": false,
     "avatar": true,
     "cooldownHours": 12
+  },
+  "aiSummary": {
+    "enabled": false,
+    "cooldownMinutes": 10,
+    "budgetTokens": 4000000,
+    "chunkTokens": 180000,
+    "llm": {
+      "backend": "openai",
+      "baseUrl": "https://api.x.ai/v1",
+      "model": "grok-4.20-0309-non-reasoning",
+      "apiKeyEnv": "XAI_API_KEY"
+    }
   }
 }

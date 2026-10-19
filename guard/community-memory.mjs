@@ -93,6 +93,12 @@ export class CommunityMemory {
     return true;
   }
 
+  /** 某聊天室在 before 之前的去識別化摘錄（/ai整理 補伺服器歷史拿不到的較早部分），舊到新。 */
+  older(chatId, before = Infinity, since = 0) {
+    const chat = this.chatKey(chatId);
+    return this.items.filter((item) => item.chat === chat && item.at < before && item.at >= since).sort((a, b) => a.at - b.at).map((item) => ({ at: item.at, text: item.text, bot: item.bot }));
+  }
+
   /** 發言者之後被判詐騙／可疑：整批刪掉他的訊息，之後也不收。 */
   forget(chatId, senderId) {
     const sender = this.senderKey(chatId, senderId);

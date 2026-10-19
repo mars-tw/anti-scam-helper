@@ -79,3 +79,17 @@ test("NotesSeen：檔案 600、記住 baseline、版本鍵含更新時間", () =
   assert.ok(again.has(key));
   assert.notEqual(noteKey("c", { postId: "p", createdAt: 1, updatedAt: 2 }), key);
 });
+
+test("本帳號能踢人的群：通知不 @ 群主／管理員；不是管理員的群照舊 @", async () => {
+  const { selfIsChatAdmin, mentionTargets } = await import("../guard/policy.mjs");
+  const admins = new Map([["p-boss", { name: "群主", role: "admin" }], ["p-me", { name: "我", role: "coAdmin" }]]);
+  assert.equal(selfIsChatAdmin(admins, (id) => id === "p-me"), true);
+  assert.equal(selfIsChatAdmin(admins, (id) => id === "p-other"), false);
+  assert.equal(selfIsChatAdmin(undefined, () => true), false);
+  const list = [["p-boss", { name: "群主", role: "admin" }]];
+  assert.deepEqual(mentionTargets(list, true), []);
+  assert.deepEqual(mentionTargets(list, false), list);
+  const { text, mentions } = buildNoteNotice({ snippet: "x", admins: mentionTargets(list, true) }, DEFAULT_BLOCKED_WORDS);
+  assert.equal(mentions.length, 0);
+  assert.doesNotMatch(text, /@/);
+});
