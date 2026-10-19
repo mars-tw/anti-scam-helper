@@ -21,7 +21,7 @@ import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAns
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeName, scrubNotice, sendNotice } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
-import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand } from "./ai-summary.mjs";
+import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand } from "./ai-summary.mjs";
 import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
 import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
@@ -1258,6 +1258,11 @@ async function handle(ws, message) {
   noteOwn(message);
   if (isSelf(message.channelId, message.senderId)) {
     const own = textOf(message);
+    // 本人用同一個帳號打 /ai整理 也要能用（同樣冷卻、同樣 10 分鐘過期）；守衛自己送的訊息與帶代理標記的不算。
+    if (own && summaryCfg.enabled) {
+      const command = selfSummaryCommand(own, { messageId: message.messageId, sentIds: sentByBot, isBotText });
+      if (command) { void requestSummary(ws, message, command); return; }
+    }
     if (own) { remember(message, own); learnStyle(message, own); }
     return;
   }
@@ -1866,7 +1871,7 @@ async function runSummary(ws, chatId, command, { collectOnly = false } = {}) {
   const reduced = await mapReduce(chunks, {
     complete: (system, user, maxTokens) => chatComplete(summaryCfg.llm, system, user, maxTokens),
     concurrency: summaryCfg.concurrency, retries: summaryCfg.retries, deadline, chunkTokens: summaryCfg.chunkTokens,
-    mapMaxTokens: summaryCfg.mapMaxTokens, reduceMaxTokens: summaryCfg.reduceMaxTokens, maxChars: summaryCfg.maxChars, header,
+    mapMaxTokens: summaryCfg.mapMaxTokens, reduceMaxTokens: summaryCfg.reduceMaxTokens, maxChars: summaryCfg.maxChars, maxMessages: summaryCfg.maxMessages, header,
   });
   const fmt = (at) => new Date(at).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
   const title = `📋 群組整理（${fmt(transcript.oldest)}～${fmt(transcript.newest)}，共 ${transcript.lines.length} 則）`;

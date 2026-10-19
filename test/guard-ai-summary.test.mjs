@@ -114,3 +114,37 @@ test("冷卻：每群 10 分鐘一次、存檔重啟不歸零、冷卻中只回�
   now = T + 600_001;
   assert.ok(new SummaryState(file, { now: () => now }).check("c1", 600_000).ok);
 });
+
+test("本人帳號的 /ai整理：守衛自己送的、帶代理標記的不算；整理結果絕不以指令開頭", async () => {
+  const { selfSummaryCommand, finalizeSummary, parseSummaryCommand } = await import("../guard/ai-summary.mjs");
+  const isBotText = (text) => text.includes("（AI代理）");
+  const sentIds = new Set(["sent-1"]);
+  assert.ok(selfSummaryCommand("/ai整理", { messageId: "own-1", sentIds, isBotText }));
+  assert.ok(selfSummaryCommand("／AI整理 3天", { messageId: "own-2", sentIds, isBotText }));
+  assert.equal(selfSummaryCommand("/ai整理", { messageId: "sent-1", sentIds, isBotText }), null);
+  assert.equal(selfSummaryCommand("/ai整理 （AI代理）", { messageId: "own-3", sentIds, isBotText }), null);
+  assert.equal(selfSummaryCommand("今天大家聊得很熱烈", { messageId: "own-4", sentIds, isBotText }), null);
+  const parts = finalizeSummary("/ai整理 這是整理結果\n【主要話題】…", { label: "（AI代理）" });
+  for (const part of parts) {
+    assert.equal(parseSummaryCommand(part), null);
+    assert.ok(!/^[\s/／]/.test(part));
+    assert.equal(selfSummaryCommand(part, { messageId: "x", sentIds: new Set(), isBotText }), null);
+  }
+});
+
+test("點位格式：價格區間不會被當成電話；免責聲明只出現一次、放在最後一則", async () => {
+  const { redact, finalizeSummary, SUMMARY_DISCLAIMER, REDUCE_SYSTEM, MAP_SYSTEM } = await import("../guard/ai-summary.mjs");
+  assert.equal(redact("BTC 支撐 65000-66000，止損 63500，ETH 0.618 回撤 2450"), "BTC 支撐 65000-66000，止損 63500，ETH 0.618 回撤 2450");
+  assert.match(redact("打 0912 345 678 或 02-2345-6789 或 +886 912345678"), /^打 〔電話〕 或 〔電話〕 或 〔電話〕$/);
+  for (const head of ["【大家在聊什麼】", "【有人執行什麼】", "【點位整理】", "【交易策略】"]) assert.ok(REDUCE_SYSTEM.includes(head));
+  assert.match(MAP_SYSTEM, /絕不推算/);
+  const one = finalizeSummary(`【大家在聊什麼】\n・小明：網格\n${SUMMARY_DISCLAIMER}`, { label: "（AI代理）" });
+  assert.equal(one.length, 1);
+  assert.equal(one[0].split(SUMMARY_DISCLAIMER.replace(/。$/, "")).length - 1, 1);
+  assert.ok(one[0].endsWith(`${SUMMARY_DISCLAIMER}（AI代理）`));
+  const long = finalizeSummary(Array.from({ length: 400 }, (_, i) => `・第${i}點 小明說了一些很長的內容`).join("\n"), { label: "（AI代理）", maxChars: 2000, maxMessages: 2 });
+  assert.equal(long.length, 2);
+  assert.ok(!long[0].includes(SUMMARY_DISCLAIMER));
+  assert.ok(long[1].includes(SUMMARY_DISCLAIMER));
+  for (const part of long) assert.ok(part.length <= 2000);
+});
