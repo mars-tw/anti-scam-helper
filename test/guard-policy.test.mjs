@@ -203,7 +203,7 @@ test("回覆標記：結尾一個（AI代理），不留「自動回覆」", () 
 import { CASUAL_PROMPT, isCasual, kickStatusText, stripEscalateFiller, trimCasual } from "../guard/policy.mjs";
 
 test("閒聊判斷：玩笑、打招呼算；有連結／錢／詐騙／踢人／管理員字眼不算", () => {
-  for (const t of ["你的太慢了🤣", "哈哈哈笑死", "@阿軒 早安", "你今天吃什麼", "這也太強了吧"]) assert.equal(isCasual(t), true, t);
+  for (const t of ["你的太慢了🤣", "哈哈哈笑死", "@阿華 早安", "你今天吃什麼", "這也太強了吧"]) assert.equal(isCasual(t), true, t);
   for (const t of ["這是詐騙嗎", "看這個 https://x.y/abc", "你昨晚把某某踢出去", "要不要一起投資", "管理員在嗎", "加賴 abc123", "x".repeat(61), "怎麼刪 git branch"]) assert.equal(isCasual(t), false, t);
   assert.ok(!CASUAL_PROMPT.includes("165 或"));
 });
@@ -234,4 +234,96 @@ test("踢人現況：一般暫停，但冒名＋邀請／QR 與購物再犯仍�
   assert.equal(isFalseModerationClaim("確認為詐騙將會執行踢除與封鎖", { isAdmin: true, ...flags }), "kick-claim");
   // 沒開例外時，「踢人暫停」是正確的。
   assert.equal(isFalseModerationClaim("踢人功能目前是暫停中", { isAdmin: true, kickMode: "notify" }), false);
+});
+
+test("replyTargetsSelf：回覆本帳號發的訊息，或回覆對象是本人（重開機後靠存檔的成員 id）都算", async () => {
+  const { replyTargetsSelf } = await import("../guard/policy.mjs");
+  const senders = new Map([["m-self", "pSelf"], ["m-other", "pOther"]]);
+  const opts = { ownIds: new Set(["m-bot"]), senderOf: (id) => senders.get(id), isSelf: (chatId, id) => chatId === "c1" && id === "pSelf" };
+  assert.equal(replyTargetsSelf({ channelId: "c1", replyTo: "m-bot" }, opts), true);
+  assert.equal(replyTargetsSelf({ channelId: "c1", replyTo: "m-self" }, opts), true);
+  assert.equal(replyTargetsSelf({ channelId: "c1", replyTo: "m-other" }, opts), false);
+  assert.equal(replyTargetsSelf({ channelId: "c2", replyTo: "m-self" }, opts), false);
+  assert.equal(replyTargetsSelf({ channelId: "c1", replyTo: "m-unknown" }, opts), false);
+  assert.equal(replyTargetsSelf({ channelId: "c1" }, opts), false);
+});
+
+test("ownerAnswered：本人在這則之後回了這則、或回覆／@ 同一個人，就不代答", async () => {
+  const { ownerAnswered } = await import("../guard/policy.mjs");
+  const msg = { messageId: "q1", senderId: "pAsk", createdAt: 1000 };
+  assert.equal(ownerAnswered(msg, []), false);
+  assert.equal(ownerAnswered(msg, [{ at: 1500, replyTo: "q1", to: [] }]), true);
+  assert.equal(ownerAnswered(msg, [{ at: 1500, replyTo: "x", to: ["pAsk"] }]), true);
+  assert.equal(ownerAnswered(msg, [{ at: 1500, replyTo: "x", to: ["pOther"] }]), false);
+  assert.equal(ownerAnswered(msg, [{ at: 900, replyTo: "q1", to: ["pAsk"] }]), false); // 在這則之前
+  assert.equal(ownerAnswered(msg, [{ at: 1500 }]), false); // 沒回覆也沒 @ 誰
+});
+
+test("冒充群主：暱稱含社群名稱裡的品牌名就算；通用片段（交流區1、新手區）不算", async () => {
+  const { brandSegments, impersonatesBrand } = await import("../guard/policy.mjs");
+  const norm = (s) => String(s ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}]/gu, "");
+  const looks = (name, key) => name === key || (key.length >= 4 && name.includes(key));
+  const segs = brandSegments("示範研究社 - 挖礦小隊長 / (新手區) 示範研究社 - 挖礦小隊長", norm);
+  assert.deepEqual(segs.map((s) => s.name), ["示範研究社", "挖礦小隊長"]);
+  assert.equal(impersonatesBrand(norm("挖礦小隊長.-Amy"), segs, looks), "挖礦小隊長");
+  assert.equal(impersonatesBrand(norm("小明"), segs, looks), undefined);
+  assert.deepEqual(brandSegments("交流區1｜示範交易小天地", norm).map((s) => s.name), ["示範交易小天地"]);
+  assert.deepEqual(brandSegments("🐻示範福利社—交流群", norm).map((s) => s.name), ["🐻示範福利社"]);
+  assert.deepEqual(brandSegments("", norm), []);
+});
+
+test("只學習的群：從 groupPolicies 取出；會產生動作的請求一律擋，讀歷史與記事本不擋", async () => {
+  const { learnOnlyChats, blockedForLearnOnly } = await import("../guard/policy.mjs");
+  const set = learnOnlyChats({ cB: { learnOnly: true, note: "x" }, cA: { mention: false }, cC: { learnOnly: "yes" } });
+  assert.deepEqual([...set], ["cB"]);
+  assert.equal(learnOnlyChats(undefined).size, 0);
+  for (const type of ["message:send", "message:delete", "message:unsend", "message:react", "member:remove", "media:fetch", "chat:read", "scam:check"]) assert.equal(blockedForLearnOnly({ type, chatId: "cB" }, set), true, type);
+  for (const type of ["history:fetch", "notes:list"]) assert.equal(blockedForLearnOnly({ type, chatId: "cB" }, set), false, type);
+  assert.equal(blockedForLearnOnly({ type: "message:send", chatId: "cA" }, set), false);
+  assert.equal(blockedForLearnOnly(undefined, set), false);
+});
+
+test("只警告的群：從 groupPolicies 取出；只擋踢人與刪訊息，發通知不擋", async () => {
+  const { warnOnlyChats, blockedForWarnOnly } = await import("../guard/policy.mjs");
+  const set = warnOnlyChats({ cA: { warnOnly: true }, cB: { learnOnly: true }, cC: { warnOnly: 1 } });
+  assert.deepEqual([...set], ["cA"]);
+  assert.equal(warnOnlyChats(undefined).size, 0);
+  assert.equal(blockedForWarnOnly({ type: "member:remove", chatId: "cA" }, set), true);
+  assert.equal(blockedForWarnOnly({ type: "message:delete", chatId: "cA" }, set), true);
+  for (const type of ["message:send", "history:fetch", "notes:list", "media:fetch"]) assert.equal(blockedForWarnOnly({ type, chatId: "cA" }, set), false, type);
+  assert.equal(blockedForWarnOnly({ type: "member:remove", chatId: "cZ" }, set), false);
+});
+
+test("自動回覆的守衛現況：只警告的群說本群只警告；其他群照原規則；誤判不保證以後", () => {
+  const flags = { kickMode: "notify", kickWithInvite: true, kickRepeatShop: true };
+  const warn = buildGuardFacts({ ...flags, warnOnly: true, deleteOnLink: true, metaAvailable: true, isAdmin: true, incidents: ["過去誤判：A。", "過去誤判：B。"] });
+  assert.ok(warn.includes("本群目前暫時只發警告通知") && warn.includes("不會踢人") && warn.includes("其他群維持原本的規則"), warn);
+  assert.ok(!warn.includes("仍會直接被移出") && !warn.includes("再刪除那則訊息"), "只警告的群不講踢人例外與刪訊息");
+  assert.ok(warn.includes("過去誤判：A。") && warn.includes("過去誤判：B。"));
+  assert.ok(warn.includes("不要保證以後不會再發生") && !warn.includes("已經改正"));
+  const other = buildGuardFacts({ ...flags, deleteOnLink: true, metaAvailable: true, isAdmin: true });
+  assert.ok(!other.includes("只發警告") && other.includes("仍會直接被移出") && other.includes("再刪除那則訊息"));
+  assert.equal(kickStatusText({ ...flags, warnOnly: true }).includes("只發警告"), true);
+  // 只警告的群：「本群不會踢人」是事實；說會踢／會刪是說錯；否認過去踢過仍算否認。
+  const w = { isAdmin: true, ...flags, warnOnly: true };
+  assert.equal(isFalseModerationClaim("本群目前只發警告，不會踢人，也不會刪訊息。", w), false);
+  assert.equal(isFalseModerationClaim("冒用管理員名字又貼邀請連結的會直接被移出", w), "kick-claim");
+  assert.equal(isFalseModerationClaim("確認是詐騙的連結，守衛會先發通知再刪除", w), "kick-claim");
+  assert.equal(isFalseModerationClaim("守衛從來沒踢過人", w), "denial");
+  assert.equal(isFalseModerationClaim("本群只警告；其他群確認是詐騙的帳號可能會移出", w), false);
+  // 其他群（不是只警告）：原規則不變。
+  assert.equal(isFalseModerationClaim("不會踢人", { isAdmin: true, ...flags }), "denial");
+});
+
+test("自動回覆帶有不編造本人狀況的硬規則", async () => {
+  const { NO_FABRICATION_PROMPT, PROMISE_PROMPT } = await import("../guard/policy.mjs");
+  for (const word of ["不要編造", "職業", "開什麼店", "人在哪裡", "說不知道", "暱稱", "短回覆", "6"]) assert.ok(NO_FABRICATION_PROMPT.includes(word), word);
+  assert.ok(PROMISE_PROMPT.includes("不能替本人承諾"));
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
+  assert.match(src, /CHAT_SYSTEM = `\$\{CHAT_SYSTEM_BASE\}\\n\\n\$\{PROMISE_PROMPT\}\\n\\n\$\{NO_FABRICATION_PROMPT\}`/);
+  // kick-suppressed 日誌：action 要放在 ...entry 之後，才不會被蓋成 "kick"
+  assert.match(src, /record\(\{ \.\.\.entry, action: "kick-suppressed"/);
+  const entry = { action: "kick", score: 3 };
+  assert.equal({ ...entry, action: "kick-suppressed" }.action, "kick-suppressed");
 });

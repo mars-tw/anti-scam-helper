@@ -49,13 +49,15 @@ export function analyzeName(rawName) {
 }
 
 /**
- * 綜合暱稱與頭像。avatarCrown：頭像判定有假皇冠／官方徽章（true／false／undefined＝沒查）。
+ * 綜合暱稱與頭像。sameGroupImpersonation：暱稱冒充同群群主／管理員（頭像訊號只在這時算數）。avatarCrown：頭像判定有假皇冠／官方徽章（true／false／undefined＝沒查）。
  * fake：算是假冒管理員；byName：光看暱稱就成立（可以進「冒名＋連結」踢人）；strong：兩種以上訊號（單獨也值得通知一次）。
  */
-export function fakeAdminVerdict(signals, avatarCrown) {
+export function fakeAdminVerdict(signals, avatarCrown, sameGroupImpersonation = false) {
   const types = new Set(signals.map((s) => s.type));
   const byName = types.has("staff") || types.has("blank") || (types.has("invisible") && types.has("badge"));
-  const avatar = avatarCrown === true;
+  // 頭像判定靠地端小模型，常把一般照片看成皇冠（10/21 自拍誤判）：只有暱稱也冒充「同一個群」的群主／管理員時才算數，
+  // 單獨或只搭配一般內容訊號（叫人私聊…）都不算。
+  const avatar = avatarCrown === true && sameGroupImpersonation === true;
   // 頭像判定靠小模型，單獨不夠當踢人依據：要配上任何一種暱稱訊號才算 byName 等級。
   const byNameOrBacked = byName || (avatar && types.size > 0);
   const fake = byNameOrBacked || avatar;

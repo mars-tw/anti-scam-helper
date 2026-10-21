@@ -49,6 +49,10 @@ export type ServerFrame =
   | { type: "media"; requestId: string; chatId: string; messageId: string; mime: string; data: string }
   /** Answer to a bot's `notes:list`: the OpenChat's recent notes (記事本), newest first. */
   | { type: "notes"; requestId: string; chatId: string; notes: Note[] }
+  /** Answer to a bot's `invite:own`: this OpenChat's existing invitation links (read-only) and its square mid. */
+  | { type: "invite:own"; requestId: string; chatId: string; squareMid: string; links: string[] }
+  /** Answer to a bot's `invite:lookup`: the OpenChat a ticket belongs to (`found: false` when LINE does not know it). */
+  | { type: "invite:lookup"; requestId: string; chatId: string; found: boolean; squareMid?: string }
   /** An OpenChat's note count changed (a note was posted or removed): bots may list notes again. */
   | { type: "note:status"; chatIds: string[]; noteCount?: number; latestCreatedAt?: number }
   /** Answer to a client `ping`: lets the page tell a silent connection from a dead one. */
@@ -73,6 +77,10 @@ export type ClientFrame =
   | { type: "message:delete"; requestId: string; chatId: string; messageId: string }
   /** Bots only, read-only: the OpenChat's recent notes (記事本). */
   | { type: "notes:list"; requestId: string; chatId: string; limit?: number }
+  /** Bots only, read-only: this OpenChat's own invitation links as LINE already shows them (never creates or resets one). */
+  | { type: "invite:own"; requestId: string; chatId: string }
+  /** Bots only, read-only: which OpenChat an invitation ticket (from a QR code) belongs to; never joins. */
+  | { type: "invite:lookup"; requestId: string; chatId: string; ticket: string }
   /** Bots only, with `api.moderation`: the picture of an image message shown by this server (e.g. to read QR codes). */
   | { type: "media:fetch"; requestId: string; chatId: string; messageId: string }
   /** This account's own id, name and picture, on demand (pages and bots alike). */

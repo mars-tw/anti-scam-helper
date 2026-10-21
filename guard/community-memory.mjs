@@ -12,7 +12,16 @@ import { deidentify } from "./chat-training.mjs";
 export const MEMORY_DEFAULTS = { retentionDays: 30, maxEntries: 4000, maxBytes: 2_000_000, minChars: 6, maxChars: 300, snippets: 4, maxPromptChars: 900 };
 
 // 像在對機器人下指令、改規則、套設定的文字：不收、也不拿出來（防投毒）。
-export const INJECTION = /忽略(以上|之前|前面|先前|所有)|ignore\s+(all|previous|the above|prior)|system\s*prompt|系統(提示|指令|設定)|提示詞|你現在是|從現在(起|開始)|你(必須|應該|要)(回|說|踢|刪|封鎖|答應|承諾)|(阿軒|小助手|機器人|bot|AI|守衛).{0,8}(必須|一律|不准|不要再|要記得|規則|設定)|新規則|規則改|developer mode|jailbreak|越獄|扮演|<\/?(system|assistant|user)>/i;
+const INJECTION_HEAD = String.raw`忽略(以上|之前|前面|先前|所有)|ignore\s+(all|previous|the above|prior)|system\s*prompt|系統(提示|指令|設定)|提示詞|你現在是|從現在(起|開始)|你(必須|應該|要)(回|說|踢|刪|封鎖|答應|承諾)`;
+const INJECTION_TAIL = String.raw`新規則|規則改|developer mode|jailbreak|越獄|扮演|<\/?(system|assistant|user)>`;
+const GENERIC_NAMES = ["小助手", "機器人", "bot", "AI", "守衛"];
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** 灌指令偵測。ownerNames：使用者設定的本人名字（chat.ownerNames），會和通用稱呼一起當成「對誰下指令」。 */
+export function makeInjection(ownerNames = []) {
+  const names = [...new Set([...(ownerNames ?? []).filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim()), ...GENERIC_NAMES])].sort((a, b) => b.length - a.length);
+  return new RegExp(`${INJECTION_HEAD}|(${names.map(escapeRegExp).join("|")}).{0,8}(必須|一律|不准|不要再|要記得|規則|設定)|${INJECTION_TAIL}`, "i");
+}
+export const INJECTION = makeInjection();
 
 const hash = (salt, text) => createHash("sha256").update(`${salt}|${text}`).digest("hex").slice(0, 16);
 
@@ -53,6 +62,7 @@ export class CommunityMemory {
     this.dir = dir;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     try { chmodSync(dir, 0o700); } catch {}
+    this.injection = makeInjection(options.ownerNames);
     this.path = join(dir, "community.jsonl");
     const saltPath = join(dir, "salt");
     if (!existsSync(saltPath)) writeFileSync(saltPath, randomBytes(16).toString("hex"), { mode: 0o600 });
@@ -80,7 +90,7 @@ export class CommunityMemory {
     if (this.seen.has(mid)) return false;
     const sender = this.senderKey(message.channelId, message.senderId);
     if (this.blocked.has(sender)) return false;
-    if (INJECTION.test(raw)) return false;
+    if (this.injection.test(raw)) return false;
     const at = message.createdAt ?? this.now();
     if (this.now() - at > this.opts.retentionDays * 86_400_000) return false;
     const clean = scrub(raw, { names: bot ? names.filter((n) => n !== message.senderName) : names, allowDomains }).slice(0, this.opts.maxChars);
@@ -172,7 +182,7 @@ export class CommunityMemory {
       if (score > 0 && item.chat === chat) score *= 1.3;
       if (score > 0 && item.bot && aboutBots) score *= 1.3;
       return { item, score };
-    }).filter((x) => x.score > 1.0 && !INJECTION.test(x.item.text));
+    }).filter((x) => x.score > 1.0 && !this.injection.test(x.item.text));
     const seen = new Set();
     return scored.sort((a, b) => b.score - a.score).filter((x) => { const key = x.item.text.slice(0, 40); if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, k).map((x) => x.item);
   }

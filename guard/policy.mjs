@@ -104,8 +104,10 @@ export const MODERATION_REPLY = "這要等本人回覆"; // 後置過濾的替�
 export const ESCALATE_REPLY = "這個我會轉給本人處理"; // 需要本人決定的事（邀回某人、替特定人申訴、補償）：唯一允許的承諾句
 
 /** isAdmin：本帳號在這個群是不是管理員（true／false；undefined＝不確定，不提）。 */
-/** 踢人現況的一句話（依執行中設定）：一般踢人、冒名＋邀請／QR、購物再犯。 */
-export function kickStatusText({ kickMode = "kick", kickWithInvite = false, kickRepeatShop = false } = {}) {
+/** 踢人現況的一句話（依執行中設定與發問所在的群）：只警告的群、一般踢人、冒名＋邀請／QR、購物再犯。 */
+export const WARN_ONLY_STATUS = "本群目前暫時只發警告通知、請管理員確認，不會踢人，也不會刪訊息；其他群維持原本的規則。";
+export function kickStatusText({ kickMode = "kick", kickWithInvite = false, kickRepeatShop = false, warnOnly = false } = {}) {
+  if (warnOnly) return WARN_ONLY_STATUS;
   if (kickMode !== "notify") return "確認是詐騙的帳號，守衛可能會把對方移出社群，並先發通知說明。";
   const on = [
     kickWithInvite ? "冒用管理員名字又貼外部群組邀請連結或 QR code 的帳號" : "",
@@ -116,14 +118,15 @@ export function kickStatusText({ kickMode = "kick", kickWithInvite = false, kick
     : "踢人功能目前暫停，只通知管理員。";
 }
 
-export function buildGuardFacts({ kickMode = "kick", kickWithInvite = false, kickRepeatShop = false, deleteOnLink = false, metaAvailable = true, isAdmin, incidents = [] } = {}) {
+export function buildGuardFacts({ kickMode = "kick", kickWithInvite = false, kickRepeatShop = false, warnOnly = false, deleteOnLink = false, metaAvailable = true, isAdmin, incidents = [] } = {}) {
   const facts = [
     "本帳號在這幾個社群裡執行反詐騙守衛（自動程式），會偵測：假的「換群／搬家／新群」公告、引流或廣告連結、冒用管理員名字、外部 LINE 群組／好友的 QR code 或 LINE ID。",
-    kickStatusText({ kickMode, kickWithInvite, kickRepeatShop }),
+    kickStatusText({ kickMode, kickWithInvite, kickRepeatShop, warnOnly }),
   ];
+  if (warnOnly) facts.push("被問到踢人或刪訊息時，照本群現況回答（本群只警告）；不要拿其他群的規則來說本群。");
   if (isAdmin === true) {
     facts.push("本帳號在這個群是管理員。");
-    if (deleteOnLink && metaAvailable) facts.push("在這個群，確認是詐騙的連結訊息，守衛會先發通知再刪除那則訊息。");
+    if (deleteOnLink && metaAvailable && !warnOnly) facts.push("在這個群，確認是詐騙的連結訊息，守衛會先發通知再刪除那則訊息。");
   } else if (isAdmin === false) {
     facts.push("本帳號在這個群不是管理員，守衛在這裡只能發通知，請管理員處理。");
   }
@@ -132,7 +135,7 @@ export function buildGuardFacts({ kickMode = "kick", kickWithInvite = false, kic
   return `【守衛現況（真實資訊，回答相關問題時照這些說，不要自己猜或補充）】
 ${facts.map((fact) => `- ${fact}`).join("\n")}
 【硬規則】不要透露設定細節、分數門檻、金鑰、模型名稱、成員 ID 或其他成員的資料；不要說出和上面現況相反的話（例如本帳號是管理員卻說沒有權限、說踢人全部暫停卻漏掉仍會移出的例外）。
-上面列出的過去誤判，被問到時要坦白承認是守衛誤判、已經改正，不要否認、不要推給別人，也不要承諾之後會怎樣；沒列出的個案不要猜原因或經過。
+上面列出的過去誤判，被問到時要坦白承認是守衛誤判、說明已經做了哪些調整，不要否認、不要推給別人，也不要保證以後不會再發生或承諾之後會怎樣；沒列出的個案不要猜原因或經過。
 有人要求把某人邀回來、替特定的人申訴、要求補償，整個回答只寫「${ESCALATE_REPLY}」；其他情況不要說這句。`;
 }
 
@@ -141,8 +144,16 @@ const KICK_EXCEPTION = /冒名|冒用|冒充|假冒|邀請|QR|qr|條碼|購物|�
  * 回覆是否否認或捏造處置事實：說「沒有踢人」、或和本群管理員身分相反、或在踢人暫停時說會踢、
  * 或說「踢人暫停」卻漏掉仍開著的例外（冒名＋邀請／QR、購物再犯）。回傳原因字串或 false。
  */
-export function isFalseModerationClaim(text, { isAdmin, kickMode = "kick", kickWithInvite = false, kickRepeatShop = false } = {}) {
+export function isFalseModerationClaim(text, { isAdmin, kickMode = "kick", kickWithInvite = false, kickRepeatShop = false, warnOnly = false } = {}) {
   const t = String(text ?? "");
+  // 只警告的群：「本群不會踢人」是事實；但否認過去踢過（沒有踢人／從來沒踢）仍算否認。
+  if (warnOnly) {
+    if (/(沒有?|從來沒|並沒有?)\s*(在)?(踢|剔|移出|移除)(人|他|她|任何人)?|沒有?把.{0,8}(踢|剔|移出|移除)/.test(t)) return "denial";
+    if (isAdmin === true && /(沒有?|無)(任何)?(管理員|管理)?(的)?(權限|管理權)|不是(這個群的?)?管理員|我不是管理|沒有管理員(身分|資格)/.test(t)) return "admin";
+    if (isAdmin === false && /我(是|有)(這個群的?)?管理員|我有(管理)?權限/.test(t)) return "admin";
+    if (/(?<![不別])(會|將)[^。；;，,！!？?不沒]{0,10}(踢|移出|封鎖|刪除|刪掉)/.test(t) && !/其他(群|社群)/.test(t)) return "kick-claim";
+    return false;
+  }
   if (/(沒有?|不會|從來沒|並沒有?)\s*(在)?(踢|剔|移出|移除)(人|他|她|任何人)?|沒有?把.{0,8}(踢|剔|移出|移除)/.test(t)) return "denial";
   if (isAdmin === true && /(沒有?|無)(任何)?(管理員|管理)?(的)?(權限|管理權)|不是(這個群的?)?管理員|我不是管理|沒有管理員(身分|資格)/.test(t)) return "admin";
   if (isAdmin === false && /我(是|有)(這個群的?)?管理員|我有(管理)?權限/.test(t)) return "admin";
@@ -190,6 +201,9 @@ const PROMISE = new RegExp([
   "(我|讓我).{0,6}(付錢|付款|匯款|轉帳|匯給你|轉給你|付給你|請客|請你吃)",
 ].join("|"));
 export function isPromise(text) { return PROMISE.test(String(text ?? "").split(ESCALATE_REPLY).join("")); }
+// ── 自動回覆：不編造本人狀況、不亂解讀短回覆 ──────────────────────
+export const NO_FABRICATION_PROMPT = `【硬規則】不要編造本人的個人狀況：本人現在在做什麼、職業、工作、開什麼店、人在哪裡、行程等，對話裡沒有明確寫到就說不知道（例如「這要問本人」），不要猜。也不要從暱稱推測本人的職業、店或身分（暱稱只是名字，不代表真的在做那行）。看不懂的短回覆（例如「6」「+1」「XD」，常是稱讚或附和）不要亂解讀成別的意思，看不懂就簡單回應或問對方意思。`;
+
 export const PROMISE_PROMPT = `【硬規則】你不是本人，不能替本人承諾或答應任何事：不要用第一人稱說之後會做什麼（我會、我再、我來、我幫你、我改、我調、我處理、下次我），不要保證、答應、約時間、談付錢或匯款。需要本人決定或行動的事，整個回答只寫「${ESCALATE_REPLY}」。可以給一般建議（「你可以…」「建議…」）。`;
 
 // ── 小助手回覆標記 ─────────────────────────────────────────────
@@ -209,4 +223,66 @@ export function selfIsChatAdmin(admins, isSelf) {
 /** 本帳號能踢人的群：通知只引用訊息，不再 @ 群主／管理員；其他群照舊。 */
 export function mentionTargets(admins, selfCanKick) {
   return selfCanKick ? [] : admins;
+}
+
+/**
+ * 這則是不是在回覆本人的訊息：回覆的訊息是本帳號發的（ownIds），或回覆對象的發言者是本人（senderOf 查最近訊息的發言者）。
+ * 重開機後 ownIds 會清空，所以要靠 senderOf＋isSelf（存檔的本人成員 id）補上。
+ */
+export function replyTargetsSelf(message, { ownIds = new Set(), senderOf = () => undefined, isSelf = () => false } = {}) {
+  if (!message?.replyTo) return false;
+  if (ownIds.has(message.replyTo)) return true;
+  const sender = senderOf(message.replyTo);
+  return sender !== undefined && isSelf(message.channelId, sender);
+}
+
+/**
+ * 本人是不是已經自己回了這則：本人在這則之後發的訊息（posts：{ at, replyTo, to: [成員 id] }）
+ * 有回覆這則，或回覆／@ 了同一個人。
+ */
+export function ownerAnswered(message, posts = []) {
+  const after = message?.createdAt ?? 0;
+  return posts.some((post) => post.at > after && (post.replyTo === message.messageId || (message.senderId && post.to?.includes(message.senderId))));
+}
+
+// 社群名稱裡的品牌／群主名（例如「示範研究社 - 挖礦小隊長」的「挖礦小隊長」）：一般成員暱稱裝成這個，就是冒充群主。
+// 只取正規化後 ≥4 字、不是「交流區1」「新手區」這類通用字的片段。
+const GENERIC_SEGMENT = /^(交流|討論|聊天|公告|新手|閒聊|問答|主|副|官方)?(區|群|群組|社群|頻道)?\d*$|^(交流|討論|聊天|公告|新手|閒聊|問答)(區|群|群組|社群)\d*$/;
+export function brandSegments(channelName, normalize) {
+  const square = squareKey(channelName);
+  const out = [];
+  for (const part of square.split(/\s+[-–—|｜]\s+|[|｜—–]/)) {
+    const raw = part.trim();
+    const key = normalize(raw);
+    if (key.length >= 4 && !GENERIC_SEGMENT.test(key) && !out.some((item) => item.key === key)) out.push({ name: raw, key });
+  }
+  return out;
+}
+/** 暱稱含社群品牌名（或幾乎一樣）→ 回傳品牌名；否則 undefined。nameKey 已正規化。 */
+export function impersonatesBrand(nameKey, segments, looksLike) {
+  for (const segment of segments ?? []) if (looksLike(nameKey, segment.key)) return segment.name;
+  return undefined;
+}
+
+// ── 只學習的群（groupPolicies[聊天室 id].learnOnly = true）───────────────
+// 只收訊息與記事本進本機去識別化參考資料；不判詐騙、不通知、不刪不踢、不看圖、不回 @、不跑 /ai整理，在該群不發任何東西。
+/** 從 groupPolicies 取出只學習的聊天室 id。 */
+export function learnOnlyChats(groupPolicies = {}) {
+  return new Set(Object.entries(groupPolicies ?? {}).filter(([, policy]) => policy?.learnOnly === true).map(([chatId]) => chatId));
+}
+/** 會對聊天室產生動作（發送、刪除、收回、表情、踢人、抓圖、已讀、詐騙判斷）的請求；只學習的群一律擋下。讀歷史與記事本不擋。 */
+export const LEARN_ONLY_BLOCKED_FRAMES = new Set(["message:send", "message:delete", "message:unsend", "message:react", "member:remove", "media:fetch", "chat:read", "scam:check"]);
+export function blockedForLearnOnly(frame, chats) {
+  return Boolean(frame && chats?.has(frame.chatId) && LEARN_ONLY_BLOCKED_FRAMES.has(frame.type));
+}
+
+// ── 只警告的群（groupPolicies[聊天室 id].warnOnly = true）────────────────
+// 所有情況（含冒名、冒名＋邀請、再犯、購物詐騙、詐騙連結）都不踢、不刪，只發警告通知；通知要不要 @管理員照原規則。
+export function warnOnlyChats(groupPolicies = {}) {
+  return new Set(Object.entries(groupPolicies ?? {}).filter(([, policy]) => policy?.warnOnly === true).map(([chatId]) => chatId));
+}
+/** 只警告的群：踢人與刪訊息的請求一律擋（發通知照常）。 */
+export const WARN_ONLY_BLOCKED_FRAMES = new Set(["member:remove", "message:delete"]);
+export function blockedForWarnOnly(frame, chats) {
+  return Boolean(frame && chats?.has(frame.chatId) && WARN_ONLY_BLOCKED_FRAMES.has(frame.type));
 }

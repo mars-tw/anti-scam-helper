@@ -10,6 +10,7 @@ export const LEGIT_SHOPS = [
   "rakuten.com.tw", "rakuten.co.jp", "rakuten.com", "etmall.com.tw", "friday.tw", "shopping.friday.tw", "ruten.com.tw", "pcstore.com.tw",
   "costco.com.tw", "carrefour.com.tw", "ikea.com", "uniqlo.com", "apple.com", "decathlon.tw", "nike.com", "adidas.com.tw", "taobao.com", "tmall.com",
   "aliexpress.com", "ebay.com", "zalora.com.tw", "pinkoi.com", "line.me", "shop.line.me", "gift.line.me",
+  "ti.com", // 2026-10-20 德州儀器官網被誤判一頁式（成員分享開發板連結）
 ];
 const ODD_TLD = /\.(shop|store|top|xyz|vip|club|online|site|buzz|icu|cyou|sbs|cfd|life|live|fun|mom|bond|best|today|sale|deals|boutique|fashion|bags|click|link|monster|rest|quest|work|win|bid|loan|cn|cc|ws|tk|ml|ga|cf|gq)$/i;
 const URL_RE = /(https?:\/\/)?(?<![\w.@-])((?:[a-z0-9-]+\.)+[a-z]{2,})(\/[^\s，。）)」』]*)?/gi;

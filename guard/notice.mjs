@@ -28,19 +28,35 @@ export function safeName(name, blockedWords = DEFAULT_BLOCKED_WORDS) {
 }
 
 /**
- * 送出通知：先「回覆該則訊息＋@」，失敗就依序退成「只回覆」「只 @」「純文字」。
+ * 拿掉 @ 段落：mention 沒送成功時，不能留下「@名字」純文字（看起來像標到人、甚至像標到同名冒名者）。
+ * 每個 mention 範圍連同後面一個空白一起刪掉，其餘文字不動。
+ */
+export function stripMentions(text, mentions = []) {
+  let out = String(text ?? "");
+  for (const m of [...mentions].sort((a, b) => b.start - a.start)) {
+    let end = m.end;
+    if (out[end] === " ") end += 1;
+    out = out.slice(0, m.start) + out.slice(end);
+  }
+  return out.replace(/\n[ \t]+/g, "\n");
+}
+
+/**
+ * 送出通知：先「回覆該則訊息＋@」，失敗就依序退成「只 @」「只回覆」「純文字」；
+ * 不帶 mention 的版本一律拿掉 @名字（不留錯誤的純文字 @）。
  * 只有伺服器明確拒絕（沒送出）才退一步；逾時（可能已送出）或限流就停，避免重複發。
  * @param send (frame) => Promise<reply>，reply.type 為 "sent" 或 "error"（含 code）
  */
 export async function sendNotice(send, { chatId, text, mentions = [], replyTo }) {
   const attempts = [];
+  const plain = mentions.length ? stripMentions(text, mentions) : text;
   const add = (withReply, withMentions) => {
     if (withReply && !replyTo) return;
     if (withMentions && !mentions.length) return;
-    const frame = { type: "message:send", chatId, text, ...(withMentions ? { mentions } : {}), ...(withReply ? { replyTo } : {}) };
+    const frame = { type: "message:send", chatId, text: withMentions ? text : plain, ...(withMentions ? { mentions } : {}), ...(withReply ? { replyTo } : {}) };
     if (!attempts.some((known) => JSON.stringify(known) === JSON.stringify(frame))) attempts.push(frame);
   };
-  add(true, true); add(true, false); add(false, true); add(false, false);
+  add(true, true); add(false, true); add(true, false); add(false, false);
   let answer = { type: "error", code: "NOT_SENT" };
   const tried = [];
   for (const frame of attempts) {
@@ -48,7 +64,15 @@ export async function sendNotice(send, { chatId, text, mentions = [], replyTo })
     tried.push({ reply: Boolean(frame.replyTo), mentions: Boolean(frame.mentions), result: answer.type === "sent" ? "sent" : answer.code });
     if (answer.type === "sent" || answer.code === "TIMEOUT" || answer.code === "RATE_LIMITED") break;
   }
-  return { answer, tried, replied: answer.type === "sent" && Boolean(tried.at(-1)?.reply) };
+  const last = tried.at(-1);
+  return { answer, tried, replied: answer.type === "sent" && Boolean(last?.reply), mentioned: answer.type === "sent" && Boolean(last?.mentions) };
+}
+
+/** 通知要 @ 的對象：排除被判詐騙的人本人，以及暱稱含隱形／顯示不出來字元的人（冒名常見手法）。 */
+export const INVISIBLE_NAME = /[\u2800\u3164\u115f\u1160\uffa0\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad\u034f\u180e]/;
+export function safeMentionTargets(admins = [], { excludeIds = [] } = {}) {
+  const skip = new Set(excludeIds.filter(Boolean));
+  return admins.filter(([id, admin]) => id && !skip.has(id) && !INVISIBLE_NAME.test(String(admin?.name ?? "")));
 }
 
 /**

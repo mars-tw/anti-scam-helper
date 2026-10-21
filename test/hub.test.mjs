@@ -119,6 +119,15 @@ class FakeProvider {
     if (this.notesError) throw this.notesError;
     return this.notes ?? [];
   }
+  async ownInvite(chatId) {
+    this.calls.push(["ownInvite", chatId]);
+    if (this.inviteError) throw this.inviteError;
+    return { squareMid: "s-own", links: ["https://line.me/ti/g2/OWNTICKET"] };
+  }
+  async lookupInvite(ticket) {
+    this.calls.push(["lookupInvite", ticket]);
+    return ticket === "KNOWN1" ? { squareMid: "s-other" } : undefined;
+  }
   async deleteMessage(channel, messageId) {
     this.calls.push(["delete", channel, messageId]);
     if (this.deleteError) throw this.deleteError;
@@ -1745,4 +1754,28 @@ test("a bot lists an OpenChat's notes read-only, only with moderation on and in 
   const plain = await off.open();
   plain.socket.send(JSON.stringify({ type: "notes:list", requestId: "n5", chatId: SQUARE }));
   assert.equal((await plain.until((reply) => reply.requestId === "n5")).code, "MODERATION_UNAVAILABLE");
+});
+
+test("a bot reads its OpenChat's own invite links and looks up tickets read-only, only in its own chats, rate-limited", async (t) => {
+  const SQUARE = `m${"e".repeat(32)}`;
+  const env = await botEnv(t, { moderation: true, chats: [CHAT, SQUARE] });
+  env.provider.channels = [...env.provider.channels, { channelId: SQUARE, kind: "square", name: "社群" }];
+  env.page.socket.send(JSON.stringify({ type: "channels:refresh" }));
+  await env.page.until((frame) => frame.type === "channels" && frame.channels.some((channel) => channel.channelId === SQUARE));
+  const bot = await env.open();
+  const ask = async (frame) => {
+    bot.socket.send(JSON.stringify(frame));
+    return bot.until((reply) => reply.requestId === frame.requestId);
+  };
+  assert.deepEqual(await ask({ type: "invite:own", requestId: "i1", chatId: SQUARE }), { type: "invite:own", requestId: "i1", chatId: SQUARE, squareMid: "s-own", links: ["https://line.me/ti/g2/OWNTICKET"] });
+  assert.equal((await ask({ type: "invite:own", requestId: "i2", chatId: CHAT })).code, "INVITE_UNSUPPORTED");
+  assert.equal((await ask({ type: "invite:own", requestId: "i3", chatId: "m-other" })).code, "UNKNOWN_CHAT");
+  assert.deepEqual(await ask({ type: "invite:lookup", requestId: "l1", chatId: SQUARE, ticket: "KNOWN1" }), { type: "invite:lookup", requestId: "l1", chatId: SQUARE, found: true, squareMid: "s-other" });
+  assert.deepEqual(await ask({ type: "invite:lookup", requestId: "l2", chatId: SQUARE, ticket: "NOPE1" }), { type: "invite:lookup", requestId: "l2", chatId: SQUARE, found: false });
+  assert.equal((await ask({ type: "invite:lookup", requestId: "l3", chatId: SQUARE, ticket: "bad ticket!" })).code, "INVALID_REQUEST");
+  assert.equal((await ask({ type: "invite:lookup", requestId: "l4", chatId: "m-other", ticket: "KNOWN1" })).code, "UNKNOWN_CHAT");
+  for (let i = 0; i < 4; i += 1) await ask({ type: "invite:lookup", requestId: `r${i}`, chatId: SQUARE, ticket: "KNOWN1" });
+  assert.equal((await ask({ type: "invite:lookup", requestId: "r9", chatId: SQUARE, ticket: "KNOWN1" })).code, "RATE_LIMITED");
+  env.provider.inviteError = new Error("X");
+  assert.equal((await ask({ type: "invite:own", requestId: "i4", chatId: SQUARE })).code, "INVITE_OWN_FAILED");
 });

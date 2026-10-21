@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { safeName, scrubNotice, sendNotice } from "../guard/notice.mjs";
+import { safeMentionTargets, safeName, scrubNotice, sendNotice, stripMentions } from "../guard/notice.mjs";
 
 test("禁字「換群」（含空白拆字）會被替換", () => {
   assert.equal(scrubNotice("請不要換群"), "請不要假群組");
@@ -32,10 +32,10 @@ test("通知先引用那則訊息並 @；成功就只送一次", async () => {
   assert.equal(result.replied, true);
 });
 
-test("伺服器拒絕時依序退成：只引用 → 只 @ → 純文字", async () => {
+test("伺服器拒絕時依序退成：只 @ → 只引用 → 純文字", async () => {
   const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "SEND_FAILED" }, { type: "sent", messageId: "2" }]);
   const result = await sendNotice(server.send, { chatId: "c", text: "t", mentions: [{ userId: "u", start: 0, end: 2 }], replyTo: "999" });
-  assert.deepEqual(server.frames.map((f) => [Boolean(f.replyTo), Boolean(f.mentions)]), [[true, true], [true, false], [false, true], [false, false]]);
+  assert.deepEqual(server.frames.map((f) => [Boolean(f.replyTo), Boolean(f.mentions)]), [[true, true], [false, true], [true, false], [false, false]]);
   assert.equal(result.answer.type, "sent");
   assert.equal(result.replied, false);
 });
@@ -68,4 +68,28 @@ test("通知失敗（或丟錯）也照樣處置，並回報沒通知到", async
   const notified = await notifyThenAct(async () => { throw new Error("boom"); }, async (ok) => { order.push(`act:${ok}`); }, 10, async () => {});
   assert.deepEqual(order, ["act:false"]);
   assert.equal(notified, false);
+});
+
+test("@ 送不出去時，退回的版本不留「@名字」純文字", async () => {
+  const text = "⚠️ 反詐小幫手：「Pan ⠀⠀⠀⠀」的訊息疑似詐騙\n@Pan 請群主與管理員留意";
+  const start = text.indexOf("@Pan");
+  const mentions = [{ userId: "pOWNER", start, end: start + 4 }];
+  const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "INVALID_REQUEST" }, { type: "sent", messageId: "3" }]);
+  const result = await sendNotice(server.send, { chatId: "c", text, mentions, replyTo: "9" });
+  assert.equal(server.frames[0].text, text);
+  assert.ok(!server.frames[2].mentions);
+  assert.ok(!server.frames[2].text.includes("@"));
+  assert.ok(server.frames[2].text.endsWith("\n請群主與管理員留意"));
+  assert.equal(result.mentioned, false);
+  assert.equal(result.replied, true);
+});
+
+test("stripMentions 刪掉多個 @ 段落", () => {
+  const text = "x\n@A @B 請留意";
+  assert.equal(stripMentions(text, [{ userId: "a", start: 2, end: 4 }, { userId: "b", start: 5, end: 7 }]), "x\n請留意");
+});
+
+test("@ 對象排除被判詐騙者本人與暱稱含隱形字元者，只留真群主 mid", () => {
+  const admins = [["pOWNER", { name: "Pan", role: "admin" }], ["pFAKE", { name: "Pan ⠀⠀⠀⠀", role: "coAdmin" }], ["pSCAM", { name: "小美", role: "coAdmin" }], ["pZW", { name: "Pan\u200b", role: "coAdmin" }]];
+  assert.deepEqual(safeMentionTargets(admins, { excludeIds: ["pSCAM"] }).map(([id]) => id), ["pOWNER"]);
 });

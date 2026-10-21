@@ -15,7 +15,7 @@ test("主題清單：內建 MiniMax H3，只有 https 官方網址", () => {
 });
 
 test("H3 觸發：各種問法都算", () => {
-  for (const q of ["H3 好用嗎", "h3 模型要多少顯卡", "@阿軒 minimax h3 可以商用嗎", "MiniMax-H3 開源了？", "有人跑過H3嗎", "海螺 H3 跟 Sora 比？", "H3-Base FL2VA 怎麼用", "請問 H3 的 ComfyUI 工作流", "H3？"]) {
+  for (const q of ["H3 好用嗎", "h3 模型要多少顯卡", "@阿華 minimax h3 可以商用嗎", "MiniMax-H3 開源了？", "有人跑過H3嗎", "海螺 H3 跟 Sora 比？", "H3-Base FL2VA 怎麼用", "請問 H3 的 ComfyUI 工作流", "H3？"]) {
     assert.equal(matchTopic(q, topics)?.id, "minimax-h3", q);
   }
 });

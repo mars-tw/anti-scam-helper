@@ -35,8 +35,13 @@ test("判定：暱稱單一訊號 vs 強訊號；頭像單獨不到踢人等級"
   assert.equal(v("👑阿明").fake, false);
   assert.equal(v("👑阿明").weak, true);
   assert.equal(v("\u200b阿明\u200b👑").byName, true); // 看不見＋徽章
-  assert.deepEqual([v("阿明", true).fake, v("阿明", true).byName], [true, false]);
-  assert.deepEqual([v("👑阿明", true).byName, v("👑阿明", true).strong], [true, true]);
+  // 頭像皇冠沒有同群冒名 → 完全不算（10/21 自拍誤判）
+  assert.deepEqual([v("阿明", true).fake, v("阿明", true).weak], [false, false]);
+  assert.deepEqual([v("👑阿明", true).byName, v("👑阿明", true).strong], [false, false]);
+  const g = (name, crown) => fakeAdminVerdict(analyzeName(name).signals, crown, true);
+  assert.deepEqual([g("阿明", true).fake, g("阿明", true).byName], [true, false]);
+  assert.deepEqual([g("👑阿明", true).byName, g("👑阿明", true).strong], [true, true]);
+  assert.equal(g("阿明", false).fake, false);
   assert.equal(v("阿明").fake, false);
 });
 
@@ -119,4 +124,17 @@ test("覆核鏈第 4 層 xAI Grok：Meta 三個都失敗 → Grok 判定（文�
   assert.equal(none.model, undefined);
   assert.ok(seen.every((s) => s.path.startsWith("/meta")), "沒金鑰不送 xAI");
   server.close();
+});
+
+test("頭像誤判成皇冠＋叫人私聊、暱稱沒冒名：不通知；暱稱冒同群管理員＋皇冠：照舊", () => {
+  const plain = fakeAdminVerdict(analyzeName("小東").signals, true, false);
+  assert.equal(plain.fake, false);
+  assert.equal(plain.strong, false);
+  assert.equal(plain.weak, false);
+  assert.ok(!plain.labels.some((l) => l.includes("頭像")));
+  const imp = fakeAdminVerdict(analyzeName("測試群主").signals, true, true);
+  assert.equal(imp.fake, true);
+  assert.ok(imp.labels.some((l) => l.includes("頭像")));
+  const impBadge = fakeAdminVerdict(analyzeName("👑測試群主").signals, true, true);
+  assert.deepEqual([impBadge.byName, impBadge.strong], [true, true]);
 });

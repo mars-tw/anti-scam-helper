@@ -186,3 +186,103 @@ test("SummaryState：本人不受冷卻限制，其他人照舊；同一群整�
   assert.equal(state.check("g", 600_000, { owner: true }).running, true);
   state.finish("g");
 });
+
+test("整理樣式：交易群用 strategy（結論／點位／策略邏輯蒸餾＋免責），其他群用 gist（只整理重點）", async () => {
+  const { summaryProfileFor, SUMMARY_PROFILES, finalizeSummary, mapReduce, SUMMARY_DISCLAIMER } = await import("../guard/ai-summary.mjs");
+  const cfg = { profiles: { strategy: ["cTrade1", "cTrade2"] }, defaultProfile: "gist" };
+  assert.equal(summaryProfileFor("cTrade1", cfg).name, "strategy");
+  assert.equal(summaryProfileFor("cTrade2", cfg).name, "strategy");
+  assert.equal(summaryProfileFor("cOther", cfg).name, "gist");
+  assert.equal(summaryProfileFor("cOther", {}).name, "full"); // 沒設定＝舊格式
+  assert.equal(summaryProfileFor("cX", { profiles: { nope: ["cX"] }, defaultProfile: "nope" }).name, "full");
+  const s = SUMMARY_PROFILES.strategy;
+  for (const head of ["【結論】", "【點位】", "【策略邏輯蒸餾】", "未提到", "絕不推算", "未具名", "閒聊"]) assert.ok(s.reduce.includes(head), head);
+  for (const field of ["進場", "止盈", "止損", "加倉", "時間框架"]) assert.ok(s.reduce.includes(field), field);
+  assert.ok(!SUMMARY_PROFILES.gist.reduce.includes("【點位】"));
+  assert.ok(SUMMARY_PROFILES.gist.reduce.includes("【重點整理】") && SUMMARY_PROFILES.gist.reduce.includes("未具名"));
+  for (const p of Object.values(SUMMARY_PROFILES)) assert.ok(!p.reduce.includes("換群"));
+  // 結尾：strategy＝免責＋（AI代理）；gist＝只有（AI代理）
+  const [st] = finalizeSummary("【結論】\n・看多 https://ex.com", { label: "（AI代理）", disclaimer: s.disclaimer });
+  assert.ok(st.endsWith("僅為群內發言整理，非投資建議。（AI代理）"));
+  assert.ok(!st.includes("ex.com"));
+  const [gi] = finalizeSummary("【重點整理】\n・大家在聊午餐", { label: "（AI代理）", disclaimer: SUMMARY_PROFILES.gist.disclaimer });
+  assert.ok(gi.endsWith("・大家在聊午餐（AI代理）") && !gi.includes(SUMMARY_DISCLAIMER));
+  // mapReduce 用樣式給的提示詞
+  const seen = [];
+  const complete = async (system, user) => { seen.push(system); return { text: "ok", usage: { input: 1, output: 1 } }; };
+  await mapReduce(["a", "b"], { complete, mapSystem: s.map, reduceSystem: s.reduce, sleep: async () => {} });
+  assert.equal(seen.filter((x) => x === s.map).length, 2);
+  assert.ok(seen.at(-1).startsWith(s.reduce.split("{MAX}")[0]) && !seen.at(-1).includes("{MAX}"));
+});
+
+test("交易群兩則：策略整理後接聊天重點；其他群只有一則；附加樣式只看設定", async () => {
+  const { summaryPlanFor, FOLLOWUP_PROFILES, finalizeSummary } = await import("../guard/ai-summary.mjs");
+  const cfg = { profiles: { strategy: ["cTrade1", "cTrade2"] }, defaultProfile: "gist", followups: { strategy: "chat" } };
+  assert.deepEqual(summaryPlanFor("cTrade1", cfg).map((p) => [p.name, p.role]), [["strategy", "primary"], ["chat", "followup"]]);
+  assert.deepEqual(summaryPlanFor("cTrade2", cfg).map((p) => p.name), ["strategy", "chat"]);
+  assert.deepEqual(summaryPlanFor("cOther", cfg).map((p) => p.name), ["gist"]);
+  assert.deepEqual(summaryPlanFor("cTrade1", { profiles: cfg.profiles }).map((p) => p.name), ["strategy"]); // 沒設定 followups＝只有一則
+  assert.deepEqual(summaryPlanFor("cTrade1", { ...cfg, followups: { strategy: "nope" } }).map((p) => p.name), ["strategy"]);
+  const chat = FOLLOWUP_PROFILES.chat;
+  assert.ok(chat.reduce.includes("【聊天重點】") && chat.reduce.includes("3～5 點"));
+  for (const word of ["點位", "交易策略", "不要重複", "未具名"]) assert.ok(chat.reduce.includes(word), word);
+  assert.ok(!chat.reduce.includes("換群") && !chat.map.includes("換群"));
+  assert.equal(chat.disclaimer, "");
+  // 結尾只有（AI代理）、不加免責；禁字替換；不以指令開頭
+  const [c1] = finalizeSummary("/ai整理\n【聊天重點】\n・小明說要換群 https://x.co", { label: "（AI代理）", disclaimer: chat.disclaimer, blockedWords: DEFAULT_BLOCKED_WORDS });
+  assert.ok(c1.endsWith("（AI代理）") && !c1.includes("非投資建議") && !c1.includes("換群") && c1.includes("假群組") && !c1.includes("x.co"));
+  assert.equal(parseSummaryCommand(c1), null);
+  // 每份各自最多 2 則
+  const long = Array.from({ length: 400 }, (_, i) => `・第${i}點 閒聊內容很長很長`).join("\n");
+  const parts = finalizeSummary(`【聊天重點】\n${long}`, { label: "（AI代理）", disclaimer: "", maxChars: 1500, maxMessages: 2 });
+  assert.equal(parts.length, 2);
+  assert.ok(parts.every((p) => p.length <= 1500 && p.endsWith("（AI代理）")));
+});
+
+test("兩則送出判定：主整理有送出才冷卻；附加整理失敗或沒送完記 partial；主整理沒送出就不送附加", async () => {
+  const { summaryDelivery, shouldSendFollowup } = await import("../guard/ai-summary.mjs");
+  assert.deepEqual(summaryDelivery([{ total: 1, sent: 1 }, { total: 1, sent: 1 }]), { commit: true, status: "ok" });
+  assert.deepEqual(summaryDelivery([{ total: 1, sent: 1 }]), { commit: true, status: "ok" });
+  assert.deepEqual(summaryDelivery([{ total: 2, sent: 2 }, { total: 1, sent: 0 }]), { commit: true, status: "partial" });
+  assert.deepEqual(summaryDelivery([{ total: 1, sent: 1 }, { total: 0, sent: 0, error: "TIMEOUT" }]), { commit: true, status: "partial" });
+  assert.deepEqual(summaryDelivery([{ total: 2, sent: 1 }, { total: 1, sent: 1 }]), { commit: true, status: "partial" });
+  assert.deepEqual(summaryDelivery([{ total: 1, sent: 0 }, { total: 1, sent: 0, skipped: true }]), { commit: false, status: "failed" });
+  assert.equal(shouldSendFollowup(0), false);
+  assert.equal(shouldSendFollowup(1), true);
+});
+
+test("格式檢查：缺必要段落、Markdown 標題或表格都算不符；不符會帶提醒重寫一次", async () => {
+  const { summaryFormatOk, SUMMARY_PROFILES, FOLLOWUP_PROFILES, mapReduce, finalizeSummary } = await import("../guard/ai-summary.mjs");
+  const st = SUMMARY_PROFILES.strategy;
+  const good = "【結論】\n・看多\n\n【點位】\n・BTC｜多｜100｜小明｜10/19 10:00\n\n【策略邏輯蒸餾】\n・小明｜BTC｜多：…";
+  assert.equal(summaryFormatOk(good, st), true);
+  assert.equal(summaryFormatOk("整理範圍是…\n\n## 記事本\n\n| 時間 | 內容 |\n|---|---|", st), false);
+  assert.equal(summaryFormatOk(`${good}\n## 其他`, st), false);
+  assert.equal(summaryFormatOk("【結論】\n・a\n【策略邏輯蒸餾】\n・b", st), false); // 缺【點位】
+  assert.equal(summaryFormatOk("【聊天重點】\n・午餐吃炒飯", FOLLOWUP_PROFILES.chat), true);
+  assert.equal(summaryFormatOk("## 社群動態\n- 午餐", FOLLOWUP_PROFILES.chat), false);
+  assert.equal(summaryFormatOk("【重點整理】\n・a", SUMMARY_PROFILES.gist), true);
+  for (const p of [st, SUMMARY_PROFILES.gist, SUMMARY_PROFILES.full, FOLLOWUP_PROFILES.chat]) assert.ok(p.reminder && !p.reminder.includes("換群"));
+  // 單塊：第一次亂寫 → 帶提醒重寫 → 通過
+  const users = [];
+  let n = 0;
+  const complete = async (system, user) => { users.push(user); n++; return { text: n === 1 ? "## 亂寫\n| a | b |" : good, usage: { input: 1, output: 1 } }; };
+  const out = await mapReduce(["紀錄"], { complete, reduceSystem: st.reduce, reminder: st.reminder, validate: (t) => summaryFormatOk(t, st), sleep: async () => {} });
+  assert.equal(out.text, good);
+  assert.equal(out.formatOk, true);
+  assert.equal(out.rewrites, 1);
+  assert.ok(users[0].endsWith(st.reminder));
+  assert.ok(users[1].includes("沒有照指定格式"));
+  // 一直不符：只重寫 formatRetries 次，回 formatOk=false（呼叫端照送並記錄）
+  let calls = 0;
+  const bad = await mapReduce(["a", "b"], { complete: async () => { calls++; return { text: "## 不聽話", usage: { input: 1, output: 1 } }; }, mapSystem: st.map, reduceSystem: st.reduce, validate: (t) => summaryFormatOk(t, st), sleep: async () => {} });
+  assert.equal(bad.formatOk, false);
+  assert.equal(calls, 2 + 2); // 兩塊 map ＋ 合併 ＋ 重寫一次
+  // 沒給 validate：行為照舊
+  const plain = await mapReduce(["x"], { complete: async () => ({ text: "ok", usage: { input: 1, output: 1 } }), sleep: async () => {} });
+  assert.equal(plain.formatOk, true);
+  assert.equal(plain.rewrites, 0);
+  // 最後輸出把 Markdown 標題與粗體拿掉
+  const [p] = finalizeSummary("## 標題\n**粗體**內容", { label: "（AI代理）", disclaimer: "" });
+  assert.ok(!p.includes("##") && !p.includes("**") && p.includes("粗體內容"));
+});

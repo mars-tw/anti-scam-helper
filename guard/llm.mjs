@@ -40,7 +40,7 @@ let lastFailureThrown = false;
 async function completeOne(llm, system, user, maxTokens, image) {
   lastFailureThrown = true;
   // 沒設金鑰的雲端模型直接跳過，不送請求、不等逾時。
-  if ((llm.backend === "openai" || llm.backend === "responses") && llm.apiKeyEnv && !process.env[llm.apiKeyEnv]) return undefined;
+  if ((llm.backend === "openai" || llm.backend === "responses" || llm.backend === "anthropic") && llm.apiKeyEnv && !process.env[llm.apiKeyEnv]) return undefined;
   lastFailureThrown = false;
   try {
     const backend = llm.backend ?? "local";
@@ -48,6 +48,8 @@ async function completeOne(llm, system, user, maxTokens, image) {
       ? await grokCliText(llm, system, user, maxTokens, image, { onAuthError: () => console.error("Grok CLI 登入失效或無法更新，30 分鐘內略過 Grok（請在主機上重新 grok login）") })
       : backend === "openai"
       ? await openai(llm, system, user, maxTokens, image)
+      : backend === "anthropic"
+      ? await anthropic(llm, system, user, maxTokens, image)
       : backend === "responses"
         ? await responses(llm, system, user, maxTokens, image)
         : await local(llm, system, user, maxTokens, image);
@@ -85,6 +87,30 @@ async function openai(llm, system, user, maxTokens, image) {
   const data = await response.json();
   const text = data.choices?.[0]?.message?.content;
   return typeof text === "string" ? text : undefined;
+}
+
+// Anthropic 原生格式（POST https://api.anthropic.com/v1/messages）。
+// 金鑰沒綁 workspace 時要帶 anthropic-workspace-id（workspaceIdEnv 指定環境變數，預設 ANTHROPIC_WORKSPACE_ID）。
+async function anthropic(llm, system, user, maxTokens, image) {
+  const keyEnv = llm.apiKeyEnv ?? "ANTHROPIC_API_KEY";
+  const key = keyEnv ? process.env[keyEnv] : undefined;
+  if (!key) throw new Error(`缺少環境變數 ${keyEnv}`);
+  if (!llm.model) throw new Error("設定檔缺少 model");
+  const workspaceEnv = llm.workspaceIdEnv ?? "ANTHROPIC_WORKSPACE_ID";
+  const workspace = workspaceEnv ? process.env[workspaceEnv] : undefined;
+  const content = image
+    ? [{ type: "image", source: { type: "base64", media_type: image.mime, data: image.base64 } }, { type: "text", text: user }]
+    : user;
+  const response = await fetch(`${(llm.baseUrl ?? "https://api.anthropic.com/v1").replace(/\/$/, "")}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": llm.anthropicVersion ?? "2023-06-01", ...(workspace ? { "anthropic-workspace-id": workspace } : {}) },
+    body: JSON.stringify({ model: llm.model, system, messages: [{ role: "user", content }], max_tokens: llm.maxTokens ?? maxTokens ?? 1024 }),
+    signal: AbortSignal.timeout(llm.timeoutMs ?? 60_000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  const texts = (data.content ?? []).filter((part) => part.type === "text").map((part) => part.text);
+  return texts.length ? texts.join("\n") : undefined;
 }
 
 // OpenAI Responses 格式（例如 Meta：POST https://api.meta.ai/v1/responses）。

@@ -92,6 +92,10 @@ export interface LineProvider {
   deleteMessage(channel: ChannelRef, messageId: string): Promise<void>;
   /** Recent OpenChat notes (記事本), read-only, newest first. Optional: providers without notes leave it out. */
   listNotes?(chatId: string, limit?: number): Promise<Note[]>;
+  /** Read-only: this OpenChat's own invitation links (community + chat) and its square mid. Never creates or resets a link. */
+  ownInvite?(chatId: string): Promise<{ squareMid: string; links: string[] }>;
+  /** Read-only: which OpenChat an invitation ticket belongs to (does not join). Undefined when LINE does not know it. */
+  lookupInvite?(ticket: string): Promise<{ squareMid: string } | undefined>;
   close(): Promise<void>;
 }
 
@@ -351,6 +355,53 @@ export class EvexLineProvider implements LineProvider {
 
   private chatsOfSquare(squareMid: string): string[] {
     return [...this.squareOfChat].filter(([, square]) => square === squareMid).map(([chat]) => chat);
+  }
+
+  private readonly ownInviteCache = new Map<string, { at: number; value: { squareMid: string; links: string[] } }>();
+  private readonly inviteLookupCache = new Map<string, { at: number; value: { squareMid: string } | undefined }>();
+
+  /**
+   * Read-only: the invitation links LINE already shows for this OpenChat (getSquareChat + getSquare), cached 30 minutes.
+   * Only reads existing fields; never calls anything that issues, reissues or resets a ticket.
+   */
+  async ownInvite(chatId: string): Promise<{ squareMid: string; links: string[] }> {
+    const cached = this.ownInviteCache.get(chatId);
+    if (cached && Date.now() - cached.at < 30 * 60_000) return cached.value;
+    const client = this.client;
+    if (!client) throw new Error("NOT_READY");
+    const chat = await client.base.square.getSquareChat({ squareChatMid: chatId }) as { squareChat?: { squareMid?: unknown; invitationUrl?: unknown } } | undefined;
+    const squareMid = chat?.squareChat?.squareMid;
+    if (typeof squareMid !== "string") throw new Error("NO_SQUARE");
+    this.squareOfChat.set(chatId, squareMid);
+    const links: string[] = [];
+    if (typeof chat?.squareChat?.invitationUrl === "string" && chat.squareChat.invitationUrl) links.push(chat.squareChat.invitationUrl.slice(0, 300));
+    const square = await client.base.square.getSquare({ squareMid }) as { square?: { invitationURL?: unknown } } | undefined;
+    if (typeof square?.square?.invitationURL === "string" && square.square.invitationURL) links.push(square.square.invitationURL.slice(0, 300));
+    const value = { squareMid, links: [...new Set(links)] };
+    this.ownInviteCache.set(chatId, { at: Date.now(), value });
+    return value;
+  }
+
+  /** Read-only: the OpenChat an invitation ticket points to (findSquareByInvitationTicketV2; does not join). Cached 6 hours. */
+  async lookupInvite(ticket: string): Promise<{ squareMid: string } | undefined> {
+    if (!/^[\w-]{4,100}$/.test(ticket)) throw new Error("BAD_TICKET");
+    const cached = this.inviteLookupCache.get(ticket);
+    if (cached && Date.now() - cached.at < 6 * 3_600_000) return cached.value;
+    const client = this.client;
+    if (!client) throw new Error("NOT_READY");
+    let value: { squareMid: string } | undefined;
+    try {
+      const reply = await client.base.square.findSquareByInvitationTicketV2({ request: { invitationTicket: ticket } }) as { square?: { mid?: unknown } } | undefined;
+      value = typeof reply?.square?.mid === "string" ? { squareMid: reply.square.mid } : undefined;
+    } catch (error) {
+      // LINE answers an unknown or expired ticket with an error: remember "unknown" too, so a flood of one QR costs one call.
+      const code = String((error as { code?: unknown; message?: unknown })?.code ?? (error as Error)?.message ?? "");
+      if (!/NOT_FOUND|not.?found|INVALID|5\b/i.test(code)) throw error;
+      value = undefined;
+    }
+    if (this.inviteLookupCache.size >= 500) this.inviteLookupCache.delete(this.inviteLookupCache.keys().next().value as string);
+    this.inviteLookupCache.set(ticket, { at: Date.now(), value });
+    return value;
   }
 
   /**

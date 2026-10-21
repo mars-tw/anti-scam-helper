@@ -2,7 +2,7 @@
 // 空的工作目錄＋沙箱設定檔（只讀系統路徑與 ~/.grok，讀不到專案、設定與 env），關掉所有工具、網路搜尋與子代理。
 // 不讀、不碰 CLI 的登入檔；登入由 CLI 自己更新。環境變數只給 HOME 與 PATH（不把任何金鑰傳給它）。
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -36,6 +36,34 @@ async function slot(limit) {
 }
 function release() { running--; queue.shift()?.(); }
 
+// 沙箱設定檔（~/.grok/sandbox.toml 的 [profiles.guard]）：deny 只能列「存在」的路徑——
+// bwrap 遮蔽不存在的路徑時要先建立掛載點，在 / 底下會 Permission denied（主機重開後 /cursor 不一定掛上），整個呼叫就 EXIT_1。
+// 所以每次呼叫前依現況重寫這一段（內容沒變就不寫）。
+export function guardSandboxDeny(home = homedir(), exists = existsSync) {
+  return ["/workspace", join(home, ".config"), "/cursor", join(home, ".pm2"), join(home, ".ssh")].filter((path) => exists(path));
+}
+export function renderGuardProfile(name, home = homedir(), deny = guardSandboxDeny(home)) {
+  return `[profiles.${name}]\nextends = "strict"\nrestrict_network = true\nread_write = [${JSON.stringify(join(home, ".grok"))}]\ndeny = [${deny.map((d) => JSON.stringify(d)).join(", ")}]\n`;
+}
+/** 回傳新的檔案內容（只換掉 [profiles.<name>] 那一段，其他設定保留）。 */
+export function upsertProfile(toml, name, block) {
+  const lines = String(toml ?? "").split("\n");
+  const header = `[profiles.${name}]`;
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start === -1) return `${String(toml ?? "").replace(/\n*$/, toml ? "\n\n" : "")}${block}`;
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) end++;
+  const rest = lines.slice(end).join("\n");
+  return `${lines.slice(0, start).join("\n")}${start ? "\n" : ""}${block}${rest ? `\n${rest}` : ""}`;
+}
+export function ensureSandboxProfile(name = GROK_CLI_DEFAULTS.sandbox, home = homedir()) {
+  const file = join(home, ".grok", "sandbox.toml");
+  let current = "";
+  try { current = readFileSync(file, "utf8"); } catch {}
+  const next = upsertProfile(current || "# 反詐守衛呼叫 grok -p 用的沙箱：只讀系統路徑、空的工作目錄與 ~/.grok，不讀專案、設定與 env。\n", name, renderGuardProfile(name, home));
+  if (next !== current) { try { writeFileSync(file, next, { mode: 0o644 }); } catch {} }
+}
+
 /** 組 grok 的參數（給測試看）。 */
 export function grokArgs(cfg, { promptFile, promptJson, system, model, schema }) {
   const args = [];
@@ -56,8 +84,10 @@ export async function grokCli(llm, system, user, { image, schema, spawnImpl = sp
   const cfg = { ...GROK_CLI_DEFAULTS, ...llm };
   if (now() < state.disabledUntil) throw new Error("GROK_DISABLED");
   if (image && image.base64.length > cfg.maxImageBase64) throw new Error("IMAGE_TOO_LARGE");
+  // /tmp 重開機會清空：每次呼叫都確保工作目錄與沙箱設定存在且正確。
   mkdirSync(cfg.workDir, { recursive: true, mode: 0o700 });
   try { chmodSync(cfg.workDir, 0o700); } catch {}
+  if (spawnImpl === spawn && cfg.sandbox) ensureSandboxProfile(cfg.sandbox);
   const id = randomUUID();
   const promptFile = join(cfg.workDir, `req-${id}.txt`);
   const model = image ? cfg.imageModel : cfg.model;
@@ -84,6 +114,8 @@ export async function grokCli(llm, system, user, { image, schema, spawnImpl = sp
         if (!state.logged) { state.logged = true; onAuthError(); }
         throw new Error("AUTH");
       }
+      // 錯誤碼只帶分類，不帶內容（stderr 可能有提示詞或路徑）。
+      if (/bwrap|sandbox/i.test(out.stderr)) throw new Error(`SANDBOX_EXIT_${out.code}`);
       throw new Error(`EXIT_${out.code}`);
     }
     let data;

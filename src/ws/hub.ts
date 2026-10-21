@@ -16,6 +16,7 @@ import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseRemo
 
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const HISTORY_PER_SECOND = 10;
+const INVITE_LOOKUPS_PER_MINUTE = 6;
 const NEW_CHANNEL_REFRESH_MS = 1000;
 const MAX_BOT_CONNECTIONS = 4;
 const READ_RANGE_FRESH_MS = 10_000;
@@ -98,6 +99,9 @@ const GENERIC = {
   MESSAGE_DELETE_FAILED: "無法刪除這則訊息，請確認帳號有管理權限。",
   NOTES_UNSUPPORTED: "這個聊天沒有記事本可讀。",
   NOTES_FAILED: "無法讀取記事本。",
+  INVITE_UNSUPPORTED: "這個聊天室不支援讀取邀請連結。",
+  INVITE_OWN_FAILED: "無法讀取本群邀請連結。",
+  INVITE_LOOKUP_FAILED: "無法查詢邀請碼所屬社群。",
 } as const;
 
 function updateFrame(info: UpdateInfo): ServerFrame {
@@ -112,6 +116,8 @@ export function createHub(options: HubOptions): Hub {
   const botSendLimiter = new SlidingWindowLimiter(config.api.sendsPerMinute, 60_000);
   // Shared by every bot connection: several connections must not multiply the paid TypeSafe calls.
   const botScamLimiter = new SlidingWindowLimiter(SCAM_CHECKS_PER_MINUTE, 60_000);
+  // Ticket lookups hit LINE once per unseen QR; keep them few across all bots.
+  const botInviteLimiter = new SlidingWindowLimiter(INVITE_LOOKUPS_PER_MINUTE, 60_000);
   const botRemoveLimiter = new SlidingWindowLimiter(REMOVALS_PER_MINUTE, 60_000);
   const botDeleteLimiter = new SlidingWindowLimiter(DELETIONS_PER_MINUTE, 60_000);
   const botMediaLimiter = new SlidingWindowLimiter(BOT_MEDIA_PER_MINUTE, 60_000);
@@ -504,6 +510,48 @@ export function createHub(options: HubOptions): Hub {
     if (login.state === "ready") send(socket, { type: "message:deleted", requestId, chatId, messageId });
   }
 
+  /** Read-only: an OpenChat's own invitation links (existing ones only), for telling its own QR codes from others'. */
+  async function handleOwnInvite(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const requestId = requestIdOf(frame);
+    const chatId = typeof frame.chatId === "string" ? frame.chatId : undefined;
+    if (!requestId || !chatId) return fail(socket, "INVALID_REQUEST", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square" || typeof provider.ownInvite !== "function") return fail(socket, "INVITE_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const { squareMid, links } = await provider.ownInvite(chatId);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "invite:own", requestId, chatId, squareMid, links });
+    } catch (error) {
+      if (account !== generation) return;
+      const code = String((error as Error)?.message ?? "").replace(/[^\w-]/g, "").slice(0, 40) || "UNKNOWN";
+      console.warn(`INVITE_OWN_FAILED chat=${chatId} code=${code}`);
+      return fail(socket, "INVITE_OWN_FAILED", requestId);
+    }
+  }
+
+  /** Read-only: which OpenChat a ticket belongs to. Never joins; the caller must name a chat it may reach. */
+  async function handleInviteLookup(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const requestId = requestIdOf(frame);
+    const chatId = typeof frame.chatId === "string" ? frame.chatId : undefined;
+    const ticket = typeof frame.ticket === "string" ? frame.ticket : undefined;
+    if (!requestId || !chatId || !ticket || !/^[\w-]{4,100}$/.test(ticket)) return fail(socket, "INVALID_REQUEST", requestId);
+    if (login.state !== "ready" || !store.channelOf(chatId) || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (typeof provider.lookupInvite !== "function") return fail(socket, "INVITE_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const found = await provider.lookupInvite(ticket);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "invite:lookup", requestId, chatId, found: found !== undefined, ...(found ? { squareMid: found.squareMid } : {}) });
+    } catch (error) {
+      if (account !== generation) return;
+      const code = String((error as Error)?.message ?? "").replace(/[^\w-]/g, "").slice(0, 40) || "UNKNOWN";
+      console.warn(`INVITE_LOOKUP_FAILED code=${code}`);
+      return fail(socket, "INVITE_LOOKUP_FAILED", requestId);
+    }
+  }
+
   /** Read-only: an OpenChat's recent notes (記事本) for a moderation bot, in a chat the bot may reach. */
   async function handleNotes(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
     const requestId = requestIdOf(frame);
@@ -775,6 +823,14 @@ export function createHub(options: HubOptions): Hub {
         case "notes:list":
           if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
           else void handleNotes(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "invite:own":
+          if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleOwnInvite(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "invite:lookup":
+          if (!botInviteLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleInviteLookup(socket, frame as Record<string, unknown>, botScope);
           return;
         default:
           fail(socket, "UNKNOWN_TYPE");

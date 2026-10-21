@@ -92,3 +92,21 @@ test("cleanGrokSessions 只清守衛工作目錄底下超過 7 天的工作階�
   assert.equal(cleanGrokSessions({ workDir: "/tmp/nope", home, now }), 0);
   rmSync(home, { recursive: true, force: true });
 });
+
+test("沙箱設定：deny 只列存在的路徑（重開機後 /cursor 不在也不會讓 bwrap 失敗），只換 guard 那一段", async () => {
+  const { guardSandboxDeny, renderGuardProfile, upsertProfile } = await import("../guard/grok-cli.mjs");
+  const exists = (p) => p !== "/cursor";
+  const deny = guardSandboxDeny("/home/u", exists);
+  assert.ok(!deny.includes("/cursor"));
+  assert.ok(deny.includes("/workspace") && deny.includes("/home/u/.config"));
+  assert.ok(guardSandboxDeny("/home/u", () => true).includes("/cursor"));
+  const block = renderGuardProfile("guard", "/home/u", deny);
+  assert.match(block, /^\[profiles\.guard\]\nextends = "strict"\nrestrict_network = true\nread_write = \["\/home\/u\/\.grok"\]\ndeny = \[/);
+  const before = `# 註解\n[profiles.guard]\nextends = "strict"\ndeny = ["/cursor"]\n\n[profiles.other]\nx = 1\n`;
+  const after = upsertProfile(before, "guard", block);
+  assert.ok(after.startsWith("# 註解\n[profiles.guard]"));
+  assert.ok(!after.includes('"/cursor"'));
+  assert.ok(after.includes("[profiles.other]\nx = 1"));
+  assert.equal(upsertProfile(after, "guard", block), after);
+  assert.ok(upsertProfile("", "guard", block).startsWith("[profiles.guard]"));
+});

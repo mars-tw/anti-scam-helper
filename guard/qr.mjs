@@ -99,3 +99,37 @@ const LINE_INVITE = /(^|\/\/|\.)(line\.me\/(R\/)?ti\/(g2?|p)\/|line\.me\/R\/(ti|
 export function isLineInvite(text) {
   return LINE_INVITE.test(text);
 }
+
+// ── 本群／別群 ─────────────────────────────────────────────
+const SQUARE_TICKET = /^(?:https?:\/\/)?(?:[\w-]+\.)*line\.me\/(?:R\/)?ti\/g2\/([\w-]{4,100})|^(?:https?:\/\/)?openchat\.line\.me\/[a-z]{2}(?:-[a-z]{2,4})?\/(?:cover|join)\/([\w-]{4,100})/i;
+
+/** 社群（OpenChat）邀請碼：line.me/ti/g2/<碼>、openchat.line.me/<地區>/cover|join/<碼>。一般群組 ti/g/ 與加好友不算（回 undefined）。 */
+export function squareTicket(text) {
+  const match = String(text ?? "").trim().match(SQUARE_TICKET);
+  return match ? match[1] ?? match[2] : undefined;
+}
+
+/**
+ * QR 連結是不是本群（同一個社群）自己的：
+ * 1. 和本群現有邀請連結的邀請碼相同 → own（via: "own-link"）
+ * 2. 是社群邀請碼：反查所屬社群，和本群同一個社群 → own（"lookup"）；別的社群 → other（"lookup"）
+ * 3. 一般群組 ti/g/、加好友、查不到 → unknown（交給既有白名單與覆核流程）。
+ * own：{ squareMid?, links: [] }；lookup(ticket) → { squareMid } | undefined（查無）| 丟錯（無法確認）。
+ */
+export async function classifyQrOrigin(content, { own, lookup } = {}) {
+  const ticket = squareTicket(content);
+  if (!ticket) return { origin: "unknown", via: "not-square" };
+  const ownTickets = new Set((own?.links ?? []).map(squareTicket).filter(Boolean));
+  if (ownTickets.has(ticket)) return { origin: "own", via: "own-link" };
+  if (!own?.squareMid || typeof lookup !== "function") return { origin: "unknown", via: "no-own-info" };
+  let found;
+  try { found = await lookup(ticket); } catch { return { origin: "unknown", via: "lookup-failed" }; }
+  if (!found?.squareMid) return { origin: "unknown", via: "lookup-not-found" };
+  return found.squareMid === own.squareMid ? { origin: "own", via: "lookup" } : { origin: "other", via: "lookup" };
+}
+
+/** 覆核提示：只有確認是別的社群才寫「不是本社群自己的連結」。 */
+export function qrReviewContext(origin) {
+  if (origin === "other") return "一般成員（非管理員）在本社群貼出一張截圖，截圖裡的 QR code 解碼後是 LINE 社群邀請連結，已向 LINE 查證屬於別的社群（不是本社群）。請判斷這是否為引流詐騙。";
+  return "一般成員（非管理員）在本社群貼出一張截圖，截圖裡的 QR code 解碼後是 LINE 群組／社群／加好友邀請連結；無法確認是不是本社群自己的連結（也可能是本群正式邀請）。請判斷這是否為引流詐騙，證據不足時回 UNSURE。";
+}
