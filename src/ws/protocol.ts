@@ -53,6 +53,8 @@ export type ServerFrame =
   | { type: "invite:own"; requestId: string; chatId: string; squareMid: string; links: string[] }
   /** Answer to a bot's `invite:lookup`: the OpenChat a ticket belongs to (`found: false` when LINE does not know it). */
   | { type: "invite:lookup"; requestId: string; chatId: string; found: boolean; squareMid?: string }
+  /** Answer to a bot's `thread:fetch`: one OpenChat thread's messages (read-only), oldest first. */
+  | { type: "thread"; requestId: string; chatId: string; threadId: string; messages: Message[] }
   /** An OpenChat's note count changed (a note was posted or removed): bots may list notes again. */
   | { type: "note:status"; chatIds: string[]; noteCount?: number; latestCreatedAt?: number }
   /** Answer to a client `ping`: lets the page tell a silent connection from a dead one. */
@@ -81,6 +83,8 @@ export type ClientFrame =
   | { type: "invite:own"; requestId: string; chatId: string }
   /** Bots only, read-only: which OpenChat an invitation ticket (from a QR code) belongs to; never joins. */
   | { type: "invite:lookup"; requestId: string; chatId: string; ticket: string }
+  /** Bots only, read-only: one OpenChat thread's (討論串) messages; never joins the thread or marks it read. */
+  | { type: "thread:fetch"; requestId: string; chatId: string; threadId: string; limit?: number }
   /** Bots only, with `api.moderation`: the picture of an image message shown by this server (e.g. to read QR codes). */
   | { type: "media:fetch"; requestId: string; chatId: string; messageId: string }
   /** This account's own id, name and picture, on demand (pages and bots alike). */

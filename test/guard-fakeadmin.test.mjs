@@ -127,7 +127,7 @@ test("覆核鏈第 4 層 xAI Grok：Meta 三個都失敗 → Grok 判定（文�
 });
 
 test("頭像誤判成皇冠＋叫人私聊、暱稱沒冒名：不通知；暱稱冒同群管理員＋皇冠：照舊", () => {
-  const plain = fakeAdminVerdict(analyzeName("小東").signals, true, false);
+  const plain = fakeAdminVerdict(analyzeName("小華").signals, true, false);
   assert.equal(plain.fake, false);
   assert.equal(plain.strong, false);
   assert.equal(plain.weak, false);

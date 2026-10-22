@@ -120,3 +120,33 @@ export function allLinksLegit(text) {
   const hosts = [...String(text ?? "").matchAll(URL_RE)].filter((m) => m[1] || m[3]).map((m) => m[2]);
   return hosts.length > 0 && hosts.every(isLegitShop);
 }
+
+/** 唯讀展開短網址（不執行 JS、只跟 HTTP 轉址，最多 5 次，擋內網）：回 { url, html, invite }；invite＝最終網址或頁面裡寫死的 LINE 群組／社群邀請。 */
+export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000, fetchImpl = fetch, resolve = lookup } = {}) {
+  let target = url;
+  for (let hop = 0; hop < 5; hop++) {
+    let parsed;
+    try { parsed = new URL(target); } catch { return undefined; }
+    if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) return undefined;
+    const host = parsed.hostname.replace(/^\[|\]$/g, "");
+    const ips = isIP(host) ? [host] : (await resolve(host, { all: true }).catch(() => [])).map((entry) => entry.address);
+    if (ips.length === 0 || ips.some(privateIp)) return undefined;
+    if (/^(?:[\w-]+\.)*line\.me$/i.test(host) && /^\/(?:R\/)?ti\/g2?\//i.test(parsed.pathname)) return { url: parsed.toString(), html: "", invite: true };
+    let response;
+    try {
+      response = await fetchImpl(parsed, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", Accept: "text/html" } });
+    } catch { return undefined; }
+    if (response.status >= 300 && response.status < 400 && response.headers.get("location")) { target = new URL(response.headers.get("location"), parsed).toString(); continue; }
+    let html = "";
+    if (response.ok && /text\/html|application\/xhtml/i.test(response.headers.get("content-type") ?? "")) {
+      const reader = response.body?.getReader();
+      const chunks = []; let size = 0;
+      while (reader && size < maxBytes) { const { done, value } = await reader.read().catch(() => ({ done: true })); if (done) break; chunks.push(value); size += value.length; }
+      reader?.cancel().catch(() => {});
+      html = Buffer.concat(chunks.map((c) => Buffer.from(c))).subarray(0, maxBytes).toString("utf8");
+    }
+    const invite = /line\.me(?:\\?\/)+(?:R(?:\\?\/)+)?ti(?:\\?\/)+g2?(?:\\?\/)/i.test(html);
+    return { url: parsed.toString(), html, invite, status: response.status };
+  }
+  return undefined;
+}

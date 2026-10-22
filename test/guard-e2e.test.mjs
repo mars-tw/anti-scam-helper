@@ -59,7 +59,10 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
   writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
   const child = spawn(process.execPath, ["guard/guard.mjs", join(dir, "guard.config.json")], { env: { ...process.env, LINEJS_TOKEN: "test", LINEJS_URL: `ws://127.0.0.1:${wss.address().port}` }, stdio: "ignore" });
   await new Promise((done) => setTimeout(done, waitMs));
+  // 等守衛真的結束（收到 SIGTERM 會先把參考資料存檔），再讀檔，免得偶爾讀到存檔前的內容。
+  const exited = child.exitCode !== null ? Promise.resolve() : new Promise((done) => child.once("exit", done));
   child.kill();
+  await Promise.race([exited, new Promise((done) => setTimeout(done, 3000))]);
   wss.close(); llm.close();
   rmSync(dir, { recursive: true, force: true });
   return { frames, removes: frames.filter((f) => f.type === "member:remove"), deletes: frames.filter((f) => f.type === "message:delete"), sends: frames.filter((f) => f.type === "message:send") };
@@ -522,10 +525,10 @@ test("社群參考資料：機器人指令、成員對話進參考；詐騙與�
 });
 
 test("冒充群主（暱稱含社群品牌名）＋假群組公告（沒連結）：kickWithInvite 踢人並刪除，通知不用禁字", async () => {
-  const channels = [{ channelId: "cA", name: "示範研究社 - 挖礦小隊長 / (新手區) 示範研究社 - 挖礦小隊長", kind: "square" }];
+  const channels = [{ channelId: "cA", name: "示範研究社 - 測試小隊長 / (新手區) 示範研究社 - 測試小隊長", kind: "square" }];
   const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: true } }, [
-    { messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "挖礦小隊長.-Amy", text: "請大家搬到新3群，週五統一審核" },
-    { messageId: "m2", channelId: "cA", senderId: "pImp", senderName: "挖礦小隊長.-Amy", text: "麻煩大家重新加入喔" },
+    { messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "測試小隊長.-Ann", text: "請大家搬到新3群，週五統一審核" },
+    { messageId: "m2", channelId: "cA", senderId: "pImp", senderName: "測試小隊長.-Ann", text: "麻煩大家重新加入喔" },
   ], { channels, waitMs: 4000 });
   assert.equal(r.removes.length, 1);
   assert.ok(r.sends.length >= 1);
@@ -535,9 +538,9 @@ test("冒充群主（暱稱含社群品牌名）＋假群組公告（沒連結�
 });
 
 test("冒充群主暱稱但只是閒聊：不踢不刪", async () => {
-  const channels = [{ channelId: "cA", name: "示範研究社 - 挖礦小隊長", kind: "square" }];
+  const channels = [{ channelId: "cA", name: "示範研究社 - 測試小隊長", kind: "square" }];
   const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: true } }, [
-    { messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "挖礦小隊長.-Amy", text: "大家早安" },
+    { messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "測試小隊長.-Ann", text: "大家早安" },
   ], { channels });
   assert.equal(r.removes.length + r.deletes.length, 0);
 });
@@ -610,4 +613,99 @@ test("QR 反查屬於同一個社群：不處置；別的社群：照原流程�
   const other = await runGuard({ qr: { enabled: true, kickOnConfirmed: false } }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: png, invites: { lookup: { SameSq456: "s-elsewhere" } } });
   assert.ok(other.sends.length >= 1);
   assert.ok(other.frames.some((f) => f.type === "invite:lookup" && f.ticket === "SameSq456"));
+});
+
+test("機器人訓練群（learnOnly＋allowReply＋allowSummary）：只回明確 @、每人每分鐘 1 則、全群每分鐘 3 則；不判詐騙、不刪不踢；自己的訊息不觸發", async () => {
+  const at = (id, sender, text, extra = {}) => ({ messageId: id, channelId: "cB", senderId: sender, senderName: `機器人${sender}`, text, ...extra });
+  const mention = [{ userId: "pSelf", start: 0, end: 3 }];
+  const r = await runGuard({
+    ...NAMED, chat: { ...NAMED.chat, chats: ["cA"], repliesPerMinute: 50, perChatPerHour: 0 },
+    groupPolicies: { cB: { learnOnly: true, allowReply: true, allowSummary: true } },
+  }, [
+    at("x0", "pA", "大家好，今天天氣不錯"),
+    at("x1", "pA", "@阿華 你好嗎", { mentions: mention }),
+    at("x2", "pA", "@阿華 再問一次", { mentions: mention }),
+    at("x3", "pB", "@阿華 我是另一個機器人", { mentions: mention }),
+    at("x4", "pC", "@阿華 第三個", { mentions: mention }),
+    at("x5", "pD", "@阿華 第四個", { mentions: mention }),
+    at("x6", "pE", SCAM_TEXT),
+    at("x7", "pSelf", "@阿華 這是我自己（AI代理）", { mentions: mention }),
+  ], { chatAnswer: OK_ANSWER, waitMs: 6000 });
+  const sendsB = r.sends.filter((f) => f.chatId === "cB");
+  assert.deepEqual(sendsB.map((f) => f.replyTo).sort(), ["x1", "x3", "x4"], JSON.stringify(sendsB));
+  const actsB = r.frames.filter((f) => f.chatId === "cB" && ["member:remove", "message:delete", "message:react", "scam:check"].includes(f.type));
+  assert.deepEqual(actsB, [], JSON.stringify(actsB));
+});
+
+test("機器人訓練群：/ai整理一開始跑就起算 10 分鐘冷卻（失敗也算），其他人與本人同時再下不會重跑；只學習群不跑", async () => {
+  const { mkdtempSync, readFileSync, rmSync: rm } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const keep = mkdtempSync(join(tmpdir(), "camp-summary-"));
+  const r = await runGuard({
+    ...NAMED, chat: { ...NAMED.chat, chats: ["cA"] },
+    groupPolicies: { cB: { learnOnly: true, allowReply: true, allowSummary: true }, cC: { learnOnly: true } },
+  }, [
+    { messageId: "s1", channelId: "cB", senderId: "pA", senderName: "成員", text: "/ai整理" },
+    { messageId: "s2", channelId: "cB", senderId: "pB", senderName: "成員二", text: "/ai整理" },
+    { messageId: "s3", channelId: "cB", senderId: "pSelf", senderName: "本人", text: "/ai整理" },
+    { messageId: "s4", channelId: "cC", senderId: "pA", senderName: "成員", text: "/ai整理" },
+  ], {
+    chatAnswer: OK_ANSWER, waitMs: 4000,
+    setup: (dir, config) => { config.aiSummary = { enabled: true, stateFile: join(keep, "state.json"), resendFile: join(keep, "resend.json") }; },
+  });
+  const state = JSON.parse(readFileSync(join(keep, "state.json"), "utf8"));
+  rm(keep, { recursive: true, force: true });
+  assert.ok(state.cB?.lastAt > 0, JSON.stringify(state));
+  assert.equal(state.cC, undefined);
+  assert.ok(r.sends.filter((f) => f.chatId === "cB").length <= 1);
+  assert.deepEqual(r.sends.filter((f) => f.chatId === "cC"), []);
+});
+
+test("機器人訓練群：不套一般群的每人 5 分鐘冷卻（只看群組上限）；叫名字、回覆本帳號也算，但同一人 3 分鐘只因此回一次", async () => {
+  const at = (id, sender, text, extra = {}) => ({ messageId: id, channelId: "cB", senderId: sender, senderName: `機器人${sender}`, text, ...extra });
+  const mention = [{ userId: "pSelf", start: 0, end: 3 }];
+  const r = await runGuard({
+    ...NAMED, chat: { ...NAMED.chat, chats: ["cA"], userCooldownSeconds: 300, repliesPerMinute: 1, perChatPerHour: 1 },
+    groupPolicies: { cB: { learnOnly: true, allowReply: true, replyLimits: { perSenderPerMinute: 2, perChatPerMinute: 6 } } },
+  }, [
+    at("y1", "pA", "@阿華 第一題", { mentions: mention }),
+    at("y2", "pA", "@阿華 第二題", { mentions: mention }),
+    at("y3", "pB", "阿華在嗎？"),
+    at("y4", "pB", "阿華你覺得呢？"),
+    at("y5", "pC", "今天阿華的貓很可愛"),
+  ], { chatAnswer: OK_ANSWER, waitMs: 6000 });
+  const replied = r.sends.filter((f) => f.chatId === "cB").map((f) => f.replyTo).sort();
+  assert.deepEqual(replied, ["y1", "y2", "y3"], JSON.stringify(replied));
+});
+
+test("機器人訓練群：設定的 callNames（例如寵物名）也算在叫本帳號，同一人 3 分鐘只因此回一次；沒設的群不認", async () => {
+  const at = (id, chatId, sender, text) => ({ messageId: id, channelId: chatId, senderId: sender, senderName: `機器人${sender}`, text });
+  const r = await runGuard({
+    ...NAMED, chat: { ...NAMED.chat, chats: ["cA"] },
+    groupPolicies: { cB: { learnOnly: true, allowReply: true, callNames: ["小毛球"], replyLimits: { perSenderPerMinute: 3, perChatPerMinute: 6 } }, cC: { learnOnly: true, allowReply: true } },
+  }, [
+    at("z1", "cB", "pA", "小毛球在嗎？"),
+    at("z2", "cB", "pA", "小毛球你覺得呢？"),
+    at("z3", "cC", "pB", "小毛球在嗎？"),
+  ], { chatAnswer: OK_ANSWER, waitMs: 5000 });
+  assert.deepEqual(r.sends.map((f) => f.replyTo), ["z1"], JSON.stringify(r.sends.map((f) => [f.chatId, f.replyTo])));
+});
+
+test("通知層刪踢只限踢人群：其他群（沒有 per-chat kick）貼跨群群組邀請／冒充負責人要匯款 → 不踢、不刪", async () => {
+  const r = await runGuard({ kickMode: "notify", groupPolicies: { cC: { kickMode: "kick" } } }, [
+    { messageId: "x1", channelId: "cA", senderId: "pX", senderName: "陌生人", text: "請把餘額匯到指定帳戶，匯款單拍照給我" },
+    { messageId: "x2", channelId: "cA", senderId: "pY", senderName: "路人", text: "新群在這 https://line.me/ti/g2/ZzYyXx99" },
+    { messageId: "x3", channelId: "cB", senderId: "pY", senderName: "路人", text: "新群在這 https://line.me/ti/g2/ZzYyXx99" },
+  ]);
+  assert.equal(r.removes.length, 0, "其他群不送踢人");
+  assert.equal(r.deletes.length, 0, "其他群不刪訊息");
+});
+
+test("仿冒群主／管理員直接刪踢只限踢人群：其他群貼 👑 仿冒暱稱 → 不踢", async () => {
+  const history = [{ messageId: "h1", channelId: "cB", senderId: "pAdm", senderName: "阿明老師", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: Date.now() - 60_000 }];
+  const r = await runGuard({ kickMode: "notify", groupPolicies: { cC: { kickMode: "kick" } } }, [
+    { messageId: "y1", channelId: "cB", senderId: "pFake", senderName: "👑阿明老師", text: "今天天氣不錯" },
+  ], { history });
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.deletes.length, 0);
 });

@@ -71,15 +71,15 @@ test("通知失敗（或丟錯）也照樣處置，並回報沒通知到", async
 });
 
 test("@ 送不出去時，退回的版本不留「@名字」純文字", async () => {
-  const text = "⚠️ 反詐小幫手：「Pan ⠀⠀⠀⠀」的訊息疑似詐騙\n@Pan 請群主與管理員留意";
-  const start = text.indexOf("@Pan");
+  const text = "⚠️ 反詐小幫手：「Abe ⠀⠀⠀⠀」的訊息疑似詐騙\n@Abe 請群主與管理員留意";
+  const start = text.indexOf("@Abe");
   const mentions = [{ userId: "pOWNER", start, end: start + 4 }];
   const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "INVALID_REQUEST" }, { type: "sent", messageId: "3" }]);
   const result = await sendNotice(server.send, { chatId: "c", text, mentions, replyTo: "9" });
-  assert.equal(server.frames[0].text, text);
+  assert.equal(server.frames[0].text, `${text}（AI代理）`);
   assert.ok(!server.frames[2].mentions);
   assert.ok(!server.frames[2].text.includes("@"));
-  assert.ok(server.frames[2].text.endsWith("\n請群主與管理員留意"));
+  assert.ok(server.frames[2].text.endsWith("\n請群主與管理員留意（AI代理）"));
   assert.equal(result.mentioned, false);
   assert.equal(result.replied, true);
 });
@@ -90,6 +90,6 @@ test("stripMentions 刪掉多個 @ 段落", () => {
 });
 
 test("@ 對象排除被判詐騙者本人與暱稱含隱形字元者，只留真群主 mid", () => {
-  const admins = [["pOWNER", { name: "Pan", role: "admin" }], ["pFAKE", { name: "Pan ⠀⠀⠀⠀", role: "coAdmin" }], ["pSCAM", { name: "小美", role: "coAdmin" }], ["pZW", { name: "Pan\u200b", role: "coAdmin" }]];
+  const admins = [["pOWNER", { name: "Abe", role: "admin" }], ["pFAKE", { name: "Abe ⠀⠀⠀⠀", role: "coAdmin" }], ["pSCAM", { name: "小美", role: "coAdmin" }], ["pZW", { name: "Abe\u200b", role: "coAdmin" }]];
   assert.deepEqual(safeMentionTargets(admins, { excludeIds: ["pSCAM"] }).map(([id]) => id), ["pOWNER"]);
 });

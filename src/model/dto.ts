@@ -109,6 +109,9 @@ export interface Message {
   mediaId?: string;
   /** Id of the message this one answers (LINE "reply"). */
   replyTo?: string;
+  /** OpenChat only: the thread (討論串) this message belongs to, or starts when `threadRoot`. */
+  threadId?: string;
+  threadRoot?: boolean;
   /** People tagged in `text`, sorted and non-overlapping. */
   mentions?: TextMention[];
   /** LINE emoji in `text`, sorted and non-overlapping. */

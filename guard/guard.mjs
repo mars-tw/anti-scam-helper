@@ -13,14 +13,15 @@ import { complete, onModelError } from "./llm.mjs";
 import { classifyQrOrigin, isLineInvite, qrReviewContext, readQr, shrinkForModel, squareTicket } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
-import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer } from "./rules.mjs";
+import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RULES, SHORTENERS, forcedScamNames } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
-import { allLinksLegit, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { blockedForLearnOnly, blockedForWarnOnly, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin } from "./policy.mjs";
+import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
+import { blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
+import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
-import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts } from "./policy.mjs";
-import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice } from "./notice.mjs";
+import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage } from "./policy.mjs";
+import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, withAgentLabel } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
 import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
@@ -28,6 +29,7 @@ import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
+import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
@@ -57,6 +59,8 @@ const whitelist = new Set([
 ]);
 // kickMode："kick"（預設）照常踢；"notify"：所有踢人改成只發通知請管理員確認（不踢、不刪），出事時的暫時安全模式。
 const kickMode = config.kickMode === "notify" ? "notify" : "kick";
+// 每群覆寫：groupPolicies[id].kickMode = "kick"（只有維護者同意的群），全域仍是 notify。
+const chatKickMode = (chatId) => kickModeFor(chatId, { globalMode: kickMode, groupPolicies: config.groupPolicies ?? {} });
 const logDir = resolve(dirname(configPath), config.logDir ?? "logs");
 mkdirSync(logDir, { recursive: true });
 const scamLlm = { backend: "local", ...config.llm };
@@ -104,6 +108,17 @@ const groupPolicies = config.groupPolicies ?? {};
 const policyOf = (chatId) => groupPolicies[chatId] ?? {};
 // 只學習的群：只收進本機去識別化參考資料，其他功能全關（見 policy.mjs learnOnlyChats）。
 const learnOnly = learnOnlyChats(groupPolicies);
+// 只學習群另開延伸學習（討論串、圖片描述、每日學習筆記）：只讀、只寫本機檔案，不發送（見 learn-ext.mjs）。
+const learnExt = learnExtChats(groupPolicies);
+// 機器人訓練群：只學習群另開 @ 回覆／整理（見 policy.mjs botCampChats）；其餘處置照只學習全關。
+const botCamp = botCampChats(groupPolicies);
+const botCampLimiters = new Map([...botCamp].map(([chatId, p]) => [chatId, makeChatReplyLimiter(p.limits)]));
+// 機器人訓練群另外認的叫法（groupPolicies.<群>.callNames，例如守護貓的名字）：跟叫主人名字一樣算在叫本帳號。
+const botCampNames = new Map([...botCamp].map(([chatId, p]) => [chatId, makeNameMatcher(p.callNames)]));
+// 只學習群另開詐騙判斷＋通知（見 policy.mjs scanNotifyChats）：只判文字、只發通知，刪除與踢人照只學習擋下。
+const scanNotify = scanNotifyChats(groupPolicies);
+// 可以「抓圖」的只學習群：延伸學習（描述圖片）或 scanNotify（看圖判詐騙），只用於判斷與去識別化描述，不存原圖。
+const mediaLearnChats = new Set([...learnExt, ...scanNotify]);
 // 只警告的群：不踢、不刪，只發警告通知（見 policy.mjs warnOnlyChats）。
 const warnOnly = warnOnlyChats(groupPolicies);
 /** 這個群不能刪訊息／踢人：本帳號不是管理員（noDeleteChats）或設成只警告。 */
@@ -121,9 +136,29 @@ function groupKnownLinks(chatId) {
   for (const url of policy.linkAllow ?? []) { const key = linkKey(url); if (key) keys.add(key); }
   return keys;
 }
+const SHORT_URL = new RegExp(`(?:https?:\\/\\/)?(?<![\\w.-])(?:[a-z0-9-]+\\.)*(?:${SHORTENERS.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\/[\\w\\/?=&%.~-]+`, "i");
+const SHOPPING_PAGE = /加入購物車|立即購買|立即下單|結帳|貨到付款|訂購表單|add to cart|checkout|buy now|NT\$\s*\d|售價|特價|限時優惠/i;
+function isShoppingPage(html) {
+  const text = String(html ?? "").replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+  return pageSignals(html).length > 0 || SHOPPING_PAGE.test(text);
+}
+// 短網址展開是購物頁：群內提醒（不刪不踢），每群 10 分鐘最多一次。
+const shopReminded = new Map();
+async function shopReminder(ws, message) {
+  const now = Date.now();
+  if (now - (shopReminded.get(message.channelId) ?? 0) < 10 * 60_000) return record({ action: "shop-reminder-skipped", chatId: message.channelId, reason: "cooldown" });
+  shopReminded.set(message.channelId, now);
+  record({ action: "shop-reminder", chatId: message.channelId, messageId: message.messageId });
+  if (!notifyChats.has(message.channelId)) return;
+  const reply = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: "⚠️ 這個短網址打開是購物頁面，可能是詐騙，請勿亂下單、亂填信用卡。", mentions: [], replyTo: message.messageId });
+  if (reply?.answer?.type === "sent" && reply.answer.messageId) { sentByBot.add(reply.answer.messageId); ownMessages.add(reply.answer.messageId); }
+}
+const SHORT_LINK = new RegExp(`(?<![\\w.-])(?:[a-z0-9-]+\\.)*(${SHORTENERS.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\/[\\w-]`, "i");
 function redPacketAllowed(chatId, text) {
   const policy = policyOf(chatId);
   if (!text) return undefined;
+  // 「跟單／帶單」＋QR 或短網址：不適用紅包／記事本連結例外，照一般流程判斷（只影響通知與分數）。
+  if (redPacketExceptionBlocked(text, { shortener: SHORT_LINK })) return undefined;
   if (policy.redPacket === true) {
     const result = isRedPacketOnly(text, { extra: policy.redPacketHosts ?? [] });
     if (result.ok) return result;
@@ -212,8 +247,39 @@ function learnCommunity(message, text, { fromHistory = false } = {}) {
   try { return memory.learn(message, text, { bot, names, allowDomains: memoryAllowDomains }); } catch (error) { recordError("community", String(error?.message ?? error).slice(0, 80)); }
   return false;
 }
+/**
+ * 機器人訓練群的即時訊息（已先學習）：只處理 /ai整理 與明確 @ 本帳號的回覆。
+ * 守衛自己送的、帶代理標記的不理；本人帳號只認 /ai整理；沒有明確 @ 不回；每人／每群每分鐘有上限。
+ * 歷史補掃不會走到這裡（不補跑舊指令、不補回）。
+ */
+async function botCampAct(ws, message, receivedAt = Date.now()) {
+  const camp = botCamp.get(message.channelId);
+  const text = textOf(message);
+  if (!camp || !text || message.unsent || message.senderId === me || sentByBot.has(message.messageId) || ownMessages.has(message.messageId) || isBotText(text)) return;
+  const skip = (reason) => record({ action: "bot-camp-skipped", reason, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+  if (isSelf(message.channelId, message.senderId)) {
+    const command = camp.summary && summaryCfg.enabled ? selfSummaryCommand(text, { messageId: message.messageId, sentIds: sentByBot, isBotText }) : undefined;
+    if (command) await requestSummary(ws, message, command);
+    return;
+  }
+  if (camp.summary && summaryCfg.enabled) {
+    const command = parseSummaryCommand(text);
+    if (command) return requestSummary(ws, message, command);
+  }
+  if (!camp.reply || !chat.enabled) return;
+  const explicit = Boolean(message.mentions?.some((mention) => isSelf(message.channelId, mention.userId) || mentionsSelfByName(message, mention)));
+  // 這個群也算在叫本帳號：回覆本帳號的訊息、或直接叫名字（設定裡的暱稱）。這兩種另有每人 3 分鐘一次的上限，防機器人互回。
+  const via = explicit ? "mention" : repliesToSelf(message) ? "reply-to-self" : callsOwner(text, message.mentions) || botCampNames.get(message.channelId)?.(text, message.mentions) ? "name" : undefined;
+  if (!via) return;
+  if (message.createdAt && Date.now() - message.createdAt > nameTrigger.maxAgeMinutes * 60_000) return skip("stale");
+  const verdict = botCampLimiters.get(message.channelId).allow(message.channelId, message.senderId, { mentionedSelf: true, implicit: via !== "mention" });
+  if (!verdict.ok) return skip(verdict.reason);
+  remember(message, text);
+  await reply(ws, message, text, { camp: true, via, receivedAt });
+}
 /** 只學習的群：收進參考資料就結束，不走任何判斷。日誌只記有沒有收，不記內容。 */
 function learnOnlyMessage(message, { fromHistory = false } = {}) {
+  if (learnExt.has(message.channelId)) learnExtNote(message, { fromHistory });
   const text = textOf(message);
   if (!text || message.unsent || message.senderId === me || isSelf(message.channelId, message.senderId)) return false;
   const learned = learnCommunity(message, text, { fromHistory }) === true;
@@ -227,7 +293,7 @@ if (memory) {
     for (const name of readdirSync(logDir).filter((n) => /^guard-\d{4}-\d{2}-\d{2}\.jsonl$/.test(n))) {
       for (const line of readFileSync(join(logDir, name), "utf8").split("\n")) {
         if (!line.includes("senderId")) continue;
-        try { const e = JSON.parse(line); if (e.senderId && e.chatId && FLAG_ACTIONS.test(e.action ?? "") && Date.parse(e.at) >= cutoff) memory.forget(e.chatId, e.senderId); } catch {}
+        try { const e = JSON.parse(line); if (e.senderId && e.chatId && isFlagEntry(e, FLAG_ACTIONS) && Date.parse(e.at) >= cutoff) memory.forget(e.chatId, e.senderId); } catch {}
       }
     }
   } catch (error) { console.error(`社群參考資料：讀紀錄失敗（${error.message}）`); }
@@ -237,7 +303,7 @@ if (memory) {
 }
 
 // 規則計分（含去空白正規化、短網址清單、假換群字眼）在 rules.mjs。
-const ruleScore = makeRuleScorer(config.benignDomains);
+const ruleScore = makeRuleScorer(config.benignDomains, { scamDomains: config.scamDomains });
 
 function textOf(message) {
   if (message.text) return message.text;
@@ -323,6 +389,8 @@ function cleanGrokSessionsNow() {
 }
 setTimeout(cleanGrokSessionsNow, 60_000).unref();
 setInterval(cleanGrokSessionsNow, 7 * 86_400_000).unref();
+const notifyTracker = makeNotifyTracker();
+const lookalikes = makeLookalikeTracker();
 const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
 
 function learnAdmin(message) {
@@ -335,7 +403,7 @@ function learnAdmin(message) {
     if (!chatAdmins.has(message.channelId)) chatAdmins.set(message.channelId, new Map());
     const admins = chatAdmins.get(message.channelId);
     if (!admins.has(message.senderId)) record({ action: "admin-seen", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, role: message.senderRole });
-    admins.set(message.senderId, { name: message.senderName, role: message.senderRole });
+    admins.set(message.senderId, { name: message.senderName, role: message.senderRole, pictureId: message.senderPictureId ?? admins.get(message.senderId)?.pictureId });
   }
   const key = normalizeName(message.senderName);
   if (key.length < 2) return;
@@ -372,6 +440,8 @@ function impersonated(message) {
 // ── 詐騙判定 ─────────────────────────────────────────────────
 const SCAM_SYSTEM = `你是 LINE 群組的反詐騙審查員。判斷使用者給的群組訊息是否為詐騙或詐騙引流（假投資、飆股帶單、加 LINE 私聊、釣魚連結、假冒客服、借錢、博弈、兼職刷單等）。
 「假搬家」也是詐騙：一般成員要大家移到新群／新社群、「重新加入」「重新➕」、「明日統一核准」，都算 SCAM（真正的管理員公告不會送到你這裡審查）。
+「假冒知名廠商或官方名義邀請入群」也是詐騙：用品牌、旅行社、銀行、官方客服、VIP 福利群的名義，附短網址或外部 LINE 社群邀請要大家加入，算 SCAM（例如「某旅行社官方福利群開放加入，點此」接短網址）。
+知名廠商通常用 LINE 官方帳號（藍勾勾、@ 開頭的 ID）；自稱知名廠商或官方，卻導向一般群組／社群邀請（line.me/ti/g、ti/g2）或個人帳號，比較可疑；有 @ 官方帳號也不代表一定安全（有未認證的假官方帳號）。
 判斷的是「發言者本人是不是在行騙或引流」：如果發言者是在詢問、轉述或提醒別人某段內容是不是詐騙（例如「這個連結是詐騙嗎」「大家小心這種訊息」），算 OK。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行寫 15 字內理由。`;
 
@@ -380,7 +450,8 @@ function scamModelText(text) {
   const marked = String(text ?? "").replace(/(https?:\/\/)?((?:[\w-]+\.)+[a-z]{2,})(\/[^\s，。）)」』]*)?/gi, (url, _scheme, host, path) => {
     if (!_scheme && !path && !/\.(com|net|org|tw|me|ee|cc|io|xyz|top|vip|info|app|link|ly|gl|co|gov)$/i.test(host)) return url;
     const invite = LINE_INVITE_PATH.test(`${host}${path ?? ""}`.replace(/^www\./i, "")) ? "，LINE 邀請／加好友連結" : "";
-    return `［連結：${host.toLowerCase()}${invite}］`;
+    const media = !invite && isMainstreamMediaHost(host) ? "，主流影音／社群網站，網址本身不是詐騙依據" : "";
+    return `［連結：${host.toLowerCase()}${invite}${media}］`;
   });
   // 「加賴 xxx」「加 LINE xxx」後面的帳號也遮掉。
   return deidentify(marked.replace(/(加\s*(我\s*)?(賴|line|LINE|Line)\s*[:：]?\s*)@?[\w.-]{3,}/g, "$1［LINE ID］"));
@@ -437,15 +508,35 @@ const localScreenAll = config.localScreenAll ?? config.checkEveryMessage ?? fals
 const linkAllow = (config.linkAllow ?? []).map((entry) => normalizeUrl(typeof entry === "string" ? entry : entry.url)).filter(Boolean);
 const sanitizeLinks = (text) => sanitizeWith(text, linkAllow);
 
-async function decide(message, rawText) {
+async function decide(message, rawText, { extraNames = [], dropNames = [] } = {}) {
   // 只有「所有連結都是白名單／自家群連結」才算官方；混了外部連結就照一般流程判斷（計分、刪除、踢人）。
   const { text, officialOnly: official } = sanitizeLinks(rawText);
-  const { score, names } = ruleScore(message, text);
+  let { score, names } = ruleScore(message, text);
+  // 16:31 誤判：展開後是知識／社群／技術文件的「疑似短網址」不算（只在沒開踢人的群；刪踢條件不變）。
+  for (const name of dropNames) {
+    const rule = RULES.find((r) => r.name === name);
+    if (names.includes(name)) { names = names.filter((n) => n !== name); score = Math.max(0, score - (rule?.score ?? 0)); }
+  }
   if (official && score < strongScore) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: "OFFICIAL_LINK" };
+  for (const name of extraNames) if (!names.includes(name)) names.push(name);
+  // 維護者 10/22：一般成員發群組邀請、轉移／新群、未知短網址 → 一律判詐騙。踢人群照該群踢人條件（Claude＋覆核），其他群只通知。
+  const forced = forcedScamNames(names);
+  if (forced.length) {
+    const judged = await llmJudge(text);
+    const review = await metaReview(text, `一般成員（不是管理員）發了：${forced.join("、")}。本群規定只有管理員可以發群組邀請；要大家轉移到新群、用不明短網址引流都是 SCAM。`);
+    const chatKick = chatKickMode(message.channelId) === "kick";
+    const perChatKick = chatKick && policyOf(message.channelId).kickMode === "kick";
+    // 開踢人的群（踢人群）照 decideChatKick；全域 kick（測試／舊設定）照舊：兩層都 SCAM 才踢；其他一律只通知。
+    const action = perChatKick ? (decideChatKick({ score: Math.max(score, strongScore), strongScore, verdict: judged.verdict, model: judged.model, review: review.verdict }) ?? "notice")
+      : chatKick && judged.verdict === "SCAM" && review.verdict === "SCAM" ? "kick" : "notice";
+    return { kick: action === "kick", action, forced: true, link: hasLink(text), score: Math.max(score, strongScore), names, verdict: judged.verdict ?? "MODEL_UNAVAILABLE", model: judged.model, modelMs: judged.ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model };
+  }
   // 規則 0 分的訊息只在 localScreenAll 開啟時才交給模型（預設不交）；訊息積壓時一律先略過，避免模型拖慢。
   if (score === 0 && (!localScreenAll || queue.length > (config.localBacklog ?? 5))) return { kick: false, score, names, verdict: "SKIP" };
   // 規則 0 分又沒有連結／LINE ID／金錢字眼的短訊息：地端小模型常把閒聊判成 SCAM，但這種判定本來就不會送覆核，乾脆不問（省 CPU、少雜訊）。
   if (score === 0 && config.localSkipNoSignal !== false && !shouldScreenLocally({ score, text })) return { kick: false, score, names, verdict: "SKIP" };
+  // 0 分、網址全是主流影音／社群網站（YouTube 等）：網址本身不是詐騙依據，不送模型。
+  if (score === 0 && onlyMainstreamMediaLinks(text)) return { kick: false, score, names, verdict: "SKIP", mainstreamMedia: true };
   // 第一層：地端模型（正常訊息到此為止，不送雲端）。
   const { verdict, model, ms } = await llmJudge(text);
   if (official) return { kick: false, score, names: [...names, "本社群官方連結"], verdict: `OFFICIAL_LINK_${verdict ?? "UNAVAILABLE"}`, model, modelMs: ms };
@@ -460,14 +551,24 @@ async function decide(message, rawText) {
   }
   // 可疑＝規則分數 ≥ reviewScore，或地端判 SCAM 且規則至少有 reviewLocalScamMinScore 分（地端小模型對 0 分訊息誤判多，不送雲端）。
   const suspicious = score >= reviewScore || (verdict === "SCAM" && score >= (config.reviewLocalScamMinScore ?? 1));
+  // 10/22 通知層：0 分但第一層判 SCAM → 送雲端覆核；覆核也 SCAM 就只通知（不踢、不刪，不影響踢人分數）。
+  if (!suspicious && score === 0 && verdict === "SCAM" && config.notifyLayer?.zeroScoreReview !== false) {
+    const zr = await metaReview(text);
+    const both = zr.verdict === "SCAM";
+    // 0 分只靠模型判詐：沒有確定特徵就只記錄（不在群內通知、不標記）。
+    const notifyIt = both && zeroScoreShouldNotify(names);
+    return { kick: false, action: notifyIt ? "notice" : "none", zeroScoreScamReviewed: both, zeroScoreLogged: both && !notifyIt, score, names: notifyIt ? [...names, "0 分但第一層與雲端覆核都判詐騙"] : names, verdict, model, modelMs: ms, review: zr.verdict ?? "UNAVAILABLE", reviewModel: zr.model };
+  }
   if (!suspicious) return { kick: false, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms };
   // 第二層：Meta 覆核。踢人＝規則分數 ≥ strongScore 且地端判 SCAM 且 Meta 也判 SCAM；Meta 不可用就不踢、只記錄。
   const review = await metaReview(text);
   // 處置：kick＝規則 ≥ strongScore＋地端 SCAM＋Meta SCAM（不放寬）；notice＝Meta SCAM 且（規則 ≥ notifyScore，或地端也 SCAM 且含連結）。
   // link：清掉白名單／LINE 官方頁面後，還有外部網址、無 http 網址、短網址或 LINE 邀請。
   const link = hasLink(text) && !allLinksLegit(text); // 正規電商連結不當成詐騙連結刪除
-  const action = decideAction({ score, verdict, review: review.verdict, names, strongScore, notifyScore: config.notifyScore ?? 3,
+  let action = decideAction({ score, verdict, review: review.verdict, names, strongScore, notifyScore: config.notifyScore ?? 3,
     link, deleteOnLink: scamLink.deleteOnConfirmed === true, canDelete: !noAction(message.channelId) && notifyChats.has(message.channelId) });
+  // 開踢人的群：Claude 第一層判 SCAM＋分數到門檻就踢；Meta 沒回應不擋，Meta 明確非詐騙只通知（見 policy.mjs decideChatKick）。
+  if (policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick") action = decideChatKick({ score, strongScore, verdict, model, review: review.verdict }) ?? action;
   const kick = action === "kick";
   // Meta 確認詐騙：去識別化後累積到範例庫（只存訊息本身，不存發言者）。
   if (review.verdict === "SCAM" && patterns) {
@@ -478,6 +579,8 @@ async function decide(message, rawText) {
 
 // ── 小助手 ───────────────────────────────────────────────────
 const CHAT_SYSTEM_BASE = chat.mentionOnly ? `${chat.systemPrompt}
+
+${replyGuidelines({ maxChars: chat.maxReplyChars })}
 
 【社群須知（可直接引用）】
 ${chat.facts.map((fact) => `- ${fact}`).join("\n")}
@@ -502,7 +605,7 @@ function selfIsAdmin(chatId) {
 /** 回覆當下的守衛事實（依目前執行中的設定）。 */
 /** 踢人開關（依執行中設定）：一般 kickMode、冒名＋邀請／QR、購物再犯。 */
 function kickFlags(chatId) {
-  return { warnOnly: chatId !== undefined && warnOnly.has(chatId), kickMode, kickWithInvite: config.impersonation?.kickWithInvite === true, kickRepeatShop: config.scamShop?.enabled === true && config.scamShop?.kickRepeat === true };
+  return { warnOnly: chatId !== undefined && warnOnly.has(chatId), kickMode: chatId !== undefined ? chatKickMode(chatId) : kickMode, kickWithInvite: config.impersonation?.kickWithInvite === true, kickRepeatShop: config.scamShop?.enabled === true && config.scamShop?.kickRepeat === true };
 }
 function guardFactsFor(chatId) {
   return buildGuardFacts({ ...kickFlags(chatId), deleteOnLink: scamLink.deleteOnConfirmed === true, metaAvailable: metaState.ok !== false, isAdmin: selfIsAdmin(chatId), incidents: chat.incidentFacts });
@@ -741,29 +844,30 @@ function question(message, text) {
 }
 
 const chatHourly = new Map(); // 聊天室 → 最近一小時回覆時間
+/** 一般群的回覆冷卻：允許回 undefined；擋下回原因（記進日誌，不再無聲略過）。 */
 function allowedToReply(senderKey) {
   const now = Date.now();
-  if (now - (lastReplyTo.get(senderKey) ?? 0) < chat.userCooldownSeconds * 1000) return false;
+  if (now - (lastReplyTo.get(senderKey) ?? 0) < chat.userCooldownSeconds * 1000) return "user-cooldown";
   while (replyTimes.length > 0 && now - replyTimes[0] > 60_000) replyTimes.shift();
-  if (replyTimes.length >= chat.repliesPerMinute) return false;
+  if (replyTimes.length >= chat.repliesPerMinute) return "account-rate";
   const chatId = senderKey.split(" ")[0];
   const hourly = (chatHourly.get(chatId) ?? []).filter((at) => now - at < 3_600_000);
-  if (chat.perChatPerHour && hourly.length >= chat.perChatPerHour) return false;
+  if (chat.perChatPerHour && hourly.length >= chat.perChatPerHour) return "chat-hourly";
   hourly.push(now);
   chatHourly.set(chatId, hourly);
   lastReplyTo.set(senderKey, now);
   replyTimes.push(now);
-  return true;
+  return undefined;
 }
 
 function send(ws, message, text) {
-  if (chat.chats && !chat.chats.includes(message.channelId)) return;
+  if (chat.chats && !chat.chats.includes(message.channelId) && !botCamp.has(message.channelId)) return;
   if (config.dryRun) {
     // 要回的內容只在試跑時顯示在主控台，供檢視；日誌檔只記字數。
     console.log(`【試跑，未回覆】${message.senderName}：${text.replace(/\n/g, " ").slice(0, 120)}`);
     return record({ action: "reply-dry-run", chatId: message.channelId, messageId: message.messageId, replyChars: text.length });
   }
-  return call(ws, { type: "message:send", chatId: message.channelId, text: scrubNotice(text, blockedWords), replyTo: message.messageId }).then((reply) => {
+  return call(ws, { type: "message:send", chatId: message.channelId, text: withAgentLabel(scrubNotice(text, blockedWords)), replyTo: message.messageId }).then((reply) => {
     if (reply.type === "sent" && reply.messageId) { sentWaiting.set(reply.messageId, message.channelId); ownMessages.add(reply.messageId); sentByBot.add(reply.messageId); }
     else record({ action: "reply-failed", chatId: message.channelId, code: reply.code });
     return reply;
@@ -838,11 +942,12 @@ async function replyOut(ws, message, labeled, text) {
   return true;
 }
 
-async function reply(ws, message, ask) {
+async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   if (repliedIds.has(message.messageId)) return;
   markReplied(message.messageId);
   const senderKey = `${message.channelId} ${message.senderId}`;
-  const byName = nameTriggered.has(message.messageId);
+  // 機器人訓練群：已經過群組自己的上限（每人／每群每分鐘），不再套一般群的冷卻（每人 5 分鐘、全帳號每分鐘、每群每小時）。
+  const byName = !camp && nameTriggered.has(message.messageId);
   // 叫名字觸發：每個聊天室有自己的冷卻，避免大家一直叫名字洗版。
   if (byName) {
     const skip = (reason) => record({ action: "reply-skipped", reason, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
@@ -851,7 +956,9 @@ async function reply(ws, message, ask) {
     if (!nameCooldown(message.channelId)) return skip("name-cooldown");
     nameRepliedAt.set(senderKey, Date.now());
   }
-  if (!allowedToReply(senderKey)) return;
+  const blocked = camp ? undefined : allowedToReply(senderKey);
+  if (blocked) return record({ action: "reply-skipped", reason: blocked, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+  const startedAt = Date.now();
   // 日誌不記訊息文字：問題只留短雜湊與長度。
   const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(ask, "ask"), ...(byName ? { trigger: "name" } : {}), ...extra });
   if (!withinDailyQuota(senderKey)) return log("quota-exceeded");
@@ -935,6 +1042,8 @@ async function reply(ws, message, ask) {
     const end = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"), cut.lastIndexOf("\n"));
     body = end > chat.maxReplyChars * 0.5 ? cut.slice(0, end + 1) : cut;
   }
+  // 輸出後補充（備援）：問槓桿／加倉沒提停損與清算、提到收益截圖／邀請碼沒標推廣 → 補一句。
+  if (chat.mentionOnly) for (const note of [riskNote(ask, body), promoNote(ask, body)]) if (note) body = `${body}\n${note}`;
   // 輸出後過濾（備援）：回覆在談踢人、移出、權限之類的事 → 換成固定句。
   // 模型照提示只回了固定句（轉給本人／等本人）：原樣送出，不加簽名。
   for (const fixed of [ESCALATE_REPLY, MODERATION_REPLY]) {
@@ -963,7 +1072,9 @@ async function reply(ws, message, ask) {
   }
   const text = labelReply(body, replyLabel);
   if (!(await replyOut(ws, message, false, text))) return;
-  log("replied", { model: used.model, replyChars: text.length, examples: examples.length, contextChars: context.length, memoryChars: memoryText.length });
+  const sentAt = Date.now();
+  const latency = camp ? { via, lineToGuardMs: message.createdAt && receivedAt ? receivedAt - message.createdAt : undefined, waitMs: receivedAt ? startedAt - receivedAt : undefined, modelAndSendMs: sentAt - startedAt, totalMs: message.createdAt ? sentAt - message.createdAt : undefined } : {};
+  log("replied", { ...latency, model: used.model, replyChars: text.length, examples: examples.length, contextChars: context.length, memoryChars: memoryText.length });
   if (training) {
     const names = (recent.get(message.channelId) ?? []).map((item) => item.name).concat(message.senderName);
     const summary = lines.slice(-3).map((line) => line.slice(0, 60)).join(" / ");
@@ -983,7 +1094,7 @@ const refLabel = (entry) => (entry?.textHash ? `${entry.textChars} 字，#${entr
 
 // 錯誤也寫進每日稽核紀錄（只記類別與摘要，不記對話內容）。
 function recordError(kind, detail) {
-  try { record({ action: "error", kind, detail: String(detail ?? "").slice(0, 120) }); } catch {}
+  try { record({ action: "error", kind, code: errorCode(kind, detail), detail: String(detail ?? "").slice(0, 120) }); } catch {}
 }
 onModelError(({ model, error }) => recordError("model", `${model}：${error}`));
 
@@ -991,10 +1102,15 @@ function localDay() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
+// 純獲利／看盤截圖只記進追蹤，不再單獨當通知理由（回 false＝不通知）。
+function trackProfitImage(inl, message) {
+  if (inl?.profitOnly) notifyTracker.profitImage(message.channelId, message.senderId);
+  return false;
+}
 function record(entry) {
   const day = localDay();
   appendFileSync(join(logDir, `guard-${day}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 });
-  if (memory && entry.senderId && entry.chatId && FLAG_ACTIONS.test(entry.action ?? "")) { try { memory.forget(entry.chatId, entry.senderId); } catch {} }
+  if (memory && entry.senderId && entry.chatId && isFlagEntry(entry, FLAG_ACTIONS)) { try { memory.forget(entry.chatId, entry.senderId); } catch {} }
 }
 
 // ── 主流程 ───────────────────────────────────────────────────
@@ -1036,9 +1152,11 @@ async function remove(ws, message, entry) {
   if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || chatAdmins.get(message.channelId)?.has(message.senderId)) {
     return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
   }
-  const escalate = kickMode === "notify" ? impersonationKickDecision(message, entry) : undefined;
+  const mode = chatKickMode(message.channelId);
+  const escalate = mode === "notify" ? impersonationKickDecision(message, entry) : undefined;
   if (escalate?.kick) record({ action: "impersonation-kick-escalated", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, victim: escalate.victim });
-  if (kickMode === "notify" && !escalate?.kick) {
+  if (mode === "kick" && kickMode === "notify") record({ action: "chat-kick-override", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+  if (mode === "notify" && !escalate?.kick) {
     record({ ...entry, action: "kick-suppressed", reason: "kickMode-notify", ...(escalate && escalate.reason !== "no-invisible" ? { escalateSkip: escalate.reason } : {}) });
     kicked.add(`${message.channelId} ${message.senderId}`);
     return notifyAdmins(ws, { ...entry, noticeKind: undefined }, "suspect");
@@ -1216,6 +1334,19 @@ function riskyContent(message, text) {
   const { names } = ruleScore({ ...message, senderName: "" }, cleaned);
   return names.some((name) => name !== "網址");
 }
+/** 踢人群通知層刪踢（維護者 10/22 15:51）：只在 per-chat kickMode:kick 的群；第一層不是 Claude SCAM 就再問一次（帶規則提示），覆核 Grok→Meta。踢了回 true。 */
+async function minerKick(ws, message, entry, text, prior = {}) {
+  const perChatKick = policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick";
+  if (!perChatKick || neverKick(message)) return false;
+  const hint = `［規則已判定：${entry.names.filter((n) => MINER_KICKABLE.has(n)).join("、")}］`;
+  let judged = prior.verdict === "SCAM" && /^claude/i.test(String(prior.model ?? "")) ? { verdict: prior.verdict, model: prior.model } : (text ? await llmJudge(`${hint}${text}`) : {});
+  const review = prior.review && prior.verdict === judged.verdict && prior.model === judged.model ? { verdict: prior.review, model: prior.reviewModel } : (text ? await metaReview(text, hint) : {});
+  const action = minerAction({ perChatKick, reasons: entry.names, verdict: judged.verdict, model: judged.model, review: review.verdict, protectedMember: neverKick(message) });
+  record({ action: "miner-notify-rule", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: entry.names.filter((n) => MINER_KICKABLE.has(n)), verdict: judged.verdict, model: judged.model, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, decision: action });
+  if (action !== "kick") return false;
+  remove(ws, message, { ...entry, verdict: judged.verdict, model: judged.model, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, score: strongScore });
+  return true;
+}
 /** 有發通知回 true（呼叫端就不再走一般流程，避免重複通知）。 */
 async function checkFakeAdmin(ws, message, text) {
   if (fakeAdminExcluded(message)) return false;
@@ -1253,7 +1384,9 @@ function neverKick(message) {
 async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false } = {}) {
   const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names: [`冒用「${victim}」`, notice ? "假群組公告" : "外部邀請／引流連結或 QR code"] };
   const kick = config.impersonation?.kickWithInvite === true && !neverKick(message);
-  record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick });
+  record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick, review: "PENDING" });
+  // 冒名＋邀請是規則判定（不經模型）；10/22 起另外跑一次雲端覆核，只寫日誌（review／reviewModel），不影響處置。
+  if (message.text) metaReview(sanitizeLinks(message.text).text, "發訊者冒用管理員／群主名義並貼外部邀請或假群組公告。").then((rv) => record({ action: "impersonation-invite-review", chatId: entry.chatId, messageId: entry.messageId, review: rv.verdict ?? "UNAVAILABLE", reviewModel: rv.model })).catch((error) => recordError("model", `impersonation-review：${String(error?.message).slice(0, 60)}`));
   if (config.dryRun) { record({ action: "dry-run", ...entry }); return; }
   if (warnOnly.has(message.channelId)) {
     record({ action: "kick-suppressed", reason: "warn-only", ...entry });
@@ -1304,23 +1437,30 @@ function saveShopOffenses() {
   } catch (error) { recordError("shop-offenders", error.message); }
 }
 /** 有處理（含只通知）回 true。 */
-async function checkScamShop(ws, message, rawText) {
-  if (!scamShop.enabled || isStaff(message) || message.senderId === me) return false;
+/** 一頁式購物連結評分（抓頁面特徵＋Meta 覆核）；沒有購物連結或分數太低回 undefined。只判斷，不處置。 */
+async function scoreShopLinks(rawText) {
   const text = sanitizeLinks(rawText).text;
   const links = shopLinks(text);
-  if (links.length === 0) return false;
+  if (links.length === 0) return undefined;
   let page = [];
   if (scamShop.fetchPage) {
     const html = await fetchPageSafe(links[0].url, { timeoutMs: scamShop.fetchTimeoutMs ?? 5000, maxBytes: scamShop.fetchMaxBytes ?? 300_000 });
     if (html) page = pageSignals(html);
   }
   let result = scoreScamShop({ text, links, page });
-  if (result.score < 2) return false;
+  if (result.score < 2) return undefined;
   let review;
   if (reviewLlm) {
     review = await metaReview(text, `一般成員貼出購物連結。網站與訊息的特徵：${result.signals.join("、")}。一頁式詐騙購物網站（名牌超低價、只收貨到付款、單頁訂購表單、新註冊或奇怪網域）是 SCAM；正規電商或一般分享是 OK。`);
     result = scoreScamShop({ text, links, page, review: review.verdict });
   }
+  return { result, review };
+}
+async function checkScamShop(ws, message, rawText) {
+  if (!scamShop.enabled || isStaff(message) || message.senderId === me) return false;
+  const scored = await scoreShopLinks(rawText);
+  if (!scored) return false;
+  const { result, review } = scored;
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(rawText), verdict: "SCAM_SHOP", names: ["疑似一頁式詐騙購物網站"], score: result.score, signals: result.signals, review: review?.verdict ?? (reviewLlm ? "UNAVAILABLE" : undefined), level: result.level };
   if (result.level === "none") { record({ action: "scam-shop-cleared", ...entry }); return false; }
   if (result.level === "unsure") {
@@ -1397,6 +1537,131 @@ async function deleteFollowup(ws, message, key) {
   record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
 }
 
+/** scanNotify 群：這位成員的圖片交給稽核（看圖判詐騙＋去識別化描述），延伸學習就不再另外描述同一張。 */
+function auditsImage(message) {
+  return scanNotify.has(message.channelId) && message.contentType === "IMAGE" && !message.senderRole && !whitelist.has(message.senderId) && !isSelf(message.channelId, message.senderId) && message.senderId !== me;
+}
+/** 稽核結果寫進延伸學習資料（kind: audit），每日學習筆記的「稽核案例」用；不含 ID、暱稱、網址、原圖。 */
+function learnAudit(message, audit) {
+  if (!extStore || !learnExt.has(message.channelId)) return false;
+  const text = auditText(audit, { names: [message.senderName, ...ownerNames].filter(Boolean) });
+  const learned = extStore.add({ kind: "audit", chatId: message.channelId, messageId: `audit:${message.messageId}`, at: message.createdAt, text });
+  record({ action: "learn-ext-audit", chatId: message.channelId, messageId: message.messageId, kind: audit.kind, verdict: audit.verdict, learned });
+  return learned;
+}
+/** scanNotify 判出可疑：一律只記 suspect-flag 並發通知（沿用冷卻）；不刪、不收回、不踢、不在群內發圖片警告。 */
+function flagScanNotify(ws, entry, kind = "suspect") {
+  record({ action: "suspect-flag", scanNotify: true, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review, reviewModel: entry.reviewModel, contentType: entry.contentType });
+  return notifyAdmins(ws, entry, kind);
+}
+/** 只學習群（scanNotify）的詐騙判斷：文字＋連結（含一頁式購物、短網址規則）；圖片交給 auditImage。不跑冒名／假管理員處置。 */
+async function scanNotifyMessage(ws, message) {
+  if (message.senderRole || whitelist.has(message.senderId) || isSelf(message.channelId, message.senderId) || message.senderId === me) return;
+  if (message.contentType === "IMAGE") return queueAuditImage(ws, message);
+  const text = textOf(message);
+  if (!text) return;
+  const link = hasLink(sanitizeLinks(text).text);
+  const names = [message.senderName, ...ownerNames].filter(Boolean);
+  const desc = cleanText(text, { names, maxChars: 200 });
+  // 連結：先跑一頁式購物檢查（只判斷，不刪不踢）。
+  const shop = link && scamShop.enabled ? await scoreShopLinks(text) : undefined;
+  if (shop && shop.result.level !== "none") {
+    const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), verdict: "SCAM_SHOP", names: ["疑似一頁式詐騙購物網站"], score: shop.result.score, signals: shop.result.signals, review: shop.review?.verdict ?? (reviewLlm ? "UNAVAILABLE" : undefined), level: shop.result.level };
+    record({ action: "scam-shop-suspect", scanNotify: true, ...entry });
+    learnAudit(message, { kind: "link", verdict: `SCAM_SHOP_${String(shop.result.level).toUpperCase()}`, reason: shop.result.signals.join("、"), desc });
+    await flagScanNotify(ws, entry, "shop-suspect");
+    return;
+  }
+  const result = await decide(message, text);
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
+  if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", scanNotify: true, ...entry });
+  const flagged = result.kick || result.action === "delete" || result.action === "notice";
+  if (flagged || link || result.score > 0 || (result.verdict !== "SKIP" && result.verdict !== "OK")) {
+    learnAudit(message, { kind: link ? "link" : "text", verdict: flagged ? `SUSPECT_${result.review ?? result.verdict}` : result.verdict, reason: (result.names ?? []).join("、"), desc });
+  }
+  if (flagged) await flagScanNotify(ws, entry);
+}
+
+// 看圖稽核（scanNotify 群）：一次抓圖、一次模型呼叫同時給判定與去識別化描述（和延伸學習共用結果與每小時上限）。
+const auditImageSystem = () => `${VISION_SYSTEM}
+第三行起另外寫給機器人學習用的內容：
+${IMAGE_LEARN_SYSTEM.split("\n").slice(1, 4).join("\n")}`;
+const auditImageQueue = [];
+let auditBusy = false;
+function queueAuditImage(ws, message) {
+  if (auditImageQueue.length >= 50) { record({ action: "audit-image-skipped", chatId: message.channelId, messageId: message.messageId, reason: "queue-full" }); return; }
+  auditImageQueue.push({ ws, message });
+  void drainAuditImages();
+}
+async function drainAuditImages() {
+  if (auditBusy) return;
+  auditBusy = true;
+  try {
+    while (auditImageQueue.length) {
+      const { ws, message } = auditImageQueue.shift();
+      try { await auditImage(ws, message); } catch (error) { recordError("audit-image", String(error?.message ?? error).slice(0, 80)); }
+    }
+  } finally { auditBusy = false; }
+}
+async function auditImage(ws, message) {
+  if (!imageCap.take()) { record({ action: "audit-image-skipped", reason: "hourly-cap", chatId: message.channelId, messageId: message.messageId }); return; }
+  const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
+  if (picture.type !== "media") { record({ action: "audit-image-failed", chatId: message.channelId, messageId: message.messageId, code: picture.code }); return; }
+  const base = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName };
+  const names = [message.senderName, ...ownerNames].filter(Boolean);
+  const bytes = Buffer.from(picture.data, "base64");
+  // QR：內容只用來判斷（日誌只記雜湊），不寫進學習資料。
+  let content;
+  try { content = qr.enabled ? readQr(picture.mime, bytes) : undefined; } catch (error) { recordError("image", error.message); }
+  if (content) {
+    const entry = { ...base, contentType: "IMAGE_QR", ...contentRef(content) };
+    if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).officialOnly || redPacketAllowed(message.channelId, content)) {
+      record({ action: "none", verdict: "QR_ALLOWED", scanNotify: true, ...entry });
+      learnAudit(message, { kind: "qr", verdict: "QR_ALLOWED", reason: "白名單或官方 QR" });
+    } else {
+      const origin = squareTicket(content) ? await qrOrigin(ws, message.channelId, content) : { origin: "unknown" };
+      if (origin.origin === "own") {
+        record({ action: "none", verdict: "QR_OWN_GROUP", scanNotify: true, ...entry });
+        learnAudit(message, { kind: "qr", verdict: "QR_OWN_GROUP", reason: "本群自己的邀請 QR" });
+      } else {
+        const shop = scamShop.enabled ? await scoreShopLinks(content) : undefined;
+        const result = await decide(message, content);
+        const external = origin.origin === "other" || isLineInvite(content);
+        const flagged = external || (shop && shop.result.level !== "none") || result.kick || result.action === "delete" || result.action === "notice";
+        const why = [external ? "外部 LINE 群組／好友邀請 QR" : "", ...(shop ? shop.result.signals : []), ...(result.names ?? [])].filter(Boolean);
+        const qrEntry = { ...entry, verdict: flagged ? "QR_SUSPECT" : `QR_${result.verdict}`, names: why.length ? why : ["圖片 QR 內含連結"], score: result.score, review: result.review, reviewModel: result.reviewModel };
+        record({ action: flagged ? "qr-flag" : "none", scanNotify: true, ...qrEntry });
+        learnAudit(message, { kind: "qr", verdict: qrEntry.verdict, reason: why.join("、") });
+        if (flagged) await flagScanNotify(ws, qrEntry);
+      }
+    }
+  }
+  // 看圖：一次呼叫拿判定＋描述（Claude A→B→Meta，同 vision.llm）。
+  const small = shrinkForModel(picture.mime, bytes, vision.maxSide);
+  if (!small) return;
+  const used = {};
+  const started = Date.now();
+  const answer = await complete(vision.llm ?? scamLlm, auditImageSystem(), "請判斷並描述這張圖片。", 400, small, used);
+  const { verdict, reason, desc } = parseAuditImage(answer);
+  const description = cleanDescription(desc, { names });
+  // 去識別化描述也收進延伸學習的圖片項目（延伸學習就不會再描述同一張）。
+  if (extStore && !extStore.has(message.messageId)) {
+    const learned = description.length >= 6 && extStore.add({ kind: "image", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, at: message.createdAt, text: description });
+    if (!learned) extStore.skip(message.messageId);
+  }
+  const entry = { ...base, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: used.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
+  learnAudit(message, { kind: "image", verdict: entry.verdict, reason, desc: description });
+  // 只有確定的 SCAM（理由有具體引流／要錢訊號）才通知；UNSURE／SCAM_WEAK 只記錄。
+  if (verdict === "SCAM") { record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, entry); }
+  else if (verdict === "UNSURE" && isFakeGroupImage(reason)) { record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] }); }
+  else if (verdict !== "SCAM" && (imageNotify(verdict, reason).notify || trackProfitImage(imageNotify(verdict, reason), message))) {
+    const inl = imageNotify(verdict, reason);
+    record({ action: "vision-flag", scanNotify: true, notifyRule: true, ...entry });
+    await flagScanNotify(ws, { ...entry, names: [...(inl.notify ? inl.names : ["同一人 24 小時內第 2 張獲利截圖"]), ...entry.names] });
+  }
+  else record({ action: verdict === "UNSURE" || verdict === "SCAM_WEAK" ? "vision-flag" : "none", scanNotify: true, ...entry, notified: false });
+}
+
 async function handle(ws, message) {
   if (learnOnly.has(message.channelId)) { learnOnlyMessage(message); return; }
   const text = textOf(message);
@@ -1468,10 +1733,72 @@ async function handle(ws, message) {
     remember(message, text);
     return;
   }
+  // 維護者 10/22 15:53（只限踢人群）：仿冒群主／管理員（暱稱正規化後相同／極近似＋同頭像 ID／皇冠符號／特殊符號偽裝）→ 直接刪踢，不需模型。
+  // 只靠看圖模型判「頭像有皇冠」不觸發（10/21 教訓），一定要暱稱仿冒。其他群照舊只通知。
+  if (!trusted && !neverKick(message) && policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick") {
+    const admins = [...(chatAdmins.get(message.channelId)?.values() ?? [])].map((a) => ({ name: a?.name, avatarKey: a?.pictureId ? avatarKey(a.pictureId) : undefined }));
+    const imp = impersonatorKick({ perChatKick: true, protectedMember: false, senderName: message.senderName, avatarKey: message.senderPictureId ? avatarKey(message.senderPictureId) : undefined, admins });
+    if (imp.kick) {
+      const ie = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "IMPERSONATOR", names: ["仿冒群主／管理員暱稱", ...imp.signals], score: strongScore };
+      record({ action: "impersonator-kick", chatId: ie.chatId, messageId: ie.messageId, senderId: ie.senderId, signals: imp.signals });
+      return remove(ws, message, ie);
+    }
+  }
+  // d（10/22 通知層）：同群 ≥2 個非管理員帳號頭像相同，或暱稱 NFKC 相同且像真管理員 → 立即通知（不踢）。
+  if (!trusted && !neverKick(message) && config.notifyLayer?.enabled !== false) {
+    const adminNames = [...(chatAdmins.get(message.channelId)?.values() ?? [])].map((a) => a?.name).filter(Boolean);
+    const look = lookalikes.see({ chatId: message.channelId, senderId: message.senderId, avatarKey: message.senderPictureId ? avatarKey(message.senderPictureId) : undefined, senderName: message.senderName, adminNames });
+    if (look.length) {
+      const le = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "LOOKALIKE", names: look };
+      if (await minerKick(ws, message, le, text)) return;
+      record({ action: "suspect-flag", ...le, notifyRule: true });
+      await notifyAdmins(ws, le, "suspect");
+    }
+  }
   if (!trusted && repeatOffense(message) && hasLineInfo(text)) return punishRepeat(ws, message, { ...contentRef(text) });
   if (!trusted && await checkScamShop(ws, message, text)) return;
   if (!trusted) {
-    const result = await decide(message, text);
+    // 已知短網址服務：唯讀展開（維護者 10/22 F／G）。導向群組邀請 → 判詐騙；購物頁 → 照常判斷，沒處置時在群內提醒勿亂下單；
+    // 其他（文章、教學、文件、影片、GitHub 等正常內容）→ 換成展開後的網址再判斷，不發警告。
+    const extraNames = [];
+    let decideText = text;
+    let shopWarn = false;
+    const shortUrl = sanitizeLinks(text).text.match(SHORT_URL)?.[0];
+    if (shortUrl && config.shortUrlExpand === true) {
+      const expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
+      if (expanded?.invite) extraNames.push("短網址導向群組邀請");
+      else if (expanded?.url && !SHORT_LINK.test(expanded.url)) {
+        shopWarn = isShoppingPage(expanded.html);
+        decideText = text.replace(shortUrl, expanded.url);
+      }
+      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: expanded ? (expanded.invite ? "invite" : shopWarn ? "shopping" : "normal") : "unreachable" });
+    }
+    const perChatKickHere = policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick";
+    let knowledgeLink = false;
+    if (shortUrl && config.shortUrlExpand === true && decideText !== text) {
+      const exp = firstUrl(sanitizeLinks(decideText).text);
+      if (exp && urlKind(exp) === "知識") knowledgeLink = true;
+    }
+    // 「疑似短網址」（短網域＋短路徑，不在已知短網址清單）：也唯讀展開；是知識／社群／技術文件就放行（只在沒開踢人的群）。
+    const susRule = RULES.find((r) => r.name === "疑似短網址");
+    const susUrl = !shortUrl && config.shortUrlExpand === true && !perChatKickHere ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
+    if (susUrl) {
+      const expanded = await expandUrlSafe(/^https?:/i.test(susUrl.trim()) ? susUrl.trim() : `https://${susUrl.trim()}`).catch(() => undefined);
+      if (expanded?.invite) extraNames.push("短網址導向群組邀請");
+      else if (expanded?.url && (isKnowledgePage(expanded.url, expanded.html) || isMainstreamMediaHost((() => { try { return new URL(expanded.url).hostname; } catch { return ""; } })()))) knowledgeLink = true;
+      else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
+      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: expanded ? (expanded.invite ? "invite" : knowledgeLink ? "knowledge" : shopWarn ? "shopping" : "normal") : "unreachable" });
+    }
+    const result = await decide(message, decideText, { extraNames, dropNames: knowledgeLink && !perChatKickHere ? ["疑似短網址"] : [] });
+    if (knowledgeLink) result.knowledgeLink = true;
+    // 16:31 誤判：第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → 只記錄，不通知不標記（不影響刪踢）。
+    // 10/22 22:24 誤判：只因「疑似短網址」（不在清單的短網域，是猜的）被強制判詐，但第一層與覆核都沒判 SCAM → 只記錄（不影響踢人群）。
+    const heuristicOnly = result.forced && forcedScamNames(result.names ?? []).every((n) => n === "疑似短網址") && result.verdict !== "SCAM" && result.review !== "SCAM";
+    if (!perChatKickHere && result.action === "notice" && (knowledgeLink || heuristicOnly || reviewOnlyScam(result))) {
+      record({ action: "review-only-scam-suppressed", heuristicOnly, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, verdict: result.verdict, model: result.model, review: result.review, reviewModel: result.reviewModel, names: result.names, knowledgeLink });
+      result.action = "none";
+      result.suppressed = true;
+    }
     const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
     if (result.kick) {
       remove(ws, message, entry);
@@ -1486,7 +1813,23 @@ async function handle(ws, message) {
     }
     // 日誌只記訊息的短雜湊與字數，不記文字（被踢的詐騙訊息也一樣）。
     // 地端判 OK 且規則 0 分的正常訊息不逐則記錄（避免日誌變對話紀錄），只記可疑或有分數的。
-    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", ...entry });
+    // 4) 網址類型（短網址／知識／購物／群組邀請／其他）記進日誌。
+    const firstLink = firstUrl(sanitizeLinks(text).text);
+    if (firstLink) entry.urlKind = extraNames.includes("短網址導向群組邀請") ? "群組邀請" : knowledgeLink ? "知識" : shopWarn ? "購物" : urlKind(decideText === text ? firstLink : (firstUrl(sanitizeLinks(decideText).text) ?? firstLink), { shorteners: SHORTENERS });
+    // 10/22 通知層（只通知，不改踢人分數、不刪文）：原本沒處置時才看。
+    if (!result.suppressed && result.action !== "notice" && result.action !== "delete" && config.notifyLayer?.enabled !== false) {
+      const extra = textNotifyReasons({ text, chatId: message.channelId, senderId: message.senderId, result, tracker: notifyTracker, shorteners: SHORTENERS, inviteExpanded: extraNames.includes("短網址導向群組邀請"), log: (x) => record({ action: "cross-chat-plain", chatId: message.channelId, messageId: message.messageId, chats: x.crossChatPlain }) });
+      // 踢人群（per-chat kick）：跨群群組邀請、冒充負責人要匯款 → 照踢人群規則可刪踢（Claude＋覆核）；其他群只通知。
+      if (extra.some((r) => MINER_KICKABLE.has(r)) && await minerKick(ws, message, { ...entry, names: [...(result.names ?? []), ...extra] }, text, result)) return;
+      if (extra.length) {
+        result.action = "notice";
+        entry.action = "notice";
+        entry.names = [...(result.names ?? []), ...extra];
+        result.names = entry.names;
+        record({ action: "notify-rule", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: extra, urlKind: entry.urlKind });
+      }
+    } else if (result.verdict === "SCAM") notifyTracker.scam(message.senderId);
+    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK" || entry.urlKind)) record({ action: "none", ...entry });
     // 沒到踢人門檻，但 Meta 判 SCAM 且（規則 ≥ notifyScore，或地端也判 SCAM 且含連結）：引用回覆該則、通知群主與管理員確認，不踢。
     if (result.action === "delete") return deleteScamLink(ws, message, entry);
     // 地端判 SCAM＋含連結，但 Meta 不可用：不處置，只記錄。
@@ -1501,6 +1844,7 @@ async function handle(ws, message) {
       notifyAdmins(ws, entry, "suspect");
       return;
     }
+    if (shopWarn && !result.kick && result.action !== "delete") await shopReminder(ws, message);
     if (result.verdict !== "SKIP" && result.verdict !== "MODEL_UNAVAILABLE") {
       if (lastVerdict.size > 2000) lastVerdict.clear();
       lastVerdict.set(message.messageId, result.verdict);
@@ -1634,14 +1978,27 @@ async function checkImage(ws, message) {
   // 冒名者貼外部網址 QR（引流網址）也算「冒名＋引流」。
   if (/^https?:\/\//i.test(content) && await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_URL" });
   const host = (content.match(/^[a-z]+:\/\/([^/?#\s]+)/i) ?? [])[1]?.replace(/^.*@/, "") ?? "（非網址）";
+  // c（10/22 通知層）：QR 不是 LINE 邀請但解出網址 → 送去規則評分（只通知，不踢不刪）。
+  if (/^https?:\/\//i.test(content) && config.notifyLayer?.enabled !== false) {
+    const qs = ruleScore({ ...message, senderName: "" }, sanitizeLinks(content).text);
+    const qk = urlKind(content, { shorteners: SHORTENERS });
+    if (qk !== "知識" && qs.score >= (config.notifyScore ?? 3)) {
+      const flagged = { ...entry, verdict: "QR_URL_SCORED", score: qs.score, names: ["QR 解出網址評分達通知門檻", ...qs.names], urlKind: qk };
+      record({ action: "qr-flag", ...flagged, qrHost: host, notifyRule: true });
+      return notifyAdmins(ws, flagged, "qr");
+    }
+    return record({ action: "none", ...entry, verdict: "QR_OTHER", qrHost: host, qrScore: qs.score, urlKind: qk });
+  }
   record({ action: "none", ...entry, verdict: "QR_OTHER", qrHost: host });
 }
 
 // ── 看圖模型（沒有 QR code 的圖片） ─────────────────────────────
 const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成員貼出的這張圖片是不是詐騙或詐騙引流：
-投資、飆股、虛擬貨幣的獲利截圖或對帳單，老師帶單，加 LINE 或其他群組的廣告，博弈娛樂城，兼職刷單，假中獎，假客服或假公告，借貸廣告。
+老師帶單招收、加 LINE 或其他群組的廣告、保證獲利、博弈娛樂城、兼職刷單、假中獎、假客服或假公告、借貸廣告。
+看盤圖、K 線、技術分析、交易所或交易工具 App 畫面、網格／交易機器人畫面、持倉、損益或獲利截圖、對帳單，本身都算 OK（投資社群的日常分享）；只有同時在招人加群、跟單、私訊、入金或保證獲利時才算 SCAM。
 一般生活照、風景、食物、寵物、迷因、新聞截圖、一般聊天截圖都算 OK；只是圖裡有數字或文字不代表是詐騙。
 軟體或網站畫面、AI 模型的用量／額度／價格頁、官方服務公告、技術文件、程式碼、終端機、主機設定畫面，都算 OK（這是技術社群的日常分享）。
+假搬家公告（「本群混入詐騙、已建立新群重新審核，請原成員轉移到新群」）是詐騙，算 SCAM，理由寫「要成員轉移到新群」。
 只有圖片本身在「引流或要錢」時才算 SCAM：有 QR code、LINE ID、加好友／加群的邀請、網址，或要人投資、匯款、入金、領獎、兼職接案、色情約會。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行用 20 字內寫你在圖中看到的證據。`;
 
@@ -1673,6 +2030,12 @@ async function drainVision() {
   visionBusy = false;
 }
 
+// 看圖鏈裡的本機模型名稱，與只留雲端節點的複判鏈。
+const singleNode = (node) => ({ ...node, fallback: undefined });
+const localVisionModels = new Set();
+const cloudVisionNodes = [];
+for (let node = vision.llm; node; node = node.fallback) (isLocalModel(singleNode(node)) ? localVisionModels.add(node.model ?? node.capability ?? node.backend ?? "local") : cloudVisionNodes.push(singleNode(node)));
+const cloudVisionChain = cloudVisionNodes.reduceRight((next, node) => ({ ...node, fallback: next }), undefined);
 async function checkWithVision(ws, message, picture) {
   if (kicked.has(`${message.channelId} ${message.senderId}`)) return;
   const small = shrinkForModel(picture.mime, Buffer.from(picture.data, "base64"), vision.maxSide);
@@ -1684,18 +2047,66 @@ async function checkWithVision(ws, message, picture) {
   let verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
   const reason = (lines.slice(1).join(" ").trim() || lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60);
   // 判 SCAM 但理由裡沒有具體的引流／要錢訊號（只是軟體畫面、用量上限、公告…）：不採計，只記成 SCAM_WEAK。
-  if (verdict === "SCAM" && !visionCounts(reason)) verdict = "SCAM_WEAK";
-  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
+  // 理由自相矛盾（說沒有引流／要錢訊號）→ UNSURE；沒有具體訊號 → SCAM_WEAK（都只記錄）。
+  verdict = visionVerdict(verdict, reason);
+  // 本機看圖模型（local-vlm 等）判 SCAM：要雲端（Claude → Grok → Meta）複判也是 SCAM 才算，否則降成 UNSURE（只記錄）。
+  let recheck;
+  if (verdict === "SCAM" && localVisionModels.has(usedVision.model)) {
+    const usedCloud = {};
+    const cloud = cloudVisionChain ? await complete(cloudVisionChain, VISION_SYSTEM, "請判斷這張圖片。", vision.llm?.verdictTokens ?? 80, small, usedCloud) : undefined;
+    const cl = String(cloud ?? "").trim().split(/\n+/);
+    const cloudVerdict = visionVerdict(["SCAM", "UNSURE", "OK"].find((word) => cl[0]?.trim().toUpperCase().startsWith(word)), (cl.slice(1).join(" ").trim() || cl[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60));
+    recheck = { model: usedCloud.model ?? "none", verdict: cloudVerdict ?? "UNAVAILABLE" };
+    if (cloudVerdict !== "SCAM") verdict = "UNSURE";
+  }
+  const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", ...(recheck ? { cloudRecheck: recheck } : {}), seconds: Math.round((Date.now() - started) / 1000) };
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
     record({ action: "vision-flag", ...entry });
-    // 沒有 QR 的截圖一律只記錄：不送 Meta、不發通知（模型會把 AI 模型名稱等誤認成詐騙）。
+    // 例外：圖片假搬家公告（要成員轉移到新群）沒有 QR 也發通知（只通知，不刪不踢）。
+    // 開刪踢的群（踢人群，維護者 10/22 同意）：要求轉移到新群的假群組圖直接當詐騙，照該群踢人條件
+    // （第一層看圖要是 Claude；看圖覆核 Grok → Meta：SCAM 踢、沒回應照踢、OK／UNSURE 只通知）。
+    if (isFakeGroupImage(reason) && policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick") {
+      const usedReview = {};
+      const reviewAnswer = vision.reviewLlm ? await complete(vision.reviewLlm, VISION_SYSTEM, "請判斷這張圖片。", 80, small, usedReview) : undefined;
+      const rv = ["SCAM", "UNSURE", "OK"].find((word) => String(reviewAnswer ?? "").trim().toUpperCase().startsWith(word));
+      const decision = decideChatKick({ score: strongScore, strongScore, verdict: "SCAM", model: usedVision.model, review: rv });
+      const flagged = { ...entry, verdict: "FAKE_GROUP_IMAGE", names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names], review: rv ?? "UNAVAILABLE", reviewModel: usedReview.model };
+      record({ action: "fake-group-image", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, model: entry.model, review: flagged.review, decision });
+      if (decision === "kick" && !neverKick(message)) return remove(ws, message, flagged);
+      await notifyAdmins(ws, flagged, "suspect");
+      return;
+    }
+    if (isFakeGroupImage(reason)) {
+      const flagged = { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] };
+      record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE" });
+      await notifyAdmins(ws, flagged, "suspect");
+      return;
+    }
+    // 10/22 通知層：UNSURE 但是 老師帶單圖＋網址水印／高年化＋QR或網址／多帳號冒充管理員；或同一人 24h 第 2 張純獲利圖 → 通知。
+    const inl = imageNotify(verdict, reason);
+    if (verdict !== "SCAM" && (inl.notify || trackProfitImage(inl, message))) {
+      const flagged = { ...entry, names: [...(inl.notify ? inl.names : ["同一人 24 小時內第 2 張獲利截圖"]), ...entry.names] };
+      record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE", model: entry.model, notifyRule: true });
+      await notifyAdmins(ws, flagged, "suspect");
+      return;
+    }
+    // 判 SCAM（理由有具體引流／要錢訊號、沒有自相矛盾）：發通知給管理員（既有通知管道），不刪不踢；UNSURE 只記錄。
+    if (verdict === "SCAM") {
+      if (inl.names.length > 1) entry.names = [...inl.names.slice(1), ...entry.names];
+      record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: entry.names, verdict: entry.verdict, contentType: "IMAGE", model: entry.model });
+      await notifyAdmins(ws, entry, "suspect");
+      return;
+    }
     if (vision.alertChatId) {
-      ws.send(JSON.stringify({ type: "message:send", requestId: `alert${++requestSeq}`, chatId: vision.alertChatId, text: `⚠️ 疑似詐騙圖片（${verdict === "SCAM" ? "模型判定詐騙" : "可疑"}）\n發送者：${message.senderName}\n理由：${reason || "（未說明）"}\n成員 ID：${message.senderId}` }));
+      ws.send(JSON.stringify({ type: "message:send", requestId: `alert${++requestSeq}`, chatId: vision.alertChatId, text: withAgentLabel(`⚠️ 疑似詐騙圖片（${verdict === "SCAM" ? "模型判定詐騙" : "可疑"}）\n發送者：${message.senderName}\n理由：${reason || "（未說明）"}\n成員 ID：${message.senderId}`) }));
     }
     return;
   }
+  const okInl = imageNotify(verdict, reason);
+  // OK 的獲利／看盤截圖：只記進 24h 追蹤（之後接著貼網址或叫人私訊才算），本身不通知。
+  trackProfitImage(okInl, message);
   record({ action: "none", ...entry });
 }
 
@@ -1964,7 +2375,7 @@ const summaryChain = cloudLlmChain(summaryCfg.llm, process.env.XAI_API_KEY ? SUM
 const summaryState = new SummaryState(resolve(here, "..", summaryCfg.stateFile));
 // 送出失敗的整理暫存（data/，600，不進 git），LINE 恢復後補發；30 分鐘、最多 5 輪。
 const resendQueue = new SummaryResendQueue(resolve(here, "..", summaryCfg.resendFile ?? "data/ai-summary-resend.json"));
-const summaryMaySend = (chatId) => !config.dryRun && !learnOnly.has(chatId) && !(chat.chats && !chat.chats.includes(chatId));
+const summaryMaySend = (chatId) => !config.dryRun && (botCamp.get(chatId)?.summary || (!learnOnly.has(chatId) && !(chat.chats && !chat.chats.includes(chatId))));
 async function runSummaryResend(ws) {
   if (!ws || ws.readyState !== 1 || !resendQueue.jobs().length) return;
   await resendQueue.run({
@@ -1990,7 +2401,7 @@ function flaggedMessageIds() {
     try { content = readFileSync(join(logDir, name), "utf8"); } catch { continue; }
     for (const line of content.split("\n")) {
       if (!line.includes("messageId")) continue;
-      try { const entry = JSON.parse(line); if (entry.messageId && FLAG_ACTIONS.test(entry.action ?? "")) ids.add(entry.messageId); } catch {}
+      try { const entry = JSON.parse(line); if (entry.messageId && isFlagEntry(entry, FLAG_ACTIONS)) ids.add(entry.messageId); } catch {}
     }
   }
   return ids;
@@ -2002,7 +2413,8 @@ async function requestSummary(ws, message, command) {
   if (age > summaryCfg.maxAgeMinutes * 60_000) return record({ action: "ai-summary-skipped", reason: "stale", chatId, messageId: message.messageId, ageSeconds: Math.round(age / 1000) });
   if (repliedIds.has(message.messageId)) return;
   // 本人（本帳號）不限速；其他人每群 cooldownMinutes 分鐘一次。
-  const owner = message.senderId === me || isSelf(chatId, message.senderId);
+  // 機器人訓練群：本人也照冷卻（每群 cooldownMinutes 分鐘一次）。
+  const owner = !botCamp.has(chatId) && (message.senderId === me || isSelf(chatId, message.senderId));
   const state = summaryState.check(chatId, summaryCfg.cooldownMinutes * 60_000, { owner });
   if (!state.ok) {
     record({ action: "ai-summary-skipped", reason: state.running ? "running" : state.told ? "cooldown-told" : "cooldown", chatId, messageId: message.messageId });
@@ -2015,9 +2427,13 @@ async function requestSummary(ws, message, command) {
   }
   markReplied(message.messageId);
   summaryState.start(chatId);
+  // 機器人訓練群：一開始跑就起算冷卻（失敗也算），每群 cooldownMinutes 分鐘只跑一次。
+  if (botCamp.has(chatId)) summaryState.commitAt(chatId);
   try {
     const result = await runSummary(ws, chatId, command);
-    const delivery = await deliverSummary(ws, message, result.sections);
+    // 機器人訓練群：只送主整理（不送附加整理）。
+    const sections = botCamp.has(chatId) ? result.sections.filter((section) => section.role === "primary") : result.sections;
+    const delivery = await deliverSummary(ws, message, sections);
     // 冷卻只在主整理真的送出後才算；沒送出（失敗、當機、重啟）就不佔冷卻。附加整理沒送完記為 partial。
     if (delivery.commit) summaryState.commit(chatId);
     record({ action: "ai-summary", chatId, messageId: message.messageId, ...result.stats, sent: delivery.sent, status: delivery.status, delivery: delivery.sections });
@@ -2140,7 +2556,8 @@ async function deliverSummary(ws, target, sections) {
   for (const section of sections) if (report.find((r) => r.name === section.name)?.skipped) for (const part of section.parts) flat.push({ section: section.name, role: section.role, text: labelReply(part, replyLabel), ok: false });
   const result = { ...summaryDelivery(report), sections: report, sent: report.reduce((n, r) => n + r.sent, 0) };
   // 有沒送出的（逾時也算，補發前會先比對伺服器避免重複）：暫存等 LINE 恢復再補。
-  if (flat.some((p) => !p.ok) && summaryMaySend(target.channelId)) {
+  // 機器人訓練群：同一次整理最多送一次，不補發。
+  if (flat.some((p) => !p.ok) && summaryMaySend(target.channelId) && !botCamp.has(target.channelId)) {
     const job = resendQueue.add({ chatId: target.channelId, replyTo: target.messageId, parts: flat, sent: flat.map((p) => p.ok), committed: result.commit });
     if (job) { result.resendJob = job.id; record({ action: "ai-summary-resend-queued", chatId: target.channelId, jobId: job.id, unsent: flat.filter((p) => !p.ok).length }); }
   }
@@ -2413,6 +2830,156 @@ let historyRun = 0;
 // 還沒補掃完的聊天室 → 斷線前的水位。只在第一次拍下，補掃成功才清掉：
 // 中途又重連（新的一輪取代舊的一輪）或抓取失敗，都不會因為期間有新訊息把水位往前推而跳過斷線期間的訊息。
 const pendingBase = new Map();
+
+// ── 延伸學習（只學習群＋learnExt）：討論串、圖片描述、每日學習筆記 ──────────
+// 不判詐騙、不通知、不發任何訊息；圖片不存原圖，只存去識別化描述。設定：config.learnExt 可覆寫 LEARN_EXT_DEFAULTS。
+const learnExtCfg = { ...LEARN_EXT_DEFAULTS, ...config.learnExt };
+const learnExtDir = resolve(here, "..", learnExtCfg.dir ?? "data/learn-ext");
+const learnNotesDir = resolve(here, "..", learnExtCfg.notesDir ?? "data/learn-notes");
+const extStore = learnExt.size && memory ? new LearnExtStore(learnExtDir, { salt: memory.salt, retentionDays: learnExtCfg.retentionDays, maxEntries: learnExtCfg.maxEntries }) : undefined;
+const imageCap = makeHourlyCap(learnExtCfg.imagesPerHour);
+const extImageQueue = [];
+const extThreads = new Map(); // 聊天室 → 待讀的討論串 id
+let extBusy = false;
+function learnExtNote(message, { fromHistory = false } = {}) {
+  if (!extStore || message.unsent || isSelf(message.channelId, message.senderId) || message.senderId === me) return;
+  if (message.threadId) { const set = extThreads.get(message.channelId) ?? new Set(); set.add(message.threadId); extThreads.set(message.channelId, set); }
+  if (!fromHistory && message.contentType === "IMAGE" && !auditsImage(message) && !extStore.has(message.messageId) && extImageQueue.length < 50) { extImageQueue.push(message); void drainExtImages(); }
+}
+async function drainExtImages() {
+  if (extBusy || !currentWs) return;
+  extBusy = true;
+  try { while (extImageQueue.length && imageCap.used() < learnExtCfg.imagesPerHour) await learnImage(currentWs, extImageQueue.shift()); }
+  finally { extBusy = false; }
+}
+async function learnImage(ws, message) {
+  if (!extStore || extStore.has(message.messageId)) return false;
+  if (!imageCap.take()) { record({ action: "learn-ext-image-skipped", reason: "hourly-cap", chatId: message.channelId, messageId: message.messageId }); return false; }
+  const used = {};
+  const text = await describeImage(ws, message, used);
+  if (text === undefined) return false;
+  const learned = text.length >= 6 && extStore.add({ kind: "image", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, at: message.createdAt, text });
+  if (!learned) extStore.skip(message.messageId);
+  record({ action: "learn-ext-image", chatId: message.channelId, messageId: message.messageId, learned, model: used.model ?? "none" });
+  return learned;
+}
+/** 抓圖並產生去識別化描述；抓不到回 undefined，沒有可學的回空字串。 */
+async function describeImage(ws, message, used = {}) {
+  const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
+  if (picture.type !== "media") { record({ action: "learn-ext-image-failed", chatId: message.channelId, messageId: message.messageId, code: picture.code }); return undefined; }
+  const small = shrinkForModel(picture.mime, Buffer.from(picture.data, "base64"), vision.maxSide);
+  if (!small) return "";
+  const answer = await complete(learnExtCfg.llm ?? vision.llm ?? scamLlm, IMAGE_LEARN_SYSTEM, "請描述這張圖片。", 400, small, used);
+  return cleanDescription(answer, { names: [message.senderName, ...ownerNames].filter(Boolean) });
+}
+/** 修正被舊規則誤遮的項目：從原訊息重新產生（文字重新去識別化、圖片重新描述），不從遮罩還原任何內容。 */
+async function repairMisMasked(ws, chatId, page, names) {
+  const broken = extStore.needsRepair();
+  if (!broken.length) return 0;
+  const chatKey = extStore.key("chat", chatId);
+  const byMid = new Map(page.messages.map((m) => [extStore.key("msg", m.messageId), m]));
+  // 要修的原訊息不在最新一頁：往前多翻幾頁（最多 5 頁，唯讀）。
+  let cursor = page.hasMore ? page.cursor : undefined;
+  for (let n = 0; n < 5 && cursor && broken.some((x) => x.chat === chatKey && !byMid.has(x.mid)); n++) {
+    const older = await call(ws, { type: "history:fetch", chatId, limit: 100, before: cursor }, 180_000);
+    if (older.type !== "history") break;
+    for (const m of older.messages) byMid.set(extStore.key("msg", m.messageId), m);
+    cursor = older.hasMore ? older.cursor : undefined;
+  }
+  let fixed = 0;
+  for (const item of broken) {
+    const m = item.chat === chatKey ? byMid.get(item.mid) : undefined;
+    if (!m) continue;
+    let text;
+    if (item.kind === "image") { if (!imageCap.take()) break; text = await describeImage(ws, m); }
+    else text = cleanText(textOf(m), { names: [...names].filter(Boolean), maxChars: 300 });
+    if (text && extStore.replaceText(item.mid, text)) fixed += 1;
+  }
+  record({ action: "learn-ext-repair", chatId, broken: broken.filter((x) => x.chat === chatKey).length, fixed });
+  return fixed;
+}
+async function learnThreads(ws, chatId, threadIds, names) {
+  let threads = 0, messages = 0;
+  for (const threadId of [...threadIds].slice(0, learnExtCfg.threadsPerRun)) {
+    const answer = await call(ws, { type: "thread:fetch", chatId, threadId, limit: learnExtCfg.threadMessages }, 60_000);
+    if (answer.type !== "thread") { record({ action: "learn-ext-thread-failed", chatId, code: answer.code }); if (answer.code === "THREADS_UNSUPPORTED" || answer.code === "UNKNOWN_TYPE") break; continue; }
+    threads += 1;
+    for (const m of answer.messages ?? []) names.add(m.senderName);
+    for (const m of answer.messages ?? []) {
+      const text = textOf(m);
+      if (!text || m.unsent || isSelf(chatId, m.senderId) || m.senderId === me) continue;
+      learnCommunity(m, text, { fromHistory: true });
+      if (extStore.add({ kind: "thread", chatId, messageId: m.messageId, senderId: m.senderId, at: m.createdAt, threadId, replyTo: m.replyTo, root: m.threadRoot, text: cleanText(text, { names: [...names].filter(Boolean), maxChars: 300 }) })) messages += 1;
+    }
+    extThreads.get(chatId)?.delete(threadId);
+  }
+  return { threads, messages };
+}
+/** 筆記裡的群名稱：groupPolicies[id].learnExtLabel（自訂、去識別化的稱呼），沒設就用「群 N」。 */
+const learnExtLabel = (chatId, index) => sectionLabel(policyOf(chatId), index);
+async function writeDigest(chatIds, names, { force = false } = {}) {
+  if (!memory || !digestDue(learnNotesDir, { digestHour: learnExtCfg.digestHour, force })) return undefined;
+  const since = listNotes(learnNotesDir).length ? Date.now() - 86_400_000 : Date.now() - 7 * 86_400_000;
+  const parts = []; const total = { messages: 0, threads: 0, threadMessages: 0, images: 0 };
+  for (const [index, chatId] of chatIds.entries()) {
+    const { text, counts } = buildDigestInput({ messages: memory.older(chatId, Infinity, since), extItems: extStore.since(chatId, since) }, learnExtCfg.maxDigestInputChars);
+    for (const k of Object.keys(total)) total[k] += counts[k] ?? 0;
+    if (!counts.messages && !counts.threadMessages && !counts.images) continue;
+    const used = {};
+    const answer = await complete(learnExtCfg.digestLlm ?? summaryCfg.llm ?? chatLlm, DIGEST_SYSTEM, text, 2000, undefined, used);
+    if (!answer) { record({ action: "learn-notes-failed", chatId }); continue; }
+    parts.push(`${chatIds.length > 1 ? `# ${learnExtLabel(chatId, index)}\n\n` : ""}${cleanNotes(answer, { names: [...names].filter((n) => n && !ownerNames.includes(n)) })}`);
+    record({ action: "learn-notes", chatId, model: used.model ?? "none", ...counts });
+  }
+  if (!parts.length) return undefined;
+  return writeNotes(learnNotesDir, localDate(), parts.join("\n\n---\n\n"), total);
+}
+async function runLearnExt(ws, { force = false } = {}) {
+  if (!extStore || extBusy || ws?.readyState !== WebSocket.OPEN) return;
+  extBusy = true;
+  const names = new Set();
+  try {
+    for (const chatId of learnExt) {
+      const page = await call(ws, { type: "history:fetch", chatId, limit: 100 }, 180_000);
+      if (page.type !== "history") { record({ action: "learn-ext-history-failed", chatId, code: page.code }); continue; }
+      const threadIds = new Set(extThreads.get(chatId) ?? []);
+      let images = 0;
+      for (const m of page.messages) {
+        names.add(m.senderName);
+        if (m.threadId) threadIds.add(m.threadId);
+      }
+      for (const m of page.messages) {
+        if (m.contentType !== "IMAGE" || m.unsent || isSelf(chatId, m.senderId) || m.senderId === me || extStore.has(m.messageId)) continue;
+        if (imageCap.used() >= learnExtCfg.imagesPerHour) break;
+        if (await learnImage(ws, m)) images += 1;
+      }
+      // 回覆串（一般訊息裡的「回覆」）：保留串頭與回覆誰的結構（雜湊），文字去識別化。
+      let replies = 0;
+      for (const { message: m, rootId, root } of replyChains(page.messages)) {
+        const text = textOf(m);
+        if (!text || m.unsent || isSelf(chatId, m.senderId) || m.senderId === me) continue;
+        if (extStore.add({ kind: "reply", chatId, messageId: m.messageId, senderId: m.senderId, at: m.createdAt, threadId: `reply:${rootId}`, replyTo: m.replyTo, root, text: cleanText(text, { names: [...names].filter(Boolean), maxChars: 300 }) })) replies += 1;
+      }
+      const t = threadIds.size ? await learnThreads(ws, chatId, threadIds, names) : { threads: 0, messages: 0 };
+      await repairMisMasked(ws, chatId, page, names);
+      memory?.save();
+      record({ action: "learn-ext-run", chatId, images, replies, threadsSeen: threadIds.size, threads: t.threads, threadMessages: t.messages, force });
+    }
+    await writeDigest([...learnExt], names, { force });
+  } catch (error) { recordError("learn-ext", String(error?.message ?? error).slice(0, 80)); }
+  finally { extBusy = false; }
+}
+if (extStore) {
+  setInterval(() => { if (currentWs) void runLearnExt(currentWs); }, Math.max(15, learnExtCfg.intervalMinutes) * 60_000).unref?.();
+  // 手動觸發：data/learn-ext/run-now（node guard/learn-notes.mjs --run-now 會建立），一分鐘內跑一次並寫筆記。
+  setInterval(() => {
+    const flag = join(learnExtDir, "run-now");
+    if (!existsSync(flag) || !currentWs) return;
+    try { unlinkSync(flag); } catch {}
+    void runLearnExt(currentWs, { force: true });
+  }, 60_000).unref?.();
+}
+
 let lastChannels = [];
 let currentWs;
 /** 一次只抓一個聊天室（伺服器的社群歷史快取只放 5 個，同時抓 8 個會互相擠掉而失敗）；失敗依 retryDelaysSeconds 退避重試。 */
@@ -2537,7 +3104,7 @@ function connect() {
       if (frame.requestId !== undefined) setImmediate(() => ws.emit("message", Buffer.from(JSON.stringify({ type: "error", requestId: frame.requestId, code: "WARN_ONLY", message: "warn-only chat" }))));
       return;
     }
-    if (blockedForLearnOnly(frame, learnOnly)) {
+    if (blockedForLearnOnly(frame, learnOnly, { mediaChats: mediaLearnChats, sendChats: botCamp })) {
       record({ action: "learn-only-blocked", chatId: frame.chatId, frameType: frame.type });
       if (frame.requestId !== undefined) setImmediate(() => ws.emit("message", Buffer.from(JSON.stringify({ type: "error", requestId: frame.requestId, code: "LEARN_ONLY", message: "learn-only chat" }))));
       return;
@@ -2567,8 +3134,10 @@ function connect() {
         for (const channel of frame.channels) { channelSquare.set(channel.channelId, squareKey(channel.name) || channel.channelId); channelNames.set(channel.channelId, channel.name); }
         if (frame.channels.length) { lastChannels = frame.channels; currentWs = ws; }
         console.log(`守護中的聊天室：${frame.channels.filter((channel) => !learnOnly.has(channel.channelId)).map((channel) => channel.name).join("、") || "（無，請檢查 config.yaml 的 api.chats）"}`);
+        { const kickChats = frame.channels.filter((channel) => kickMode === "notify" && chatKickMode(channel.channelId) === "kick"); if (kickChats.length) console.log(`例外開刪除＋踢人的聊天室（全域 notify）：${kickChats.map((channel) => channel.name).join("、")}`); }
         if (warnOnly.size) console.log(`只警告的聊天室（不踢、不刪，只發通知）：${frame.channels.filter((channel) => warnOnly.has(channel.channelId)).map((channel) => channel.name).join("、") || "（無）"}`);
-        if (learnOnly.size) console.log(`只學習的聊天室（不判斷、不發送）：${frame.channels.filter((channel) => learnOnly.has(channel.channelId)).map((channel) => channel.name).join("、") || "（無）"}`);
+        if (scanNotify.size) console.log(`只學習＋判斷通知的聊天室（判文字／連結／圖片，只發通知，不刪不踢）：${frame.channels.filter((channel) => scanNotify.has(channel.channelId)).map((channel) => channel.name).join("、") || "（無）"}`);
+        if (learnOnly.size) console.log(`只學習的聊天室（不判斷、不發送）：${frame.channels.filter((channel) => learnOnly.has(channel.channelId) && !scanNotify.has(channel.channelId)).map((channel) => channel.name).join("、") || "（無）"}`);
         // 逐一抓各群最近訊息：認識管理員（冒名者一出現就認得出來）、補回漏掉的 @，並補掃斷線期間的訊息。
         void syncHistory(ws, frame.channels);
         setTimeout(() => { void runSummaryResend(ws).catch(() => {}); }, 15_000);
@@ -2582,7 +3151,13 @@ function connect() {
         watermarks.bump(message.channelId, message.createdAt);
         if (seenIds.has(message.messageId)) return;
         markSeen(message.messageId);
-        if (learnOnly.has(message.channelId)) { learnOnlyMessage(message); return; }
+        if (learnOnly.has(message.channelId)) {
+          // 機器人訓練群：先開始回覆（不等學習、延伸學習），再收進參考資料。
+          if (botCamp.has(message.channelId)) void botCampAct(ws, message, Date.now()).catch((error) => recordError("bot-camp", String(error?.message ?? error).slice(0, 80)));
+          learnOnlyMessage(message);
+          if (scanNotify.has(message.channelId)) void scanNotifyMessage(ws, message).catch((error) => recordError("scan-notify", String(error?.message ?? error).slice(0, 80)));
+          return;
+        }
         queue.push(message);
         void drain(ws);
         return;

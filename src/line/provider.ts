@@ -1,3 +1,4 @@
+import { threadMessagesFromEvents, type ThreadEvent, type ThreadEventRaw } from "./threads.js";
 import { Client } from "@evex/linejs";
 import { BaseClient, type Device, type FetchLike } from "@evex/linejs/base";
 import { LINEStruct } from "@evex/linejs/thrift";
@@ -96,6 +97,8 @@ export interface LineProvider {
   ownInvite?(chatId: string): Promise<{ squareMid: string; links: string[] }>;
   /** Read-only: which OpenChat an invitation ticket belongs to (does not join). Undefined when LINE does not know it. */
   lookupInvite?(ticket: string): Promise<{ squareMid: string } | undefined>;
+  /** Read-only: messages of one OpenChat thread (討論串), oldest first. Never joins the thread. */
+  fetchSquareThread?(chatId: string, threadId: string, limit: number): Promise<Message[]>;
   close(): Promise<void>;
 }
 
@@ -481,12 +484,40 @@ export class EvexLineProvider implements LineProvider {
     const message = raw.message;
     // History events carry the sender's display name; live events only carry a member mid.
     if (senderName) this.rememberName(message.from, senderName);
-    return this.toMessage({
+    return this.withThread(this.toMessage({
       id: message.id, channelId: message.to, channelKind: "square", senderId: message.from, text: message.text, contentType: String(message.contentType),
       createdTime: message.createdTime, encrypted: (message.chunks?.length ?? 0) > 0, metadata: message.contentMetadata,
       mediaId: preview ? undefined : this.rememberMedia(message, true), replyTo: replyTarget(message.messageRelationType, message.relatedMessageId), location: message.location,
       reactions: squareReactions(reactionStatus),
-    });
+    }), raw);
+  }
+
+  private withThread(message: Message, raw: LineSquareMessage): Message {
+    const info = (raw as { threadInfo?: { chatThreadMid?: string; threadRoot?: boolean } }).threadInfo;
+    if (info?.chatThreadMid) { message.threadId = info.chatThreadMid; if (info.threadRoot) message.threadRoot = true; }
+    return message;
+  }
+
+  async fetchSquareThread(chatId: string, threadId: string, limit: number): Promise<Message[]> {
+    const client = this.requireClient();
+    const found: Array<{ raw: LineSquareMessage; name?: string }> = [];
+    let token: { syncToken?: string; continuationToken?: string } = {};
+    for (let page = 0; page < 3 && found.length < limit; page += 1) {
+      const response = await client.base.square.fetchSquareChatEvents({
+        squareChatMid: chatId, threadMid: threadId, limit: Math.min(100, limit), ...token,
+      } as Parameters<Client["base"]["square"]["fetchSquareChatEvents"]>[0]);
+      if (this.client !== client) throw new Error("HISTORY_INVALIDATED");
+      found.push(...threadMessagesFromEvents<LineSquareMessage & ThreadEventRaw>(response.events as unknown as ThreadEvent[], chatId));
+      if (response.events.length === 0 || !response.continuationToken) break;
+      token = { syncToken: response.syncToken, continuationToken: response.continuationToken };
+    }
+    const byId = new Map<string, Message>();
+    for (const { raw, name } of found) {
+      const message = this.squareToMessage(raw, name, true);
+      if (!message.threadId) message.threadId = threadId;
+      byId.set(message.messageId, message);
+    }
+    return [...byId.values()].sort((a, b) => this.compareSquareMessages(a, b)).slice(-limit);
   }
 
   /** Fail closed: an E2EE message that cannot be decrypted stays a "cannot decrypt" placeholder, never a guess. */

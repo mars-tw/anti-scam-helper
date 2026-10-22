@@ -47,7 +47,14 @@ export function stripMentions(text, mentions = []) {
  * 只有伺服器明確拒絕（沒送出）才退一步；逾時（可能已送出）或限流就停，避免重複發。
  * @param send (frame) => Promise<reply>，reply.type 為 "sent" 或 "error"（含 code）
  */
+export const NOTICE_LABEL = "（AI代理）";
+/** 守門員送進群的每則訊息結尾都帶（AI代理）；已經有就不重複加（加在結尾，不影響 @ 位置）。 */
+export function withAgentLabel(text) {
+  const body = String(text ?? "");
+  return body.includes(NOTICE_LABEL) ? body : `${body.replace(/\s+$/, "")}${NOTICE_LABEL}`;
+}
 export async function sendNotice(send, { chatId, text, mentions = [], replyTo }) {
+  text = withAgentLabel(text);
   const attempts = [];
   const plain = mentions.length ? stripMentions(text, mentions) : text;
   const add = (withReply, withMentions) => {

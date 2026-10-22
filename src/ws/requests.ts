@@ -153,3 +153,16 @@ export function parseRemove(frame: Record<string, unknown>): Parsed<RemoveReques
   if (deleteMessage !== undefined && typeof deleteMessage !== "boolean") return { ok: false, requestId: parsed.value.requestId };
   return { ok: true, value: { ...parsed.value, deleteMessage: deleteMessage === true } };
 }
+
+export const THREAD_ID = /^[A-Za-z0-9_-]{8,80}$/;
+export const MAX_THREAD_LIMIT = 100;
+export interface ThreadRequest { requestId: string; chatId: string; threadId: string; limit: number }
+/** Read-only "messages of one OpenChat thread (討論串)". */
+export function parseThreadFetch(frame: Record<string, unknown>): Parsed<ThreadRequest> {
+  const base = header(frame);
+  if (!base) return { ok: false, ...(requestIdOf(frame) ? { requestId: requestIdOf(frame)! } : {}) };
+  if (typeof frame.threadId !== "string" || !THREAD_ID.test(frame.threadId)) return { ok: false, requestId: base.requestId };
+  const limit = frame.limit === undefined ? 50 : frame.limit;
+  if (!positiveInteger(limit) || limit > MAX_THREAD_LIMIT) return { ok: false, requestId: base.requestId };
+  return { ok: true, value: { ...base, threadId: frame.threadId, limit } };
+}

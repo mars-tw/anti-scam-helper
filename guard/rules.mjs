@@ -4,7 +4,13 @@
 import { analyzeName } from "./fakeadmin.mjs";
 
 // 常見短網址服務（貼這些等於看不到真正的目的地）。
-export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.co", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "ada.nz", "cutt.us", "tny.im", "u.nu", "n9.cl", "surl.li", "ouo.io", "shrtco.de", "9m.no", "t.cn", "kutt.it", "han.gl", "me2.do", "vo.la", "sor.bz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im"];
+export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "ada.nz", "cutt.us", "tny.im", "u.nu", "n9.cl", "surl.li", "ouo.io", "shrtco.de", "9m.no", "t.cn", "kutt.it", "han.gl", "me2.do", "vo.la", "sor.bz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im", "supr.link"];
+
+// 平台官方短網址（影音、社群、地圖、主流電商自家的分享連結）：目的地一定在該平台上，不算「看不到目的地的短網址」，
+// 也不算詐騙依據（LINE 的 lin.ee 例外：照 LINE 邀請規則判斷）。
+export const PLATFORM_SHORTENERS = ["youtu.be", "b23.tv", "t.co", "fb.me", "fb.watch", "redd.it", "amzn.to", "amzn.asia", "a.co", "shp.ee", "s.shopee.tw", "s.click.taobao.com", "m.tb.cn", "xhslink.com", "v.douyin.com", "vm.tiktok.com", "vt.tiktok.com", "spoti.fi", "apple.co", "goo.gl/maps", "maps.app.goo.gl", "g.co", "msft.it", "aka.ms", "nyti.ms", "wp.me", "dlvr.it", "ift.tt", "lnkd.in", "pin.it"];
+// 主流影音／社群／新聞／交易所等網站：網址本身不加分（規則另外看引流字眼）。
+export const MAINSTREAM_CONTENT_DOMAINS = ["youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "bilibili.com", "b23.tv", "twitch.tv", "tiktok.com", "douyin.com", "xiaohongshu.com", "instagram.com", "facebook.com", "fb.watch", "threads.net", "threads.com", "x.com", "twitter.com", "reddit.com", "podcasts.apple.com", "open.spotify.com", "spotify.com", "soundcloud.com", "dcard.tw", "ptt.cc", "mobile01.com", "bahamut.com.tw", "gamer.com.tw", "pixnet.net", "vocus.cc", "substack.com", "dev.to", "zhihu.com", "weibo.com", "linkedin.com", "pinterest.com", "news.google.com", "udn.com", "ltn.com.tw", "chinatimes.com", "ettoday.net", "setn.com", "tvbs.com.tw", "cna.com.tw", "pts.org.tw", "storm.mg", "thenewslens.com", "technews.tw", "ithome.com.tw", "inside.com.tw", "bnext.com.tw", "businessweekly.com.tw", "cw.com.tw", "bbc.com", "bbc.co.uk", "cnn.com", "nytimes.com", "reuters.com", "bloomberg.com", "theverge.com", "techcrunch.com", "wired.com", "engadget.com", "nikkei.com", "tradingview.com", "pionex.com", "binance.com", "okx.com", "bybit.com", "bitget.com", "coinmarketcap.com", "coingecko.com", "max.maicoin.com", "bitopro.com", "investing.com", "cnyes.com", "shopee.tw", "momoshop.com.tw", "pchome.com.tw", "books.com.tw", "amazon.co.jp", "rakuten.com.tw", "taobao.com", "tmall.com", "jd.com"];
 
 // 詢問或提醒詐騙（「這是詐騙嗎」「是不是詐騙」「有人收到這個嗎」「這可信嗎」「小心詐騙」）：扣分，也是 questionRedact 認定「詢問者」的依據。
 export const ASK_SCAM = /(這|那)(個|些|則|種)?(是|應該是|根本是|算)詐騙|是詐騙嗎|詐騙嗎|是不是(詐騙|詐團|騙人|騙局|假的)|是(真|假)的嗎|有(人|沒有人)(也)?收到(這|類似|一樣)|(這|那)(個|種|則)?.{0,4}(可信|能信|可以信|靠譜|安全)(嗎|不)|可信嗎|(不要|別|勿|千萬別)(點|加入|相信|匯款|上當|理)|冒充|假冒|165\s*(查證|反詐|專線)?|小心(詐騙|被騙|上當)|(有人|大家).{0,6}(被騙|遇過|知道.{0,6}(真假|詐騙))/;
@@ -30,6 +36,25 @@ export const RULES = [
   { name: "假群組連結", score: 6, pattern: /(請|大家|各位|所有人|全體|麻煩).{0,6}(加入|進入|前往|移至|轉到)(到)?(我們的?)?新(的)?(群|社群|群組|社團)|(本|此|這個?|原|舊)(群|社群|群組|社團)(決定|宣布|將於|於|明天|明日|明早|今天|今晚|即將|馬上|稍後|近期|將|要|會|已經|已|準備)+.{0,3}(被)?(刪除|刪掉|解散|關閉|停用|作廢|不再使用)|(群|社群|群組|社團)(決定|宣布|將於|明天|明日|明早|今天|今晚|即將|馬上|稍後|近期|將|要|會)+.{0,4}(被)?(刪除|刪掉|解散|關閉|停用)|新(的)?(群|社群|群組|社團)(連結|網址|入口|QR|qr)?(如下|在這|在此|點這|點此|請點|[:：👉⬇↓])|請(大家|各位|所有人|全體)?.{0,6}(移步|轉移|前往|加入|點擊?)(到|至)?(新|另一?個|備用)(的)?(群|社群|群組|社團)|(廣告|騷擾|詐騙)(太多|過多|很多|嚴重).{0,24}(解散|關閉|刪除|新(群|社群|群組|社團))/ },
   // 換群（單獨出現）：可能只是在聊天或提醒別人，只送覆核、不夠踢人分數。
   { name: "疑似假群組", score: 3, pattern: /換(新)?(群|社群|群組)|(群|社群|群組)(搬|換|轉)(新)?(家|位置|地方)/ },
+  // 假冒知名廠商／官方名義邀請加入群組（例：短網址落地頁假裝是某旅行社、品牌官方，實際跳到外部 LINE 社群邀請）。
+  // 只加 2 分：單獨出現只送覆核；不改踢人門檻。
+  { name: "假冒官方邀請入群", score: 2, pattern: /(官方|原廠|總公司|總部|品牌|公司|旅行社|銀行|航空|券商|客服中心|粉絲團).{0,12}(誠邀|邀請|邀您|歡迎|開放).{0,10}(加入|進入|入|免費加入).{0,8}(群|社群|群組|LINE\s*群|VIP|會員群|福利群)|(官方|專屬|VIP|會員|福利|優惠|粉絲)\s*(LINE)?\s*(社群|群組|交流群|福利群).{0,12}(點擊|點此|點我|請按|連結|加入|入群)/i },
+  // 知名廠商通常用 LINE 官方帳號（@ 開頭，line.me/R/ti/p/@…）。自稱官方／品牌卻導向一般群組、社群邀請或個人帳號 → 加重。
+  { name: "官方名義導向群組", score: 2, pattern: /^(?=[\s\S]*(官方|原廠|總公司|總部|品牌|旅行社|銀行|航空|券商|客服))(?=[\s\S]*(line\.me\/(?:R\/)?ti\/(?:g2?|p\/~)\/?|line\.me\/ti\/g2\/|(?:社群|群組).{0,6}(邀請|連結)))/i },
+  // 有 @ 官方帳號連結只稍微減分，不是白名單（也有未認證的假官方帳號）。
+  { name: "LINE 官方帳號連結", score: -1, pattern: /line\.me\/(?:R\/)?ti\/p\/@|line\.me\/R\/ti\/p\/%40/i },
+  // 沒在清單裡的短網址：很短的網域（≤5 字＋2～3 字尾碼）＋只有短代碼路徑（可帶 /r/、/s/、/go/）。基本可疑分，避免一直靠清單補。
+  { name: "疑似短網址", score: 2, onBenignStripped: true, normalOnly: true, pattern: new RegExp(`(?<![\\w.@-])(?:https?:\\/\\/)?(?!(?:${SHORTENERS.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\/)[a-z0-9-]{1,5}\\.[a-z]{2,3}\\/(?:(?:r|s|go|l)\\/)?[A-Za-z0-9_-]{2,10}(?![\\w\\/.-])`, "i") },
+  // 催大家加入新群／轉移到新群（假搬家的後續訊息，常見「還沒加入的請儘快申請進群」）。
+  { name: "催促加入新群", score: 3, pattern: /(轉移|移轉|移動|遷移)(到|至)?(新|另一?個)(群|社群|群組)|新(群|社群|群組).{0,8}(重新)?審核(成員)?|(儘快|盡快|趕快|趕緊).{0,6}(申請)?(進群|入群|加入新(群|社群))|還沒(有)?加入的.{0,8}(請|儘快|盡快|趕快)/ },
+  // 仿冒精品：1:1／複刻／高仿／原單／尾單／AAA 這類用語＋連結。
+  { name: "仿冒精品連結", score: 3, pattern: /^(?=[\s\S]*(1\s*[:：比]\s*1|複刻|復刻|高仿|原單|尾單|A{3}級?|頂級(精品|名牌)|精品.{0,4}(複刻|高仿|代購)))(?=[\s\S]*(https?:\/\/|(?:[a-z0-9-]+\.)+[a-z]{2,}\/))/i },
+  // 數字子網域＋短路徑（6786.xxx.net/ck3 這類輪換網址）。
+  { name: "數字子網域短路徑", score: 2, normalOnly: true, pattern: /(?<![\w.@-])(?:https?:\/\/)?\d{2,6}\.[a-z0-9-]+\.[a-z]{2,4}\/[A-Za-z0-9_-]{1,10}\/?(?![\w\/.-])/i },
+  // 免費子網域（xxx.eu.cc 等）：常被拿來架一次性詐騙頁。
+  { name: "免費子網域", score: 2, normalOnly: true, pattern: /(?<![\w.@-])(?:https?:\/\/)?[a-z0-9-]+\.(?:eu\.cc|us\.kg|eu\.org|pp\.ua|dpdns\.org|qzz\.io|ccwu\.cc|cn\.eu\.org)(?![a-z0-9-])/i },
+  // 群組／社群邀請連結（line.me/ti/g、ti/g2、R/ti/g、openchat）：維護者 10/22 起只有真管理員與白名單可以發（他們在更前面就略過）。
+  { name: "群組邀請連結", score: 3, pattern: /line\.me\/(?:R\/)?ti\/g2?\/|openchat\.line\.me\//i },
   { name: "中獎客服", score: 2, pattern: /恭喜.{0,8}(中獎|抽中)|領取獎(金|品)|解除分期|誤設.{0,4}分期|重複扣款|客服通知|帳戶(異常|凍結)|驗證身分.{0,6}連結|實名驗證|開通金流|ATM.{0,6}(操作|解除)|無卡提款|遊戲點數/i },
   { name: "愛情交友", score: 2, pattern: /(軍醫|戰地|聯合國|維和).{0,8}(醫生|軍官|官員|部隊)?.{0,15}(包裹|禮物|關稅|匯|投資)|(包裹|禮物).{0,8}(海關|關稅)|結婚基金/ },
   { name: "盜帳號／收帳戶", score: 3, pattern: /(幫忙|幫我)投票.{0,15}(網址|連結|登入|https?:)|(傳|給|提供).{0,6}(簡訊)?(驗證碼|認證碼)|(驗證碼|認證碼).{0,10}(傳給我|給我|告訴我|截圖給我)|收購.{0,4}(帳戶|帳號|存摺)|(出租|租借|提供)(帳戶|存摺|提款卡)|出國.{0,4}(打工|工作).{0,6}高薪/ },
@@ -42,7 +67,7 @@ export const RULES = [
 ];
 
 // 正常技術、地圖、影音、官方網站：不因為「有網址」加分（短網址、LINE 邀請另外計）。
-export const DEFAULT_BENIGN_DOMAINS = ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "nvidia.com", "amd.com", "intel.com", "amazon.com", "aws.amazon.com", "cloudflare.com", "ibm.com", "oracle.com", "adobe.com", "samsung.com", "tsmc.com", "asus.com", "docker.com", "python.org", "nodejs.org", "mozilla.org", "kaggle.com", "arxiv.org", "mistral.ai", "deepseek.com", "perplexity.ai", "ollama.com", "openrouter.ai", "vercel.com", "azure.com", "bitbucket.org", "antigravity.google", "docs.", "developer."];
+export const DEFAULT_BENIGN_DOMAINS = ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "bilibili.com", "twitch.tv", "instagram.com", "fb.watch", "reddit.com", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "nvidia.com", "amd.com", "intel.com", "amazon.com", "aws.amazon.com", "cloudflare.com", "ibm.com", "oracle.com", "adobe.com", "samsung.com", "tsmc.com", "asus.com", "docker.com", "python.org", "nodejs.org", "mozilla.org", "kaggle.com", "arxiv.org", "mistral.ai", "deepseek.com", "perplexity.ai", "ollama.com", "openrouter.ai", "vercel.com", "azure.com", "bitbucket.org", "antigravity.google", "docs.", "developer."].concat(PLATFORM_SHORTENERS, MAINSTREAM_CONTENT_DOMAINS).filter((d, i, a) => a.indexOf(d) === i);
 // 網域前後要有邊界：fakenvidia.com、nvidia.com.evil.ru 這類仿冒不算一般網域（docs.／developer. 這類前綴除外）。
 export function benignUrlPattern(domains = DEFAULT_BENIGN_DOMAINS) {
   return new RegExp(`(?<![\\w.-])(https?:\\/\\/)?([\\w-]+\\.)*(${domains.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (d.endsWith(".") ? "" : "(?=$|[\\/?#:\\s，。）)」』])")).join("|")})[^\\s，。）)」』]*`, "gi");
@@ -56,30 +81,47 @@ export function normalizeForRules(text) {
 }
 
 // 暱稱自稱管理員／官方（一般成員才算；真正的管理員有 senderRole，不會進到規則判斷）。
-const STAFF_NICKNAME = /管理員|管理者|群主|版主|官方|客服|小編/;
+const STAFF_NICKNAME = /管理員|管理者|群管|管理|群主|版主|版務|官方|客服|小編/;
 
 /** 建立計分函式。benignDomains：一般網站清單（省略用預設）。 */
-export function makeRuleScorer(benignDomains) {
+/** 已知詐騙網域（本機設定 scamDomains，不進 git）：網域本身或其子網域出現在訊息裡。 */
+export function scamDomainPattern(domains = []) {
+  const list = (domains ?? []).map((d) => String(d).trim().toLowerCase()).filter(Boolean);
+  if (!list.length) return undefined;
+  return new RegExp(`(?<![\\w-])(?:[a-z0-9-]+\\.)*(?:${list.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})(?![a-z0-9-])`, "i");
+}
+export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
+  const scamDomain = scamDomainPattern(scamDomains);
   const benignUrl = benignUrlPattern(benignDomains ?? DEFAULT_BENIGN_DOMAINS);
   return function ruleScore(message, text) {
     const { normal, compact } = normalizeForRules(text);
     const strippedNormal = normal.replace(benignUrl, "［一般網站］");
     const strippedCompact = compact.replace(benignUrl, "［一般網站］");
-    const hits = RULES.filter((rule) => rule.onBenignStripped
+    const hits = RULES.filter((rule) => rule.normalOnly
+      ? rule.pattern.test(rule.onBenignStripped ? strippedNormal : normal)
+      : rule.onBenignStripped
       ? rule.pattern.test(strippedNormal) || rule.pattern.test(strippedCompact)
       : rule.pattern.test(normal) || rule.pattern.test(compact));
     let score = Math.max(0, hits.reduce((sum, rule) => sum + rule.score, 0));
     const names = hits.map((rule) => rule.name);
+    if (scamDomain && scamDomain.test(normal)) { score += 3; names.push("已知詐騙網域"); }
     // 在群組裡丟聯絡人卡片，是常見的引流手法。
     if (message?.card?.kind === "contact") {
       score += 3;
       names.push("分享聯絡人");
     }
     // 一般成員把暱稱取成「管理員小美」「官方客服」：冒充管理員發公告的常見手法。單獨出現不到覆核門檻，只是加權。
-    if (score > 0 && !message?.senderRole && (STAFF_NICKNAME.test(String(message?.senderName ?? "").normalize("NFKC").replace(/\s/g, "")) || analyzeName(message?.senderName).signals.some((signal) => signal.type === "staff"))) {
-      score += 2;
-      names.push("暱稱自稱管理員");
+    // 維護者 10/22：只有白名單（守衛在更前面就略過）與真正有權限的管理員（senderRole）算真管理員；
+    // 其他人暱稱含 小編／管理／群管／版務 等字眼一律視為假冒（不再要求訊息本身有分數）。暱稱含「群管」大加分。
+    const nick = String(message?.senderName ?? "").normalize("NFKC").replace(/\s/g, "");
+    if (!message?.senderRole && (STAFF_NICKNAME.test(nick) || analyzeName(message?.senderName).signals.some((signal) => signal.type === "staff"))) {
+      if (/群管/.test(nick)) { score += 4; names.push("暱稱冒稱群管"); }
+      else { score += 2; names.push("暱稱自稱管理員"); }
     }
     return { score, names };
   };
 }
+
+/** 一般成員出現就一律判詐騙的特徵（維護者 10/22）：群組邀請、轉移／新群、未知短網址服務。 */
+export const FORCED_SCAM_NAMES = new Set(["群組邀請連結", "催促加入新群", "假群組公告", "假群組連結", "疑似短網址", "短網址導向群組邀請"]);
+export function forcedScamNames(names = []) { return names.filter((name) => FORCED_SCAM_NAMES.has(name)); }

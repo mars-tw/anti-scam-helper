@@ -5,11 +5,12 @@ import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
 
-test("兩個模型都判 SCAM＋含連結：至少通知（引用回覆），不踢", () => {
+test("兩個模型都判 SCAM＋只有網址 1 分：只記錄、不在群內通知（10/22 調整）", () => {
   const { score: s, names } = score({ senderName: "某人" }, "最新優惠在這裡 https://example-shop.xyz/abc 快來看");
   assert.equal(s, 1);
   assert.deepEqual(names, ["網址"]);
-  assert.equal(decideAction({ score: s, verdict: "SCAM", review: "SCAM", names }), "notice");
+  assert.equal(decideAction({ score: s, verdict: "SCAM", review: "SCAM", names }), "none");
+  assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["網址", "加LINE"] }), "notice");
   // 只有 Meta 判 SCAM、地端沒判：維持原規則（不到 notifyScore 就不動作）。
   assert.equal(decideAction({ score: s, verdict: "UNSURE", review: "SCAM", names }), "none");
   // 沒有連結：不因為兩個模型都判 SCAM 就通知。
@@ -83,11 +84,11 @@ test("含連結＋地端與 Meta 都判 SCAM：本帳號是管理員的群且開
 });
 
 test("非管理員的群（刪不了）：只通知", () => {
-  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true, deleteOnLink: true, canDelete: false }), "notice");
+  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址", "加LINE"], link: true, deleteOnLink: true, canDelete: false }), "notice");
 });
 
 test("開關關閉（公開版預設）：只通知", () => {
-  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true, canDelete: true }), "notice");
+  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址", "加LINE"], link: true, canDelete: true }), "notice");
 });
 
 test("白名單／自家群連結：清掉後不算連結，不刪", () => {
@@ -263,9 +264,9 @@ test("冒充群主：暱稱含社群名稱裡的品牌名就算；通用片段�
   const { brandSegments, impersonatesBrand } = await import("../guard/policy.mjs");
   const norm = (s) => String(s ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}]/gu, "");
   const looks = (name, key) => name === key || (key.length >= 4 && name.includes(key));
-  const segs = brandSegments("示範研究社 - 挖礦小隊長 / (新手區) 示範研究社 - 挖礦小隊長", norm);
-  assert.deepEqual(segs.map((s) => s.name), ["示範研究社", "挖礦小隊長"]);
-  assert.equal(impersonatesBrand(norm("挖礦小隊長.-Amy"), segs, looks), "挖礦小隊長");
+  const segs = brandSegments("示範研究社 - 測試小隊長 / (新手區) 示範研究社 - 測試小隊長", norm);
+  assert.deepEqual(segs.map((s) => s.name), ["示範研究社", "測試小隊長"]);
+  assert.equal(impersonatesBrand(norm("測試小隊長.-Ann"), segs, looks), "測試小隊長");
   assert.equal(impersonatesBrand(norm("小明"), segs, looks), undefined);
   assert.deepEqual(brandSegments("交流區1｜示範交易小天地", norm).map((s) => s.name), ["示範交易小天地"]);
   assert.deepEqual(brandSegments("🐻示範福利社—交流群", norm).map((s) => s.name), ["🐻示範福利社"]);

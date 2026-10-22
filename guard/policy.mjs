@@ -37,7 +37,8 @@ export function decideAction({ score, verdict, review, names = [], strongScore =
   // 地端＋Meta 都判 SCAM，而且真的含外部連結（白名單連結已先被換掉）：本帳號能刪的群 → 先通知再刪訊息（不踢）。
   if (bothScam && link === true && deleteOnLink && canDelete) return "delete";
   if (score >= notifyScore) return "notice";
-  if (bothScam && (link === true || names.some((name) => LINK_RULES.has(name)))) return "notice";
+  // 只有「網址」一個特徵、分數 1 的訊息：只記錄不通知（至少要分數 ≥ 2 或兩個特徵）。
+  if (bothScam && (link === true || names.some((name) => LINK_RULES.has(name))) && (score >= 2 || names.length >= 2)) return "notice";
   return "none";
 }
 
@@ -45,6 +46,25 @@ export function decideAction({ score, verdict, review, names = [], strongScore =
 // 只看到軟體畫面、用量上限、官方公告、技術說明、電影截圖這類，就降為不採計（只記錄，不當成詐騙）。
 const VISION_CONCRETE = /QR|二維碼|條碼|加.{0,4}(LINE|line|賴|好友|群)|LINE\s*ID|ID\s*[:：]|網址|連結|http|www\.|私訊|聯繫|聯絡|匯款|轉帳|入金|出金|帶單|保證(獲利|賺)|穩賺|投資群|老師|飆股|娛樂城|博弈|百家樂|中獎|領取|兼職|日領|刷單任務|貸款|裸|色情|約炮|援交|外送茶/i;
 const VISION_BENIGN = /介面|畫面|截圖.{0,6}(軟體|程式|設定|後台)|用量|上限|額度|重置|官方公告|公告|robots|文件|程式碼|終端機|指令|設定|電影|迷因|新聞|模型名稱|token\s*價格|主機|伺服器|部署/i;
+
+// 矛盾檢查：理由自己說「沒有 QR／LINE ID／網址／引流／要錢」卻判 SCAM（地端小模型常見）。
+// 把否定的那一段（到標點為止）拿掉後，若已沒有具體訊號 → 只算 UNSURE（只記錄、不通知）。
+const VISION_DENIAL = /(?:未見|未發現|未出現|未包含|並未|沒有|沒看到|無任何|無|不含|並非|不是|非)[^，。；,.;！!？?]{0,40}/g;
+const VISION_DENIED = /QR|二維碼|LINE|ID|網址|連結|引流|要錢|匯款|轉帳|入金|加好友|加群|聯繫|聯絡|詐騙/i;
+export function visionContradicts(reason) {
+  const r = String(reason ?? "");
+  const denials = r.match(VISION_DENIAL)?.filter((d) => VISION_DENIED.test(d)) ?? [];
+  if (!denials.length) return false;
+  let rest = r;
+  for (const d of denials) rest = rest.replace(d, " ");
+  return !visionCounts(rest);
+}
+/** 看圖模型判定的最終值：SCAM 但理由自相矛盾 → UNSURE；SCAM 但沒有具體訊號 → SCAM_WEAK。 */
+export function visionVerdict(verdict, reason) {
+  if (verdict !== "SCAM") return verdict;
+  if (visionContradicts(reason)) return "UNSURE";
+  return visionCounts(reason) ? "SCAM" : "SCAM_WEAK";
+}
 
 export function visionCounts(reason) {
   const r = String(reason ?? "");
@@ -245,7 +265,7 @@ export function ownerAnswered(message, posts = []) {
   return posts.some((post) => post.at > after && (post.replyTo === message.messageId || (message.senderId && post.to?.includes(message.senderId))));
 }
 
-// 社群名稱裡的品牌／群主名（例如「示範研究社 - 挖礦小隊長」的「挖礦小隊長」）：一般成員暱稱裝成這個，就是冒充群主。
+// 社群名稱裡的品牌／群主名（例如「示範研究社 - 測試小隊長」的「測試小隊長」）：一般成員暱稱裝成這個，就是冒充群主。
 // 只取正規化後 ≥4 字、不是「交流區1」「新手區」這類通用字的片段。
 const GENERIC_SEGMENT = /^(交流|討論|聊天|公告|新手|閒聊|問答|主|副|官方)?(區|群|群組|社群|頻道)?\d*$|^(交流|討論|聊天|公告|新手|閒聊|問答)(區|群|群組|社群)\d*$/;
 export function brandSegments(channelName, normalize) {
@@ -272,8 +292,22 @@ export function learnOnlyChats(groupPolicies = {}) {
 }
 /** 會對聊天室產生動作（發送、刪除、收回、表情、踢人、抓圖、已讀、詐騙判斷）的請求；只學習的群一律擋下。讀歷史與記事本不擋。 */
 export const LEARN_ONLY_BLOCKED_FRAMES = new Set(["message:send", "message:delete", "message:unsend", "message:react", "member:remove", "media:fetch", "chat:read", "scam:check"]);
-export function blockedForLearnOnly(frame, chats) {
-  return Boolean(frame && chats?.has(frame.chatId) && LEARN_ONLY_BLOCKED_FRAMES.has(frame.type));
+export function blockedForLearnOnly(frame, chats, { mediaChats, sendChats } = {}) {
+  if (!frame || !chats?.has(frame.chatId) || !LEARN_ONLY_BLOCKED_FRAMES.has(frame.type)) return false;
+  // 延伸學習（learnExt）的只學習群：只放行「讀圖片」，發送、刪除、踢人等照擋。
+  if (frame.type === "media:fetch" && mediaChats?.has(frame.chatId)) return false;
+  // 機器人訓練群：只放行文字發送（@ 回覆與整理）；刪除、踢人、表情、判詐騙照擋。
+  if (frame.type === "message:send" && sendChats?.has(frame.chatId)) return false;
+  return true;
+}
+/** 只學習群裡另外開了延伸學習（討論串、圖片描述、學習筆記）的：groupPolicies[id] = { learnOnly: true, learnExt: true }。 */
+export function learnExtChats(groupPolicies = {}) {
+  return new Set(Object.entries(groupPolicies ?? {}).filter(([, policy]) => policy?.learnOnly === true && policy?.learnExt === true).map(([chatId]) => chatId));
+}
+
+/** 只學習群另開詐騙判斷＋通知（標記）：groupPolicies[id] = { learnOnly: true, scanNotify: true }。只判文字、只發通知；刪除、踢人、圖片警告照只學習全擋。 */
+export function scanNotifyChats(groupPolicies = {}) {
+  return new Set(Object.entries(groupPolicies ?? {}).filter(([, policy]) => policy?.learnOnly === true && policy?.scanNotify === true).map(([chatId]) => chatId));
 }
 
 // ── 只警告的群（groupPolicies[聊天室 id].warnOnly = true）────────────────
@@ -285,4 +319,145 @@ export function warnOnlyChats(groupPolicies = {}) {
 export const WARN_ONLY_BLOCKED_FRAMES = new Set(["member:remove", "message:delete"]);
 export function blockedForWarnOnly(frame, chats) {
   return Boolean(frame && chats?.has(frame.chatId) && WARN_ONLY_BLOCKED_FRAMES.has(frame.type));
+}
+
+// ── 機器人群回覆頻率限制（groupPolicies[聊天室 id].replyLimits）──────────
+// 群裡都是機器人時防互相無限回覆：每個發話者、整個群各有每分鐘上限；只回明確 @ 本帳號的訊息。
+// 預設：每個發話者每分鐘 1 則、整個群每分鐘 3 則。尚未接上主流程（之後開放回覆時才用）。
+export const DEFAULT_REPLY_LIMITS = Object.freeze({ perSenderPerMinute: 1, perChatPerMinute: 3, implicitSenderSeconds: 180 });
+export function makeChatReplyLimiter(limits = {}, { now = () => Date.now() } = {}) {
+  const perSender = Math.max(0, Number(limits.perSenderPerMinute ?? DEFAULT_REPLY_LIMITS.perSenderPerMinute) || 0);
+  const perChat = Math.max(0, Number(limits.perChatPerMinute ?? DEFAULT_REPLY_LIMITS.perChatPerMinute) || 0);
+  // 沒有 @、只是叫名字或回覆本帳號的訊息（implicit）：同一人 implicitSenderSeconds 秒內只算一次，防機器人互相回覆停不下來。
+  const implicitMs = Math.max(0, Number(limits.implicitSenderSeconds ?? DEFAULT_REPLY_LIMITS.implicitSenderSeconds) || 0) * 1000;
+  const chats = new Map(); // chatId → [{ at, senderId }]
+  const implicitAt = new Map(); // `${chatId} ${senderId}` → 上次 implicit 觸發時間
+  return {
+    /** 要回覆前呼叫：沒有明確 @ 本帳號、或超過上限 → { ok: false, reason }；允許時會記下這次。 */
+    allow(chatId, senderId, { mentionedSelf = false, implicit = false } = {}) {
+      if (!mentionedSelf) return { ok: false, reason: "not-mentioned" };
+      const t = now();
+      const list = (chats.get(chatId) ?? []).filter((item) => t - item.at < 60_000);
+      chats.set(chatId, list);
+      if (list.length >= perChat) return { ok: false, reason: "chat-rate" };
+      if (list.filter((item) => item.senderId === senderId).length >= perSender) return { ok: false, reason: "sender-rate" };
+      const key = `${chatId} ${senderId}`;
+      if (implicit && t - (implicitAt.get(key) ?? -Infinity) < implicitMs) return { ok: false, reason: "implicit-sender-rate" };
+      if (implicit) implicitAt.set(key, t);
+      list.push({ at: t, senderId });
+      return { ok: true };
+    },
+  };
+}
+
+// ── @ 回覆的進階規則（從學習筆記整理）─────────────────────────────
+// 加在人設（chat.systemPrompt）後面；人設、第三人稱提主人、不編造主人的事等硬規則照舊優先。
+export function replyGuidelines({ maxChars = 300 } = {}) {
+  return [
+    "【回覆規則】",
+    `- 長度：一般兩到三句，最多 ${maxChars} 字；被要求說明或整理才多講，也不要超過上限。`,
+    "- 先確認對方是在叫你（@ 你、回覆你、直接叫名字）才回；看不出在叫誰、或問題不清楚時，只簡短問一句「是在問我嗎？想問哪個部分？」。",
+    "- 自稱前後一致，只用自己的身分說話；不替別人、主人或其他機器人回答，也不說自己是別人。",
+    "- 閒聊（吃飽沒、在不在、打招呼）一句輕鬆回應就好，再把話題帶回對方想聊的事或你能幫的事。",
+    "- 技術問題：先確認對方用的平台、工具或版本再給步驟；群裡最近已經有人答過，就引用那個重點，不要重講一套通用流程。",
+    "- 直接給內容或直接提問，不要說「我幫你／我來／我會／我先」這類承諾或預告的句子。",
+    "- 同樣的問題剛問過、答過：簡短帶過重點，不要整段重複。",
+    "- 提到非官方工具或做法（例如非官方 LINE 機器人、雙開、模擬登入）：提醒可能違反服務條款、帳號有被限制的風險。",
+    "- 投資、槓桿、合約、加倉、攤平、套牢：提醒停損與清算風險；不給具體買賣指令（買、賣、加倉、關單、價位），只說判斷條件；不確定就說不確定。",
+    "- 收益截圖、邀請碼、推薦連結、帶單：一律說是推廣內容、未經驗證，不背書、不轉傳。",
+    "- 提到收益率：補一句沒算回撤、手續費和清算風險。引用數據、價格、費率要說時間和來源；不知道就說不知道。",
+  ].join("\n");
+}
+
+const RISK_ASK = /(槓桿|倍數|合約|永續|加倉|加碼|攤平|補倉|套牢|爆倉|清算|保證金|馬丁|梭哈|all\s*in|\d+\s*[xX倍])/;
+const RISK_SAID = /(停損|止損|清算|爆倉)/;
+const PROMO_ASK = /(收益截圖|收益卡|獲利截圖|曬單|邀請碼|推薦碼|邀請連結|推薦連結|帶單|跟單|返佣|註冊連結|\+\d{2,4}(\.\d+)?\s*%)/;
+const PROMO_SAID = /推廣|未經驗證/;
+/** 問到槓桿／加倉／套牢而回覆沒提停損或清算風險：回傳要補的一句；不用補回 undefined。 */
+export function riskNote(ask, reply) {
+  if (!RISK_ASK.test(String(ask ?? "")) || RISK_SAID.test(String(reply ?? ""))) return undefined;
+  return "提醒一下：先設好停損，槓桿越高越容易被清算，要不要加倉請依自己的條件判斷。";
+}
+/** 提到收益截圖、邀請碼、帶單而回覆沒標推廣：回傳要補的一句；不用補回 undefined。 */
+export function promoNote(ask, reply) {
+  if (!PROMO_ASK.test(String(ask ?? "")) || PROMO_SAID.test(String(reply ?? ""))) return undefined;
+  return "這類收益截圖或邀請碼屬於推廣內容、未經驗證，不代表推薦。";
+}
+
+// ── 機器人訓練群（只學習群另開 @ 回覆／整理）───────────────────────
+// groupPolicies[id] = { learnOnly: true, allowReply: true, allowSummary: true, replyLimits: { perSenderPerMinute, perChatPerMinute } }
+// 判詐騙、通知、刪除、踢人、圖片警告仍全關；只放行回覆與整理的發送。
+export function botCampChats(groupPolicies = {}) {
+  const out = new Map();
+  for (const [chatId, p] of Object.entries(groupPolicies ?? {})) {
+    if (p?.learnOnly !== true || (p.allowReply !== true && p.allowSummary !== true)) continue;
+    out.set(chatId, { reply: p.allowReply === true, summary: p.allowSummary === true, limits: { ...DEFAULT_REPLY_LIMITS, ...(p.replyLimits ?? {}) }, callNames: Array.isArray(p.callNames) ? p.callNames.map((n) => String(n ?? "").trim()).filter(Boolean) : [] });
+  }
+  return out;
+}
+
+/** 解析看圖稽核的回覆：第一行判定、第二行證據、其餘是描述。 */
+export function parseAuditImage(answer) {
+  const lines = String(answer ?? "").trim().split(/\n+/);
+  let verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
+  const reason = (lines[1] ?? lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") ?? "").trim().slice(0, 60);
+  verdict = visionVerdict(verdict, reason);
+  return { verdict, reason, desc: lines.slice(2).join("\n") };
+}
+
+// 圖片版假搬家公告：「新群重新審核」「請原成員轉移到新群」。沒有 QR 也要通知（只通知，不刪不踢）。
+const FAKE_GROUP_IMAGE = /(轉移|移轉|移動|遷移|搬|換)(到|至)?(新|另一?個|備用)(群|社群|群組)|新(群|社群|群組).{0,8}(審核|加入|申請)|(加入|申請|進入)新(群|社群|群組)|假搬家|假群組/;
+export function isFakeGroupImage(reason) {
+  return FAKE_GROUP_IMAGE.test(String(reason ?? ""));
+}
+
+/** 每群踢人模式：groupPolicies[id].kickMode = "kick" 才在全域 notify 時對該群開真的刪＋踢；其他值一律跟全域。只學習／只警告群不受覆寫影響。 */
+export function kickModeFor(chatId, { globalMode = "notify", groupPolicies = {} } = {}) {
+  const p = groupPolicies?.[chatId];
+  if (!p || p.learnOnly === true || p.warnOnly === true) return globalMode;
+  return p.kickMode === "kick" ? "kick" : globalMode;
+}
+
+/**
+ * 開踢人的群（groupPolicies[id].kickMode = "kick"）專用判定，維護者 10/22 定的條件：
+ * 規則分數 ≥ strongScore 且第一層 Claude（claude-*，A→B）判 SCAM 才考慮踢；
+ * Meta 覆核：SCAM → 踢；沒回應／逾時／錯誤（undefined）→ 無視、照踢；明確 OK 或 UNSURE → 只通知；
+ * 第一層不是 Claude（Claude 兩組都失敗、改由 Grok 或 Meta 當第一層）→ 只通知。
+ * 覆核由 Grok 回答時規則同 Meta：SCAM 踢、沒回應照踢、OK／UNSURE 只通知（覆核鏈：Grok → Meta）。
+ * 不符合前提（分數不夠、第一層沒判 SCAM）回 undefined，交回一般流程。
+ */
+export function decideChatKick({ score, strongScore = 6, verdict, model, review }) {
+  if (!(score >= strongScore) || verdict !== "SCAM") return undefined;
+  if (!/^claude/i.test(String(model ?? ""))) return "notice";
+  if (review === "SCAM" || review === undefined || review === "UNAVAILABLE") return "kick";
+  return "notice";
+}
+
+/** 錯誤分類碼（只看錯誤摘要，不含秘密與訊息原文）：給每日稽核統計用。 */
+export function errorCode(kind, detail) {
+  const d = String(detail ?? "");
+  const m = d.match(/\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE)\b/);
+  if (m) return m[1];
+  if (/HTTP_?(\d{3})/.test(d)) return `HTTP_${d.match(/HTTP_?(\d{3})/)[1]}`;
+  const code = d.match(/\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b/);
+  if (code) return code[1];
+  if (/empty-or-unusable/i.test(d)) return "MODEL_EMPTY";
+  if (/abort|timeout|timed out/i.test(d)) return "TIMEOUT";
+  if (/\bAUTH\b|401|403|unauthori[sz]ed/i.test(d)) return "AUTH";
+  if (/\bTIMEOUT\b/.test(d)) return "TIMEOUT";
+  return `${String(kind ?? "unknown").toUpperCase()}_OTHER`;
+}
+/** 派網群紅包／QR 例外不適用：跟單、帶單搭配 QR（掃碼）或短網址。 */
+export function redPacketExceptionBlocked(text, { shortener = /(?!)/, qr = false } = {}) {
+  const t = String(text ?? "");
+  if (!/跟單|帶單/.test(t)) return false;
+  return qr || /QR|掃碼|掃描|二維碼/i.test(t) || shortener.test(t);
+}
+
+/** 紀錄是否代表「發言者被判詐騙／可疑」。只記錄的看圖結果（UNSURE／SCAM_WEAK／OK）不算，免得一般看盤或獲利截圖被當成標記。 */
+export function isFlagEntry(entry, flagActions) {
+  const action = entry?.action ?? "";
+  if (!flagActions.test(action)) return false;
+  if (action === "vision-flag") return entry.verdict === "VISION_SCAM" || (entry.scanNotify === true && entry.notified !== false);
+  return true;
 }

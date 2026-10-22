@@ -24,13 +24,15 @@ test("單獨一句「換群了」只到覆核門檻（3），不到踢人分數"
   assert.deepEqual(result.names, ["疑似假群組"]);
 });
 
-test("一般成員暱稱自稱管理員：有其他訊號時加權", () => {
+test("一般成員暱稱自稱管理員：加權（真管理員不加）", () => {
   const fake = score({ senderName: "管理員小美" }, "換群了，請各位配合");
   assert.ok(fake.names.includes("暱稱自稱管理員"));
   assert.equal(fake.score, 5);
   // 真正的管理員（有 senderRole）不加權；沒有其他訊號也不加權。
   assert.ok(!score({ senderName: "管理員小美", senderRole: "coAdmin" }, "換群了").names.includes("暱稱自稱管理員"));
-  assert.equal(score({ senderName: "管理員小美" }, "早安大家").score, 0);
+  // 10/22（維護者）：非白名單、暱稱帶管理字眼就算冒充管理員，沒其他訊號也加 2 分（單靠暱稱不會到通知／踢人門檻）。
+  assert.equal(score({ senderName: "管理員小美" }, "早安大家").score, 2);
+  assert.equal(score({ senderName: "管理員小美", senderRole: "coAdmin" }, "早安大家").score, 0);
 });
 
 test("短網址清單：1url.cz、rb.gy 等都算；網址前緊接英數字不算", () => {

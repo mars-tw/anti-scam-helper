@@ -12,7 +12,7 @@ import type { Channel, ChannelKind, Message, Reactions, ReadPosition } from "../
 import type { UpdateInfo } from "../update/checker.js";
 import { withMyReaction, type ChatStore } from "../model/store.js";
 import { PROTOCOL_VERSION, type ClientFrame, type ListenState, type ServerFrame } from "./protocol.js";
-import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseRemove, parseSend, requestIdOf } from "./requests.js";
+import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseRemove, parseSend, parseThreadFetch, requestIdOf } from "./requests.js";
 
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const HISTORY_PER_SECOND = 10;
@@ -102,6 +102,8 @@ const GENERIC = {
   INVITE_UNSUPPORTED: "這個聊天室不支援讀取邀請連結。",
   INVITE_OWN_FAILED: "無法讀取本群邀請連結。",
   INVITE_LOOKUP_FAILED: "無法查詢邀請碼所屬社群。",
+  THREADS_UNSUPPORTED: "這個聊天室沒有討論串。",
+  THREAD_FAILED: "無法讀取討論串。",
 } as const;
 
 function updateFrame(info: UpdateInfo): ServerFrame {
@@ -579,6 +581,26 @@ export function createHub(options: HubOptions): Hub {
    * Hands a moderation bot the picture of an image message this server has shown (PNG, JPEG or GIF by
    * content, at most 5 MB), so it can look for scam QR codes. Nothing else: no videos, files or stickers.
    */
+  /** Read-only: one OpenChat thread's messages for a bot (in its scope). Never joins or marks read. */
+  async function handleBotThread(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseThreadFetch(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, threadId, limit } = parsed.value;
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square" || !provider.fetchSquareThread) return fail(socket, "THREADS_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const messages = await provider.fetchSquareThread(chatId, threadId, limit);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "thread", requestId, chatId, threadId, messages });
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("THREAD_FAILED", error);
+      fail(socket, "THREAD_FAILED", requestId);
+    }
+  }
+
   async function handleBotMedia(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
     const parsed = parseMessageRequest(frame);
     if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
@@ -816,6 +838,10 @@ export function createHub(options: HubOptions): Hub {
           return;
         case "media:fetch":
           void handleBotMedia(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "thread:fetch":
+          if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleBotThread(socket, frame as Record<string, unknown>, botScope);
           return;
         case "message:delete":
           void handleBotDelete(socket, frame as Record<string, unknown>, botScope);

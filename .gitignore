@@ -34,3 +34,6 @@ backups/
 config.yaml.*
 guard/guard.config.json.*
 guard/token.txt.*
+
+# 部署前備份檔（含真實資料，不進 git）
+*.pre-*
