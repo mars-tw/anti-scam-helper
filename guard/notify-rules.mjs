@@ -124,12 +124,31 @@ export function makeNotifyTracker({ windowMs = 24 * 3_600_000, max = 5000 } = {}
   };
 }
 
+// 明確招攬投資（祈使／邀約語氣）：叫人入金／出金、帶你賺、保證獲利、招收跟單、報明牌給你。單純提到「入金」「帶單」不算。
+const INVEST_SOLICIT = new RegExp([
+  String.raw`(?:叫|請|讓|帶|教|幫)\s*(?:你|妳|您|大家|各位|你們|妳們|新手|朋友)?\s*(?:先|快|趕快|馬上|立即|一起)?\s*(?:去)?\s*(?:入金|儲值|出金)`,
+  String.raw`(?<![我俺])(?<!我們)(?<!我也)(?<!我就)(?:先|快|趕快|馬上|立即|立刻|趕緊|一起|現在就?)\s*(?:去)?\s*(?:入金|儲值)(?!\s*[了嗎嘛吧？?])`,
+  String.raw`(?:入金|儲值)\s*(?:就|即|立即|馬上)?\s*(?:送|贈|返|領|拿|翻倍|保證|穩賺|有獎|加碼)`,
+  String.raw`(?:入金|儲值)\s*(?:\d+|[一二三五十百千萬]+)\s*(?:U|USDT|元|塊|萬)?\s*(?:起|以上|即可|就能|就可)`,
+  String.raw`(?:最低|最少|只要|僅需)\s*(?:入金|儲值)`,
+  String.raw`(?:找|私|密|加|聯繫|聯絡)\s*(?:我|老師|助理|客服).{0,8}(?:入金|出金|帶單|跟單)`,
+  String.raw`(?:入金|出金|帶單|跟單).{0,8}(?:找|私|密|加|聯繫|聯絡)\s*(?:我|老師|助理|客服)`,
+  String.raw`穩賺|保證\s*(?:獲利|賺|收益|回本)|勝率\s*\d|獲利\s*\d+\s*[%％]`,
+  String.raw`老師帶|投顧老師|帶(?:你|妳|您|大家|各位|你們)\s*(?:賺|飛|翻倍|上車|入金|操作|跟單|做單)`,
+  String.raw`(?:招(?:收|募)?|收|徵|找)\s*(?:學員|會員|跟單|新人)|(?:跟單|帶單)\s*(?:群|名額|請|歡迎|加|私)`,
+  String.raw`報(?:明)?牌\s*(?:給|群|加|私)|(?:加|進|入)\s*(?:群|LINE|line|賴).{0,8}(?:飆股|明牌|帶單|內線)`,
+].join("|"), "i");
+/** 是否為「明確招攬投資」的文字（給 UNSURE 通知判斷用）。 */
+export function investSolicit(text) { return INVEST_SOLICIT.test(String(text ?? "").normalize("NFKC")); }
+
 /** 文字訊息的通知層判斷（呼叫端只在原本沒有處置時呼叫）。回 names（空陣列＝不通知）。 */
 export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, log }) {
   const names = [];
   const ns = notifyScore(text);
   if (ns.notify) names.push(...ns.names);
-  if ((result.names ?? []).includes("投資帶單") && result.verdict && !["OK", "SKIP", "MODEL_UNAVAILABLE", "OFFICIAL_LINK"].includes(result.verdict)) names.push("投資帶單＋第一層非 OK");
+  // 10/23 誤判（交易群只說「有入金一點」也被通知）：投資字眼單獨出現（入金、出金、翻倍、內線、帶單…）是交易群日常用語。
+  // 只有第一層判 SCAM，或第一層 UNSURE 且文字是「明確招攬」（叫人入金、帶你賺、保證獲利、招收跟單…）才通知；單純提到＋不確定只記錄。
+  if ((result.names ?? []).includes("投資帶單") && (result.verdict === "SCAM" || (result.verdict === "UNSURE" && investSolicit(text)))) names.push("投資帶單＋第一層非 OK");
   if (result.verdict === "SCAM" && tracker.scam(senderId)) names.push("同一人 24 小時內第 2 次判詐騙");
   // 跨群同內容：只有含群組邀請（line.me/ti/g、ti/g2、社群邀請、或短網址展開後是群組邀請）才算（維護者 10/22 15:51 修正）。
   // 一般網址跨群重複可能只是推廣：不因「跨群」單獨通知，只回 crossChatPlain 給呼叫端記錄。

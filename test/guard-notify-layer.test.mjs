@@ -52,7 +52,9 @@ test("b／3：同人 24h 第 2 張獲利圖、獲利圖後貼網址、SCAM≥2�
   const k = "好文推薦 https://github.com/a/b 大家看看";
   textNotifyReasons({ text: k, chatId: "cA", senderId: "u6", result: base, tracker: tr });
   assert.deepEqual(textNotifyReasons({ text: k, chatId: "cB", senderId: "u7", result: base, tracker: tr }), []);
-  assert.ok(textNotifyReasons({ text: "跟老師", chatId: "cA", senderId: "u8", result: { verdict: "UNSURE", names: ["投資帶單"] }, tracker: tr }).includes("投資帶單＋第一層非 OK"));
+  // 10/23：單純投資字眼＋UNSURE 不通知；第一層 SCAM 或明確招攬才通知（見 guard-invest-mention-1023）。
+  assert.ok(!textNotifyReasons({ text: "跟老師", chatId: "cA", senderId: "u8", result: { verdict: "UNSURE", names: ["投資帶單"] }, tracker: tr }).includes("投資帶單＋第一層非 OK"));
+  assert.ok(textNotifyReasons({ text: "跟老師", chatId: "cA", senderId: "u8", result: { verdict: "SCAM", names: ["投資帶單"] }, tracker: tr }).includes("投資帶單＋第一層非 OK"));
   assert.deepEqual(textNotifyReasons({ text: "跟老師", chatId: "cA", senderId: "u8", result: { verdict: "OK", names: ["投資帶單"] }, tracker: tr }), []);
   assert.ok(textNotifyReasons({ text: "看 https://ab.supr.link/x", chatId: "cC", senderId: "u3", result: base, tracker: tr, shorteners: SHORTENERS }).includes("子網域短網址"));
 });
