@@ -28,6 +28,7 @@ import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange
 import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
+import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
@@ -52,6 +53,8 @@ if (!token) {
 }
 // 受保護成員（依成員 ID，所有群適用）：whitelist、protectedIds（[{ note, ids }] 或 ID 字串）、protectedMembers 裡登記的 ID。
 // 這些 ID 永遠不踢、不刪、不提醒、不判冒名。社群成員 ID 每個社群不同，離開再加入也會換新 ID，要一併登記。
+// 受保護名字（暱稱，config.protectedNames）：永遠不踢、不刪文。
+const nameGuard = makeNameGuard(config.protectedNames ?? []);
 const whitelist = new Set([
   ...(config.whitelist ?? []),
   ...(config.protectedIds ?? []).flatMap((entry) => (typeof entry === "string" ? [entry] : [...(entry?.ids ?? []), ...(entry?.id ? [entry.id] : [])])),
@@ -1149,7 +1152,7 @@ function impersonationKickDecision(message, entry) {
 }
 async function remove(ws, message, entry) {
   // 絕不處理管理員、群主、白名單或自己（伺服器也會再擋一次）。
-  if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || chatAdmins.get(message.channelId)?.has(message.senderId)) {
+  if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || chatAdmins.get(message.channelId)?.has(message.senderId) || nameGuard.protects(message)) {
     return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
   }
   const mode = chatKickMode(message.channelId);
@@ -1185,7 +1188,7 @@ async function remove(ws, message, entry) {
   await notifyThenAct(() => notifyAdmins(ws, entry, kind), (preNotified) => {
     const requestId = `kick${++requestSeq}`;
     pending.set(requestId, { ...entry, preNotified });
-    ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: config.deleteMessage !== false }));
+    sendKick(ws, { type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: config.deleteMessage !== false });
   }, notify.beforeActionMs ?? 2000, sleep);
 }
 
@@ -1280,7 +1283,7 @@ function saveAvatarCache() {
 }
 function fakeAdminExcluded(message) {
   const id = message.senderId;
-  if (!id || message.senderRole || whitelist.has(id) || id === me || isSelf(message.channelId, id)) return true;
+  if (!id || message.senderRole || whitelist.has(id) || id === me || isSelf(message.channelId, id) || nameGuard.protects(message)) return true;
   for (const admins of chatAdmins.values()) if (admins.has(id)) return true;
   for (const names of learnedAdmins.values()) for (const admin of names.values()) if (admin.ids.has(id)) return true;
   for (const list of Object.values(notify.admins ?? {})) if ((list ?? []).some((admin) => admin?.id === id)) return true;
@@ -1379,7 +1382,7 @@ async function checkFakeAdmin(ws, message, text) {
 // 這兩條（冒名＋邀請、購物再犯）直接送踢人、不經 remove()，送出前再擋一次：受保護成員、管理員、群主、本帳號絕不踢。
 function neverKick(message) {
   return Boolean(message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)
-    || [...chatAdmins.values()].some((admins) => admins.has(message.senderId)) || isStaff(message));
+    || [...chatAdmins.values()].some((admins) => admins.has(message.senderId)) || isStaff(message) || nameGuard.protects(message));
 }
 async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false } = {}) {
   const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names: [`冒用「${victim}」`, notice ? "假群組公告" : "外部邀請／引流連結或 QR code"] };
@@ -1412,7 +1415,7 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets, 
       markRemoved(message);
       const requestId = `kick${++requestSeq}`;
       pending.set(requestId, { ...entry, preNotified: true });
-      ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: replyTo, deleteMessage: true }));
+      sendKick(ws, { type: "member:remove", requestId, chatId: message.channelId, messageId: replyTo, deleteMessage: true });
       kickSent = true;
     }
   }, notify.beforeActionMs ?? 2000, sleep);
@@ -1492,7 +1495,7 @@ async function checkScamShop(ws, message, rawText) {
       markRemoved(message);
       const requestId = `kick${++requestSeq}`;
       pending.set(requestId, { ...entry, preNotified: true });
-      ws.send(JSON.stringify({ type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: true }));
+      sendKick(ws, { type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: true });
     } else {
       answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
     }
@@ -1532,7 +1535,7 @@ async function deleteFollowup(ws, message, key) {
   const at = removedAt.get(key);
   if (at === undefined || config.dryRun || config.deleteMessage === false || noAction(message.channelId) || !message.messageId) return;
   if (Math.abs((message.createdAt ?? Date.now()) - at) > 30 * 60_000) return;
-  if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)) return;
+  if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId) || nameGuard.protects(message)) return;
   const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
   record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
 }
@@ -1870,7 +1873,13 @@ async function handle(ws, message) {
 // ── 圖片 QR code ─────────────────────────────────────────────
 const waiting = new Map(); // requestId → 等待伺服器回應的 resolve
 
+/** 直接送出的踢人請求：受保護名字最後再擋一次。 */
+function sendKick(ws, frame) {
+  if (nameGuard.blocks(frame)) return record({ action: "protected-name-skip", frameType: frame.type, chatId: frame.chatId, messageId: frame.messageId });
+  ws.send(JSON.stringify(frame));
+}
 function call(ws, frame, timeoutMs = 30_000) {
+  if (nameGuard.blocks(frame)) { record({ action: "protected-name-skip", frameType: frame.type, chatId: frame.chatId, messageId: frame.messageId }); return Promise.resolve({ type: "error", code: "PROTECTED_NAME" }); }
   const requestId = `req${++requestSeq}`;
   return new Promise((done) => {
     const timer = setTimeout(() => { waiting.delete(requestId); done({ type: "error", code: "TIMEOUT" }); }, timeoutMs);
@@ -2155,7 +2164,7 @@ function punishRepeat(ws, message, content) {
 
 /** 群主、管理員、白名單、自己：不處理。 */
 function isStaff(message) {
-  if (message.senderRole || whitelist.has(message.senderId) || isSelf(message.channelId, message.senderId)) return true;
+  if (message.senderRole || whitelist.has(message.senderId) || isSelf(message.channelId, message.senderId) || nameGuard.protects(message)) return true;
   if (chatAdmins.get(message.channelId)?.has(message.senderId)) return true;
   return (notify.admins?.[message.channelId] ?? []).some((admin) => admin?.id === message.senderId);
 }
@@ -2602,7 +2611,8 @@ async function followupDelete(ws, request) {
   for (const messageId of messageIds) {
     const message = page.messages.find((m) => m.messageId === messageId);
     if (!message) { record({ action: "followup-delete-skipped", chatId, messageId, reason: "not-found" }); continue; }
-    if (!removedSenders.has(message.senderId) || message.senderRole || whitelist.has(message.senderId) || isSelf(chatId, message.senderId)) { record({ action: "followup-delete-skipped", chatId, messageId, reason: "not-removed-sender" }); continue; }
+    nameGuard.note(message);
+    if (!removedSenders.has(message.senderId) || message.senderRole || whitelist.has(message.senderId) || isSelf(chatId, message.senderId) || nameGuard.protects(message)) { record({ action: "followup-delete-skipped", chatId, messageId, reason: "not-removed-sender" }); continue; }
     const answer = await call(ws, { type: "message:delete", chatId, messageId });
     record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId, messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
   }
@@ -2640,7 +2650,7 @@ async function rejudge(ws, request) {
     markSeen(message.messageId);
     const key = `${chatId} ${message.senderId}`;
     // 重判時同一人前一則已經踢掉：舊訊息超過 deleteFollowup 的 30 分鐘範圍，這裡直接補刪（仍不碰管理員、白名單、自己）。
-    if (removedAt.has(key) && !message.senderRole && !whitelist.has(message.senderId) && !isSelf(chatId, message.senderId) && !config.dryRun && !noAction(chatId)) {
+    if (removedAt.has(key) && !message.senderRole && !whitelist.has(message.senderId) && !isSelf(chatId, message.senderId) && !nameGuard.protects(message) && !config.dryRun && !noAction(chatId)) {
       const answer = await call(ws, { type: "message:delete", chatId, messageId: message.messageId });
       record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId, messageId: message.messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
       continue;
@@ -3041,6 +3051,7 @@ setInterval(() => {
 function processHistory(ws, frame, baseWatermark) {
   // 只學習的群：沒看過的歷史訊息只收進參考資料（不補掃、不補回 @、不跑 /ai整理）。
   const historyChat = frame.chatId ?? frame.messages?.[0]?.channelId;
+  for (const message of frame.messages ?? []) nameGuard.note(message);
   if (historyChat && learnOnly.has(historyChat)) {
     let newest;
     for (const message of frame.messages) {
@@ -3149,6 +3160,7 @@ function connect() {
       case "message": {
         const { message } = frame;
         if (message.senderId === me || message.contentType === "CHATEVENT" || message.unsent) return;
+        nameGuard.note(message);
         watermarks.bump(message.channelId, message.createdAt);
         if (seenIds.has(message.messageId)) return;
         markSeen(message.messageId);
