@@ -25,13 +25,31 @@ export const NOTIFY_RULES = [
   { name: "收購門號／SIM 卡（人頭門號）", score: 4, direct: true, pattern: /^(?=[\s\S]*(?:(?:收購|高價收|回收|收)(?:各大|各家)?\s*(?:電信)?\s*(?:門號|預付卡|SIM\s*卡|實體卡|易付卡|月租卡|電信卡|人頭卡|月租\s*[|｜/、])|(?:收購|高價收|收)(?:各大|各家)\s*電信))(?=[\s\S]*(?:結款|結帳|付款|付現|現金|高價|卡商|工作室|line|賴|私訊|私我|密我))/i },
   // 10/23 自動反思：仿 LINE 官方「已被邀請加入…請點選以下連結加入社群」文字，連結卻不是 line.me。只通知。
   { name: "仿 LINE 社群邀請文字但連結不是 LINE", score: 4, direct: true, pattern: /^(?=[\s\S]*(?:已\s*被\s*邀\s*請\s*加\s*入|點\s*選\s*以\s*下\s*連\s*結\s*加\s*入\s*社\s*群))(?=[\s\S]*(?:https?:\/\/|(?:[a-z0-9-]+\.)+[a-z]{2,}\/))(?![\s\S]*line\.me\/)/i },
+  // 10/23 晨會：假投票／假活動騙手機號碼與 LINE 認證碼。只通知，不進踢人分數。
+  // 要有投票字眼，再加「非主流平台的外部連結」或「叫人輸入認證碼／驗證碼／手機號碼」；正常投票討論、YouTube／b23.tv 等官方網址不單獨觸發。
+  { name: "假投票／活動騙認證碼", score: 4, direct: true, match: (t) => VOTE.test(t) && (ASK_CODE.test(t) || (t.match(URL_RE) ?? []).some((u) => !isMainstreamMediaHost(hostOf(u)) && !OFFICIAL_HOST.test(hostOf(u)))) },
+  // 10/23 晨會：假管理員「群裡有機器人洗版／開新群／搬群」話術。只通知（踢人分數仍只看 rules.mjs 的假群組公告）。
+  { name: "假管理員搬群話術", score: 4, direct: true, pattern: /(?:機器人|廣告|外掛).{0,6}(?:洗版|洗頻|刷屏)|開(?:了)?新群|搬群|換新群|移到新群|加入新群/ },
 ];
+
+const VOTE = /投票|票選|比賽|幫.{0,4}投(?:票|一票|一下|給)|拉票/;
+const ASK_CODE = /(?:輸入|填(?:寫|入)?|提供|傳|給|回覆|告訴).{0,8}(?:認證碼|驗證碼|手機號碼|手機號|門號|簡訊碼)|(?:認證碼|驗證碼|簡訊碼).{0,6}(?:給我|傳給|回傳|截圖|告訴)/;
+const OFFICIAL_HOST = /(?:^|\.)(?:gov\.tw|edu\.tw|line\.me|google\.com|forms\.gle)$/i;
+function hostOf(u) { return (String(u).replace(/^https?:\/\//i, "").split(/[/?#]/)[0] || "").toLowerCase(); }
+
+/** 通知文字的補充教學（只加說明，不改處置）。 */
+export function noticeTips(names = []) {
+  const tips = [];
+  if (names.some((n) => n === "假管理員搬群話術" || n === "假群組公告")) tips.push("真管理員的皇冠是 LINE 介面在名字旁的標示，畫在頭像圖裡的皇冠不算；社群不會叫大家搬到新群，這類是假群組。");
+  if (names.includes("假投票／活動騙認證碼")) tips.push("投票不需要輸入手機號碼或 LINE 認證碼，輸入了帳號可能被盜。");
+  return tips;
+}
 
 export function notifyScore(text) {
   const t = String(text ?? "");
   let score = 0; const names = []; let direct = false;
   for (const rule of NOTIFY_RULES) {
-    if (!rule.pattern.test(t)) continue;
+    if (!(rule.match ? rule.match(t) : rule.pattern.test(t))) continue;
     score += rule.score; names.push(rule.name);
     if (rule.investBonus && INVEST.test(t)) { score += rule.investBonus; names.push("話術＋投資字眼"); }
     if (rule.direct) direct = true;
