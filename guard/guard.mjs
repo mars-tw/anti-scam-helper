@@ -1821,7 +1821,7 @@ async function handle(ws, message) {
     if (firstLink) entry.urlKind = extraNames.includes("短網址導向群組邀請") ? "群組邀請" : knowledgeLink ? "知識" : shopWarn ? "購物" : urlKind(decideText === text ? firstLink : (firstUrl(sanitizeLinks(decideText).text) ?? firstLink), { shorteners: SHORTENERS });
     // 10/22 通知層（只通知，不改踢人分數、不刪文）：原本沒處置時才看。
     if (!result.suppressed && result.action !== "notice" && result.action !== "delete" && config.notifyLayer?.enabled !== false) {
-      const extra = textNotifyReasons({ text, chatId: message.channelId, senderId: message.senderId, result, tracker: notifyTracker, shorteners: SHORTENERS, inviteExpanded: extraNames.includes("短網址導向群組邀請"), log: (x) => record({ action: "cross-chat-plain", chatId: message.channelId, messageId: message.messageId, chats: x.crossChatPlain }) });
+      const extra = textNotifyReasons({ text, chatId: message.channelId, senderId: message.senderId, result, tracker: notifyTracker, shorteners: SHORTENERS, inviteExpanded: extraNames.includes("短網址導向群組邀請"), log: (x) => x.zeroScoreRepeatLogged ? record({ action: "zero-score-repeat-logged", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId }) : record({ action: "cross-chat-plain", chatId: message.channelId, messageId: message.messageId, chats: x.crossChatPlain }) });
       // 踢人群（per-chat kick）：跨群群組邀請、冒充負責人要匯款 → 照踢人群規則可刪踢（Claude＋覆核）；其他群只通知。
       if (extra.some((r) => MINER_KICKABLE.has(r)) && await minerKick(ws, message, { ...entry, names: [...(result.names ?? []), ...extra] }, text, result)) return;
       if (extra.length) {

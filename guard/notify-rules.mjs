@@ -141,6 +141,7 @@ const INVEST_SOLICIT = new RegExp([
 /** 是否為「明確招攬投資」的文字（給 UNSURE 通知判斷用）。 */
 export function investSolicit(text) { return INVEST_SOLICIT.test(String(text ?? "").normalize("NFKC")); }
 
+export const REPEAT_SCAM = "同一人 24 小時內第 2 次判詐騙";
 /** 文字訊息的通知層判斷（呼叫端只在原本沒有處置時呼叫）。回 names（空陣列＝不通知）。 */
 export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, log }) {
   const names = [];
@@ -149,7 +150,13 @@ export function textNotifyReasons({ text, chatId, senderId, result, tracker, sho
   // 10/23 誤判（交易群只說「有入金一點」也被通知）：投資字眼單獨出現（入金、出金、翻倍、內線、帶單…）是交易群日常用語。
   // 只有第一層判 SCAM，或第一層 UNSURE 且文字是「明確招攬」（叫人入金、帶你賺、保證獲利、招收跟單…）才通知；單純提到＋不確定只記錄。
   if ((result.names ?? []).includes("投資帶單") && (result.verdict === "SCAM" || (result.verdict === "UNSURE" && investSolicit(text)))) names.push("投資帶單＋第一層非 OK");
-  if (result.verdict === "SCAM" && tracker.scam(senderId)) names.push("同一人 24 小時內第 2 次判詐騙");
+  // 10/23 誤判：0 分＋覆核 UNSURE 只因「第 2 次判詐騙」就通知。10/22 規則：0 分不可只因模型判詐騙就警告。
+  // 0 分時這條只有「覆核也 SCAM 且帶確定特徵」才算；否則照樣計次、只記錄（zeroScoreRepeatLogged）。
+  if (result.verdict === "SCAM" && tracker.scam(senderId)) {
+    const zero = !(Number(result.score) > 0);
+    if (!zero || (result.review === "SCAM" && zeroScoreShouldNotify(result.names))) names.push(REPEAT_SCAM);
+    else if (log) log({ zeroScoreRepeatLogged: true });
+  }
   // 跨群同內容：只有含群組邀請（line.me/ti/g、ti/g2、社群邀請、或短網址展開後是群組邀請）才算（維護者 10/22 15:51 修正）。
   // 一般網址跨群重複可能只是推廣：不因「跨群」單獨通知，只回 crossChatPlain 給呼叫端記錄。
   const hasInvite = inviteExpanded || INVITE_RE.test(String(text ?? ""));

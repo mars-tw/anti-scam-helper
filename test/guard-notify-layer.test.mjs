@@ -43,7 +43,7 @@ test("b／3：同人 24h 第 2 張獲利圖、獲利圖後貼網址、SCAM≥2�
   assert.ok(tr.followsProfit("cA", "u1", "私訊我拿教學", 3000));
   const base = { verdict: "OK", names: [] };
   assert.deepEqual(textNotifyReasons({ text: "早安", chatId: "cA", senderId: "u9", result: base, tracker: tr }), []);
-  const scam = { verdict: "SCAM", names: ["網址"] };
+  const scam = { verdict: "SCAM", score: 2, names: ["網址"] };
   assert.deepEqual(textNotifyReasons({ text: "x", chatId: "cA", senderId: "u5", result: scam, tracker: tr }), []);
   assert.ok(textNotifyReasons({ text: "x", chatId: "cA", senderId: "u5", result: scam, tracker: tr }).includes("同一人 24 小時內第 2 次判詐騙"));
   const t = "限時好康快看 https://promo.example.net/a1";
