@@ -29,9 +29,14 @@ export const NOTIFY_RULES = [
   // 要有投票字眼，再加「非主流平台的外部連結」或「叫人輸入認證碼／驗證碼／手機號碼」；正常投票討論、YouTube／b23.tv 等官方網址不單獨觸發。
   { name: "假投票／活動騙認證碼", score: 4, direct: true, match: (t) => VOTE.test(t) && (ASK_CODE.test(t) || (t.match(URL_RE) ?? []).some((u) => !isMainstreamMediaHost(hostOf(u)) && !OFFICIAL_HOST.test(hostOf(u)))) },
   // 10/23 晨會：假管理員「群裡有機器人洗版／開新群／搬群」話術。只通知（踢人分數仍只看 rules.mjs 的假群組公告）。
-  { name: "假管理員搬群話術", score: 4, direct: true, pattern: /(?:機器人|廣告|外掛).{0,6}(?:洗版|洗頻|刷屏)|開(?:了)?新群|搬群|換新群|移到新群|加入新群/ },
+  // 10/24 自動反思：群友的防詐提醒文字（「疑似詐騙提醒…不要加入新群」）被這條觸發、兩個模型都判 OK 仍通知。
+  // 沒有任何網址／邀請時，若文字是防詐提醒語氣，或第一層與覆核都判 OK，就不算（只會更少通知）。
+  { name: "假管理員搬群話術", score: 4, direct: true, match: (t, ctx = {}) => MOVE_GROUP.test(t) && !(!hasLinkOrInvite(t) && (ANTI_SCAM_WARNING.test(t) || (ctx.verdict === "OK" && ctx.review === "OK"))) },
 ];
 
+const MOVE_GROUP = /(?:機器人|廣告|外掛).{0,6}(?:洗版|洗頻|刷屏)|開(?:了)?新群|搬群|換新群|移到新群|加入新群/;
+const ANTI_SCAM_WARNING = /(?:疑似|可能是?|小心|注意|提醒|警告|防範|謹防|慎防|當心|嚴防).{0,10}(?:詐騙|假群|假冒|冒充|冒用|被騙)|(?:不要|勿|別|切勿|請勿|千萬別|千萬不要)\s*(?:隨便|亂)?\s*(?:加入|點|加|相信|理會|上當|掃)/;
+function hasLinkOrInvite(t) { return INVITE_RE.test(t) || (String(t).match(URL_RE) ?? []).length > 0; }
 const VOTE = /投票|票選|比賽|幫.{0,4}投(?:票|一票|一下|給)|拉票/;
 const ASK_CODE = /(?:輸入|填(?:寫|入)?|提供|傳|給|回覆|告訴).{0,8}(?:認證碼|驗證碼|手機號碼|手機號|門號|簡訊碼)|(?:認證碼|驗證碼|簡訊碼).{0,6}(?:給我|傳給|回傳|截圖|告訴)/;
 const OFFICIAL_HOST = /(?:^|\.)(?:gov\.tw|edu\.tw|line\.me|google\.com|forms\.gle)$/i;
@@ -45,11 +50,11 @@ export function noticeTips(names = []) {
   return tips;
 }
 
-export function notifyScore(text) {
+export function notifyScore(text, ctx = {}) {
   const t = String(text ?? "");
   let score = 0; const names = []; let direct = false;
   for (const rule of NOTIFY_RULES) {
-    if (!(rule.match ? rule.match(t) : rule.pattern.test(t))) continue;
+    if (!(rule.match ? rule.match(t, ctx) : rule.pattern.test(t))) continue;
     score += rule.score; names.push(rule.name);
     if (rule.investBonus && INVEST.test(t)) { score += rule.investBonus; names.push("話術＋投資字眼"); }
     if (rule.direct) direct = true;
@@ -145,11 +150,14 @@ export const REPEAT_SCAM = "同一人 24 小時內第 2 次判詐騙";
 /** 文字訊息的通知層判斷（呼叫端只在原本沒有處置時呼叫）。回 names（空陣列＝不通知）。 */
 export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, log }) {
   const names = [];
-  const ns = notifyScore(text);
+  const ns = notifyScore(text, { verdict: result.verdict, review: result.review });
   if (ns.notify) names.push(...ns.names);
   // 10/23 誤判（交易群只說「有入金一點」也被通知）：投資字眼單獨出現（入金、出金、翻倍、內線、帶單…）是交易群日常用語。
   // 只有第一層判 SCAM，或第一層 UNSURE 且文字是「明確招攬」（叫人入金、帶你賺、保證獲利、招收跟單…）才通知；單純提到＋不確定只記錄。
-  if ((result.names ?? []).includes("投資帶單") && (result.verdict === "SCAM" || (result.verdict === "UNSURE" && investSolicit(text)))) names.push("投資帶單＋第一層非 OK");
+  // 10/24 自動反思：第一層 SCAM 但雲端覆核明確判 OK、沒網址、也不是明確招攬（交易群閒聊）時不通知，只會更少通知。
+  const investSolicited = investSolicit(text);
+  const reviewCleared = result.review === "OK" && !investSolicited && !hasLinkOrInvite(String(text ?? ""));
+  if ((result.names ?? []).includes("投資帶單") && ((result.verdict === "SCAM" && !reviewCleared) || (result.verdict === "UNSURE" && investSolicited))) names.push("投資帶單＋第一層非 OK");
   // 10/23 誤判：0 分＋覆核 UNSURE 只因「第 2 次判詐騙」就通知。10/22 規則：0 分不可只因模型判詐騙就警告。
   // 0 分時這條只有「覆核也 SCAM 且帶確定特徵」才算；否則照樣計次、只記錄（zeroScoreRepeatLogged）。
   if (result.verdict === "SCAM" && tracker.scam(senderId)) {
