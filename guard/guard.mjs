@@ -18,6 +18,7 @@ import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
 import { blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
+import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage } from "./policy.mjs";
@@ -445,6 +446,7 @@ const SCAM_SYSTEM = `你是 LINE 群組的反詐騙審查員。判斷使用者�
 「假搬家」也是詐騙：一般成員要大家移到新群／新社群、「重新加入」「重新➕」、「明日統一核准」，都算 SCAM（真正的管理員公告不會送到你這裡審查）。
 「假冒知名廠商或官方名義邀請入群」也是詐騙：用品牌、旅行社、銀行、官方客服、VIP 福利群的名義，附短網址或外部 LINE 社群邀請要大家加入，算 SCAM（例如「某旅行社官方福利群開放加入，點此」接短網址）。
 知名廠商通常用 LINE 官方帳號（藍勾勾、@ 開頭的 ID）；自稱知名廠商或官方，卻導向一般群組／社群邀請（line.me/ti/g、ti/g2）或個人帳號，比較可疑；有 @ 官方帳號也不代表一定安全（有未認證的假官方帳號）。
+派網（Pionex）等交易所的討論、K 線、網格／合約、獲利或虧損分享、推薦碼／邀請碼，只要沒有附網址、短網址、群組邀請或加好友 LINE ID，都是投資社群的正常聊天，算 OK。
 判斷的是「發言者本人是不是在行騙或引流」：如果發言者是在詢問、轉述或提醒別人某段內容是不是詐騙（例如「這個連結是詐騙嗎」「大家小心這種訊息」），算 OK。
 第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行寫 15 字內理由。`;
 
@@ -574,7 +576,7 @@ async function decide(message, rawText, { extraNames = [], dropNames = [] } = {}
   if (policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick") action = decideChatKick({ score, strongScore, verdict, model, review: review.verdict }) ?? action;
   const kick = action === "kick";
   // Meta 確認詐騙：去識別化後累積到範例庫（只存訊息本身，不存發言者）。
-  if (review.verdict === "SCAM" && patterns) {
+  if (review.verdict === "SCAM" && patterns && !(exchangeTextNoLink(text) && !outOfScopeNames(names))) {
     try { if (patterns.addConfirmed(scamModelText(text), names.join("、") || "Meta 確認", { score, reviewModel: review.model })) record({ action: "pattern-learned", score }); } catch (error) { recordError("patterns", error.message); }
   }
   return { kick, action, link, score, names, verdict: verdict ?? "MODEL_UNAVAILABLE", model, modelMs: ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model, reviewMs: review.ms, cloudToday: review.cloudToday };
@@ -1654,6 +1656,8 @@ async function auditImage(ws, message) {
   }
   const entry = { ...base, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: used.model ?? "none", seconds: Math.round((Date.now() - started) / 1000) };
   learnAudit(message, { kind: "image", verdict: entry.verdict, reason, desc: description });
+  // 維護者：交易所／獲利截圖沒附連結 → 只記錄。
+  if (exchangeImageNoLink(reason) && !isFakeGroupImage(reason)) { record({ action: "pionex-nolink-skip", scanNotify: true, ...entry, notified: false }); return; }
   // 只有確定的 SCAM（理由有具體引流／要錢訊號）才通知；UNSURE／SCAM_WEAK 只記錄。
   if (verdict === "SCAM") { record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, entry); }
   else if (verdict === "UNSURE" && isFakeGroupImage(reason)) { record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] }); }
@@ -1802,6 +1806,12 @@ async function handle(ws, message) {
       result.action = "none";
       result.suppressed = true;
     }
+    // 維護者：交易所（派網）相關、沒附連結的訊息一律只記錄（不通知、不計 strike）。踢人不受影響。
+    const exchangeNoLink = !result.kick && exchangeTextNoLink(text) && !outOfScopeNames(result.names);
+    if (exchangeNoLink && (result.action === "notice" || result.verdict === "SCAM")) {
+      record({ action: "pionex-nolink-skip", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, score: result.score, names: result.names, verdict: result.verdict, review: result.review, was: result.action ?? "none" });
+      if (result.action === "notice") { result.action = "none"; result.suppressed = true; }
+    }
     const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
     if (result.kick) {
       remove(ws, message, entry);
@@ -1821,17 +1831,18 @@ async function handle(ws, message) {
     if (firstLink) entry.urlKind = extraNames.includes("短網址導向群組邀請") ? "群組邀請" : knowledgeLink ? "知識" : shopWarn ? "購物" : urlKind(decideText === text ? firstLink : (firstUrl(sanitizeLinks(decideText).text) ?? firstLink), { shorteners: SHORTENERS });
     // 10/22 通知層（只通知，不改踢人分數、不刪文）：原本沒處置時才看。
     if (!result.suppressed && result.action !== "notice" && result.action !== "delete" && config.notifyLayer?.enabled !== false) {
-      const extra = textNotifyReasons({ text, chatId: message.channelId, senderId: message.senderId, result, tracker: notifyTracker, shorteners: SHORTENERS, inviteExpanded: extraNames.includes("短網址導向群組邀請"), log: (x) => x.zeroScoreRepeatLogged ? record({ action: "zero-score-repeat-logged", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId }) : record({ action: "cross-chat-plain", chatId: message.channelId, messageId: message.messageId, chats: x.crossChatPlain }) });
+      const extra = textNotifyReasons({ text, chatId: message.channelId, senderId: message.senderId, result, tracker: exchangeNoLink ? { ...notifyTracker, scam: () => false } : notifyTracker, shorteners: SHORTENERS, inviteExpanded: extraNames.includes("短網址導向群組邀請"), log: (x) => x.zeroScoreRepeatLogged ? record({ action: "zero-score-repeat-logged", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId }) : record({ action: "cross-chat-plain", chatId: message.channelId, messageId: message.messageId, chats: x.crossChatPlain }) });
       // 踢人群（per-chat kick）：跨群群組邀請、冒充負責人要匯款 → 照踢人群規則可刪踢（Claude＋覆核）；其他群只通知。
       if (extra.some((r) => MINER_KICKABLE.has(r)) && await minerKick(ws, message, { ...entry, names: [...(result.names ?? []), ...extra] }, text, result)) return;
-      if (extra.length) {
+      if (extra.length && exchangeNoLink) record({ action: "pionex-nolink-skip", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, rules: extra });
+      else if (extra.length) {
         result.action = "notice";
         entry.action = "notice";
         entry.names = [...(result.names ?? []), ...extra];
         result.names = entry.names;
         record({ action: "notify-rule", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: extra, urlKind: entry.urlKind });
       }
-    } else if (result.verdict === "SCAM") notifyTracker.scam(message.senderId);
+    } else if (result.verdict === "SCAM" && !exchangeNoLink) notifyTracker.scam(message.senderId);
     if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK" || entry.urlKind)) record({ action: "none", ...entry });
     // 沒到踢人門檻，但 Meta 判 SCAM 且（規則 ≥ notifyScore，或地端也判 SCAM 且含連結）：引用回覆該則、通知群主與管理員確認，不踢。
     if (result.action === "delete") return deleteScamLink(ws, message, entry);
@@ -2005,6 +2016,7 @@ async function checkImage(ws, message) {
 const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成員貼出的這張圖片是不是詐騙或詐騙引流：
 老師帶單招收、加 LINE 或其他群組的廣告、保證獲利、博弈娛樂城、兼職刷單、假中獎、假客服或假公告、借貸廣告。
 看盤圖、K 線、技術分析、交易所或交易工具 App 畫面、網格／交易機器人畫面、持倉、損益或獲利截圖、對帳單，本身都算 OK（投資社群的日常分享）；只有同時在招人加群、跟單、私訊、入金或保證獲利時才算 SCAM。
+派網（Pionex）等交易所的分享卡、推薦碼／邀請碼、交易所自己的註冊 QR，沒有附 LINE、加好友、加群或外部網址時，都算 OK。
 一般生活照、風景、食物、寵物、迷因、新聞截圖、一般聊天截圖都算 OK；只是圖裡有數字或文字不代表是詐騙。
 軟體或網站畫面、AI 模型的用量／額度／價格頁、官方服務公告、技術文件、程式碼、終端機、主機設定畫面，都算 OK（這是技術社群的日常分享）。
 假搬家公告（「本群混入詐騙、已建立新群重新審核，請原成員轉移到新群」）是詐騙，算 SCAM，理由寫「要成員轉移到新群」。
@@ -2070,6 +2082,11 @@ async function checkWithVision(ws, message, picture) {
   }
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", ...(recheck ? { cloudRecheck: recheck } : {}), seconds: Math.round((Date.now() - started) / 1000) };
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
+  // 維護者：交易所／獲利截圖沒附連結 → 只記錄（不通知、不標記、不計 24h 獲利圖次數）。
+  if ((verdict === "SCAM" || verdict === "UNSURE") && !isFakeGroupImage(reason) && exchangeImageNoLink(reason)) {
+    record({ action: "pionex-nolink-skip", ...entry });
+    return;
+  }
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
     record({ action: "vision-flag", ...entry });
@@ -2791,6 +2808,7 @@ async function handleNote(ws, chatId, note) {
     protectedAuthor, deleteOnConfirmed: notesCfg.deleteOnConfirmed === true, canDelete, deleteSupported: NOTE_DELETE_SUPPORTED });
   const entry = { ...base, score: result.score, names: result.names, verdict: result.verdict, review: result.review, noteAction: action, protectedAuthor };
   if (action === "none") { if (result.score > 0 || result.verdict === "SCAM") record({ action: "note-checked", ...entry }); return; }
+  if (action === "notify" || action === "notice") { if (exchangeTextNoLink(text) && !outOfScopeNames(result.names)) { record({ action: "pionex-nolink-skip", ...entry }); return; } }
   if (old) { record({ action: "note-flag-baseline", ...entry, reason: "建立於啟用前或太舊，只記錄不通知" }); return; }
   await notifyNote(ws, entry, note, action === "delete");
 }
