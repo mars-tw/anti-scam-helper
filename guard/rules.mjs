@@ -15,6 +15,13 @@ export const MAINSTREAM_CONTENT_DOMAINS = ["youtube.com", "youtu.be", "youtube-n
 // 詢問或提醒詐騙（「這是詐騙嗎」「是不是詐騙」「有人收到這個嗎」「這可信嗎」「小心詐騙」）：扣分，也是 questionRedact 認定「詢問者」的依據。
 export const ASK_SCAM = /(這|那)(個|些|則|種)?(是|應該是|根本是|算)詐騙|是詐騙嗎|詐騙嗎|是不是(詐騙|詐團|騙人|騙局|假的)|是(真|假)的嗎|有(人|沒有人)(也)?收到(這|類似|一樣)|(這|那)(個|種|則)?.{0,4}(可信|能信|可以信|靠譜|安全)(嗎|不)|可信嗎|(不要|別|勿|千萬別)(點|加入|相信|匯款|上當|理)|冒充|假冒|165\s*(查證|反詐|專線)?|小心(詐騙|被騙|上當)|(有人|大家).{0,6}(被騙|遇過|知道.{0,6}(真假|詐騙))/;
 
+// 防詐提醒語氣（「疑似詐騙」「不要亂加」「小心詐騙」）：通知層（notify-rules.mjs）與踢人計分共用。
+export const ANTI_SCAM_WARNING = /(?:疑似|可能是?|小心|注意|提醒|警告|防範|謹防|慎防|當心|嚴防).{0,10}(?:詐騙|假群|假冒|冒充|冒用|被騙)|(?:不要|勿|別|切勿|請勿|千萬別|千萬不要)\s*(?:隨便|亂)?\s*(?:加入|點|加|相信|理會|上當|掃)/;
+// 10/24 維護者同意：沒附網址／短網址／群組邀請／LINE ID／加好友，且是防詐提醒語氣時，這幾條踢人計分不加分（只會更少踢）。
+export const WARNING_ZERO_RULES = new Set(["疑似假群組", "官方名義導向群組", "盜帳號／收帳戶", "提醒／詢問詐騙"]);
+const LINK_RULES = new Set(["LINE 邀請／加好友", "短網址", "網址"]);
+const ANY_LINK = /https?:\/\/|www\.|(?<![\w.@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/|line\.me\/|lin\.ee\/|openchat\.line\.me|加\s*(我\s*)?(賴|line)|(line|賴)\s*id|ID\s*[:：]\s*@?\w{3,}/i;
+
 // ── 規則：每類命中加分，同一類只算一次 ──────────────────────────
 export const RULES = [
   { name: "LINE 邀請／加好友", score: 3, pattern: /line\.me\/(ti|R\/ti)|lin\.ee\/|加\s*(我\s*)?(賴|line|LINE|Line)|(line|LINE|賴)\s*(id|ID)\s*[:：]?|ID\s*[:：]\s*@?\w{3,}/ },
@@ -102,7 +109,9 @@ export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
       : rule.onBenignStripped
       ? rule.pattern.test(strippedNormal) || rule.pattern.test(strippedCompact)
       : rule.pattern.test(normal) || rule.pattern.test(compact));
-    let score = Math.max(0, hits.reduce((sum, rule) => sum + rule.score, 0));
+    const warnNoLink = message?.card?.kind !== "contact" && !hits.some((rule) => LINK_RULES.has(rule.name)) && !ANY_LINK.test(normal) && !ANY_LINK.test(compact) && (ANTI_SCAM_WARNING.test(normal) || ANTI_SCAM_WARNING.test(compact));
+    const ruleScoreOf = (rule) => (warnNoLink && WARNING_ZERO_RULES.has(rule.name) && rule.score > 0 ? 0 : rule.score);
+    let score = Math.max(0, hits.reduce((sum, rule) => sum + ruleScoreOf(rule), 0));
     const names = hits.map((rule) => rule.name);
     if (scamDomain && scamDomain.test(normal)) { score += 3; names.push("已知詐騙網域"); }
     // 在群組裡丟聯絡人卡片，是常見的引流手法。

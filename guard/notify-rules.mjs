@@ -10,7 +10,7 @@ export function minerAction({ perChatKick, reasons = [], verdict, model, review,
 }
 // 通知層（10/22 誤判審查／情資分析）：只決定「要不要通知管理員」，分數只算通知分，絕不計入踢人分數，也不刪文。
 import { createHash } from "node:crypto";
-import { MAINSTREAM_CONTENT_DOMAINS, PLATFORM_SHORTENERS } from "./rules.mjs";
+import { ANTI_SCAM_WARNING, MAINSTREAM_CONTENT_DOMAINS, PLATFORM_SHORTENERS } from "./rules.mjs";
 
 const URL_RE = /(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?/gi;
 const INVEST = /投資|帶單|跟單|老師|獲利|報酬|收益|配息|股票|虛擬貨幣|幣圈|合約|USDT|期貨|黃金/i;
@@ -35,7 +35,6 @@ export const NOTIFY_RULES = [
 ];
 
 const MOVE_GROUP = /(?:機器人|廣告|外掛).{0,6}(?:洗版|洗頻|刷屏)|開(?:了)?新群|搬群|換新群|移到新群|加入新群/;
-const ANTI_SCAM_WARNING = /(?:疑似|可能是?|小心|注意|提醒|警告|防範|謹防|慎防|當心|嚴防).{0,10}(?:詐騙|假群|假冒|冒充|冒用|被騙)|(?:不要|勿|別|切勿|請勿|千萬別|千萬不要)\s*(?:隨便|亂)?\s*(?:加入|點|加|相信|理會|上當|掃)/;
 function hasLinkOrInvite(t) { return INVITE_RE.test(t) || (String(t).match(URL_RE) ?? []).length > 0; }
 const VOTE = /投票|票選|比賽|幫.{0,4}投(?:票|一票|一下|給)|拉票/;
 const ASK_CODE = /(?:輸入|填(?:寫|入)?|提供|傳|給|回覆|告訴).{0,8}(?:認證碼|驗證碼|手機號碼|手機號|門號|簡訊碼)|(?:認證碼|驗證碼|簡訊碼).{0,6}(?:給我|傳給|回傳|截圖|告訴)/;
