@@ -532,7 +532,7 @@ async function decide(message, rawText, { extraNames = [], dropNames = [] } = {}
     const chatKick = chatKickMode(message.channelId) === "kick";
     const perChatKick = chatKick && policyOf(message.channelId).kickMode === "kick";
     // 開踢人的群（踢人群）照 decideChatKick；全域 kick（測試／舊設定）照舊：兩層都 SCAM 才踢；其他一律只通知。
-    const action = perChatKick ? (decideChatKick({ score: Math.max(score, strongScore), strongScore, verdict: judged.verdict, model: judged.model, review: review.verdict }) ?? "notice")
+    const action = perChatKick ? (decideChatKick({ score: Math.max(score, strongScore), strongScore, verdict: judged.verdict, model: judged.model, review: review.verdict, expandedInvite: extraNames.includes("短網址導向群組邀請"), ordinaryMember: !isStaff(message) }) ?? "notice")
       : chatKick && judged.verdict === "SCAM" && review.verdict === "SCAM" ? "kick" : "notice";
     return { kick: action === "kick", action, forced: true, link: hasLink(text), score: Math.max(score, strongScore), names, verdict: judged.verdict ?? "MODEL_UNAVAILABLE", model: judged.model, modelMs: judged.ms, review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model };
   }
@@ -1788,7 +1788,7 @@ async function handle(ws, message) {
     }
     // 「疑似短網址」（短網域＋短路徑，不在已知短網址清單）：也唯讀展開；是知識／社群／技術文件就放行（只在沒開踢人的群）。
     const susRule = RULES.find((r) => r.name === "疑似短網址");
-    const susUrl = !shortUrl && config.shortUrlExpand === true && !perChatKickHere ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
+    const susUrl = !shortUrl && config.shortUrlExpand === true ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
     if (susUrl) {
       const expanded = await expandUrlSafe(/^https?:/i.test(susUrl.trim()) ? susUrl.trim() : `https://${susUrl.trim()}`).catch(() => undefined);
       if (expanded?.invite) extraNames.push("短網址導向群組邀請");

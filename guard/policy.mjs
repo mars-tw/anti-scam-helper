@@ -426,7 +426,10 @@ export function kickModeFor(chatId, { globalMode = "notify", groupPolicies = {} 
  * 覆核由 Grok 回答時規則同 Meta：SCAM 踢、沒回應照踢、OK／UNSURE 只通知（覆核鏈：Grok → Meta）。
  * 不符合前提（分數不夠、第一層沒判 SCAM）回 undefined，交回一般流程。
  */
-export function decideChatKick({ score, strongScore = 6, verdict, model, review }) {
+export function decideChatKick({ score, strongScore = 6, verdict, model, review, expandedInvite = false, ordinaryMember = false }) {
+  // 維護者 10/24 08:41：踢人群裡短網址展開確認是 LINE 群組邀請、一般成員發、覆核判 SCAM → 刪文＋踢人（第一層 UNSURE／SCAM 皆可）。
+  // 展開失敗（呼叫端不會傳 expandedInvite）、覆核失敗／逾時／空白、覆核非 SCAM、第一層明確 OK → 不走這條。
+  if (expandedInvite && ordinaryMember && review === "SCAM" && (verdict === "UNSURE" || verdict === "SCAM")) return "kick";
   if (!(score >= strongScore) || verdict !== "SCAM") return undefined;
   if (!/^claude/i.test(String(model ?? ""))) return "notice";
   if (review === "SCAM" || review === undefined || review === "UNAVAILABLE") return "kick";
