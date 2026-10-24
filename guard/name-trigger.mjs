@@ -22,7 +22,7 @@ export function stripQuotedAndMentions(text, mentions = []) {
  * names：本人的名字（例如 ["阿華"]）。名字後面可接常見稱呼（割割／哥／大大）。
  * 回傳 true＝在叫本人。
  */
-export function makeNameMatcher(names) {
+export function makeNameMatcher(names, { botName = false } = {}) {
   const list = [...new Set((names ?? []).map((n) => toTraditional(String(n ?? "").trim())).filter((n) => n.length >= 2))].sort((a, b) => b.length - a.length);
   if (list.length === 0) return () => false;
   const N = `(?:${list.map(escape).join("|")})(?:割割|哥哥|哥|大大|大)?`;
@@ -36,6 +36,7 @@ export function makeNameMatcher(names) {
   // 名字後面直接接第二人稱：「…阿華你覺得呢」
   const second = new RegExp(`${N}\\s*[,，]?\\s*(?:你|妳|您)`, "i");
   const any = new RegExp(N, "i");
+  const botLead = new RegExp(`^\\s*(?:${GREET}\\s*[,，、~～!！]?\\s*)?${N}(?!\\s*${N}\\s*$)\\s*\\S`, "i");
   // 不是「阿」開頭的名字（例如「華哥」）可能是別人名字的一部分（「子華哥」）：前面緊接著漢字，
   // 而且那個漢字不是招呼語／語助詞的結尾，就當成別人的名字，先換掉。
   const loose = list.filter((n) => !n.startsWith("阿"));
@@ -57,6 +58,8 @@ export function makeNameMatcher(names) {
   return (text, mentions) => {
     const cleaned = maskOthers(toTraditional(stripQuotedAndMentions(text, mentions)).trim());
     if (!any.test(cleaned)) return false;
+    // 機器人專屬名字（例如守護貓的名字，不是真人名）：句首叫名字後面直接接指令也算（「喵嗚查詢…」）。
+    if (botName && botLead.test(cleaned)) return true;
     return lead.test(cleaned) || greet.test(cleaned) || tail.test(cleaned) || second.test(cleaned);
   };
 }

@@ -146,6 +146,9 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
       html = Buffer.concat(chunks.map((c) => Buffer.from(c))).subarray(0, maxBytes).toString("utf8");
     }
     const invite = /line\.me(?:\\?\/)+(?:R(?:\\?\/)+)?ti(?:\\?\/)+g2?(?:\\?\/)/i.test(html);
+    // 短網址中繼頁用 meta refresh 或 location 轉址（不是 3xx）：再跟下一跳，免得只停在第一跳。
+    const next = invite ? undefined : html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*\d*\s*;?\s*url\s*=\s*['"]?([^"'>\s]+)/i)?.[1] ?? html.match(/(?:window\.)?location(?:\.href)?\s*(?:=|\.replace\(|\.assign\()\s*["'](https?:\/\/[^"']+)["']/i)?.[1];
+    if (next && hop < 4) { try { target = new URL(next.replace(/&amp;/g, "&"), parsed).toString(); continue; } catch {} }
     return { url: parsed.toString(), html, invite, status: response.status };
   }
   return undefined;

@@ -118,7 +118,7 @@ const learnExt = learnExtChats(groupPolicies);
 const botCamp = botCampChats(groupPolicies);
 const botCampLimiters = new Map([...botCamp].map(([chatId, p]) => [chatId, makeChatReplyLimiter(p.limits)]));
 // 機器人訓練群另外認的叫法（groupPolicies.<群>.callNames，例如守護貓的名字）：跟叫主人名字一樣算在叫本帳號。
-const botCampNames = new Map([...botCamp].map(([chatId, p]) => [chatId, makeNameMatcher(p.callNames)]));
+const botCampNames = new Map([...botCamp].map(([chatId, p]) => [chatId, makeNameMatcher(p.callNames, { botName: true })]));
 // 只學習群另開詐騙判斷＋通知（見 policy.mjs scanNotifyChats）：只判文字、只發通知，刪除與踢人照只學習擋下。
 const scanNotify = scanNotifyChats(groupPolicies);
 // 可以「抓圖」的只學習群：延伸學習（描述圖片）或 scanNotify（看圖判詐騙），只用於判斷與去識別化描述，不存原圖。
@@ -2085,6 +2085,13 @@ async function checkWithVision(ws, message, picture) {
   // 維護者：交易所／獲利截圖沒附連結 → 只記錄（不通知、不標記、不計 24h 獲利圖次數）。
   if ((verdict === "SCAM" || verdict === "UNSURE") && !isFakeGroupImage(reason) && exchangeImageNoLink(reason)) {
     record({ action: "pionex-nolink-skip", ...entry });
+    return;
+  }
+  // 圖片假搬家公告（要成員申請加入新群）：理由有「公告」被降成 SCAM_WEAK 時仍只發通知（不刪不踢，不走踢人群路徑）。
+  if (verdict === "SCAM_WEAK" && isFakeGroupImage(reason)) {
+    const flagged = { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] };
+    record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE" });
+    await notifyAdmins(ws, flagged, "suspect");
     return;
   }
   if (verdict === "SCAM" || verdict === "UNSURE") {
