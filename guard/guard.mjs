@@ -21,7 +21,7 @@ import { blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLim
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
-import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage } from "./policy.mjs";
+import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, withAgentLabel } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
@@ -1608,6 +1608,16 @@ async function drainAuditImages() {
     }
   } finally { auditBusy = false; }
 }
+// 單一看圖模型判 SCAM、沒有連結時的看圖覆核（vision.reviewLlm：Grok → Meta）。沒設定或失敗 → UNAVAILABLE（不算確認）。
+async function reviewVisionSolo(small) {
+  if (!vision.reviewLlm) return { verdict: "UNAVAILABLE", model: "none" };
+  const used = {};
+  try {
+    const answer = await complete(vision.reviewLlm, VISION_SYSTEM, "請判斷這張圖片。", 80, small, used);
+    const rv = ["SCAM", "UNSURE", "OK"].find((word) => String(answer ?? "").trim().toUpperCase().startsWith(word));
+    return { verdict: rv ?? "UNAVAILABLE", model: used.model ?? "none" };
+  } catch (error) { recordError("vision-review", String(error?.message ?? error).slice(0, 80)); return { verdict: "UNAVAILABLE", model: used.model ?? "none" }; }
+}
 async function auditImage(ws, message) {
   if (!imageCap.take()) { record({ action: "audit-image-skipped", reason: "hourly-cap", chatId: message.channelId, messageId: message.messageId }); return; }
   const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
@@ -1659,7 +1669,15 @@ async function auditImage(ws, message) {
   // 維護者：交易所／獲利截圖沒附連結 → 只記錄。
   if (exchangeImageNoLink(reason) && !isFakeGroupImage(reason)) { record({ action: "pionex-nolink-skip", scanNotify: true, ...entry, notified: false }); return; }
   // 只有確定的 SCAM（理由有具體引流／要錢訊號）才通知；UNSURE／SCAM_WEAK 只記錄。
-  if (verdict === "SCAM") { record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, entry); }
+  if (verdict === "SCAM") {
+    // 維護者 10/25：沒有連結訊號（含 QR）又沒有覆核確認 SCAM → 只記錄、不在群內通知。
+    if (!visionHasLink(reason, { qr: Boolean(content) })) {
+      const review = await reviewVisionSolo(small);
+      entry.review = review.verdict; entry.reviewModel = review.model;
+      if (!visionSoloMayNotify({ reason, qr: Boolean(content), review: review.verdict })) { record({ action: "vision-solo-skip", scanNotify: true, ...entry, notified: false }); return; }
+    }
+    record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, entry);
+  }
   else if (verdict === "UNSURE" && isFakeGroupImage(reason)) { record({ action: "vision-flag", scanNotify: true, ...entry }); await flagScanNotify(ws, { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] }); }
   else if (verdict !== "SCAM" && (imageNotify(verdict, reason).notify || trackProfitImage(imageNotify(verdict, reason), message))) {
     const inl = imageNotify(verdict, reason);
@@ -2093,6 +2111,13 @@ async function checkWithVision(ws, message, picture) {
     record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE" });
     await notifyAdmins(ws, flagged, "suspect");
     return;
+  }
+  // 維護者 10/25：單一看圖模型判 SCAM、圖裡沒有連結訊號，又沒有覆核模型確認 SCAM → 只記錄、不在群內通知（不計標記）。
+  // 假搬家公告圖（含踢人群路徑）與 10/22 通知層規則不走這條，行為不變。
+  if (verdict === "SCAM" && vision.action !== "remove" && !isFakeGroupImage(reason) && !imageNotify(verdict, reason).notify && !visionHasLink(reason)) {
+    const review = recheck?.verdict === "SCAM" ? { verdict: "SCAM", model: recheck.model } : await reviewVisionSolo(small);
+    entry.review = review.verdict; entry.reviewModel = review.model;
+    if (!visionSoloMayNotify({ reason, review: review.verdict })) { record({ action: "vision-solo-skip", ...entry, notified: false }); return; }
   }
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
