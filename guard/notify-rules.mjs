@@ -16,6 +16,10 @@ const URL_RE = /(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?/gi;
 const INVEST = /投資|帶單|跟單|老師|獲利|報酬|收益|配息|股票|虛擬貨幣|幣圈|合約|USDT|期貨|黃金/i;
 
 /** 通知分規則（e／f／g）。f 直接通知；e、g 各 +2，e 跟投資字眼一起再 +2。 */
+export const WORK_MONEY = "工作指示要匯款／問帳戶餘額";
+export const FAKE_VERIFY = "假認證／運費＋加 LINE";
+export const WITHDRAW_FEE = "出金要先繳費＋聯絡方式";
+export const CODE_COUPON = "領券／贈品要回傳驗證碼";
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -32,8 +36,26 @@ export const NOTIFY_RULES = [
   // 10/24 自動反思：群友的防詐提醒文字（「疑似詐騙提醒…不要加入新群」）被這條觸發、兩個模型都判 OK 仍通知。
   // 沒有任何網址／邀請時，若文字是防詐提醒語氣，或第一層與覆核都判 OK，就不算（只會更少通知）。
   { name: "假管理員搬群話術", score: 4, direct: true, match: (t, ctx = {}) => MOVE_GROUP.test(t) && !(!hasLinkOrInvite(t) && (ANTI_SCAM_WARNING.test(t) || (ctx.verdict === "OK" && ctx.review === "OK"))) },
+  // 10/24 情資：工作指示口吻要匯款／問帳戶餘額（假老闆、假主管）。只通知，不進踢人分數，不在 MINER_KICKABLE。
+  // 白名單／管理員／受保護成員發的不算；防詐提醒語氣不算。
+  { name: WORK_MONEY, score: 4, direct: true, match: (t, ctx = {}) => !ctx.protectedSender && WORK_MONEY_RE.test(t) && WORK_TONE.test(t) && !ANTI_SCAM_WARNING.test(t) },
+  // 10/24 情資：假金流認證／實名認證／帳戶驗證失敗／支付運費＋叫人加 LINE／私訊；免費餐券、合資訂單要配加群／加 LINE 才算。只通知。
+  { name: FAKE_VERIFY, score: 4, direct: true, match: (t, ctx = {}) => !ctx.protectedSender && !ANTI_SCAM_WARNING.test(t) && ((FAKE_VERIFY_RE.test(t) && ADD_LINE.test(t)) || (FREE_LURE.test(t) && (ADD_LINE.test(t) || JOIN_GROUP.test(t)))) },
+  // 10/24 情資：出金要先繳／補繳保證金、稅金、解凍費，再加網址／QR／私訊／加 LINE。只通知。
+  { name: WITHDRAW_FEE, score: 4, direct: true, match: (t, ctx = {}) => !ctx.protectedSender && !ANTI_SCAM_WARNING.test(t) && /出金/.test(t) && WITHDRAW_FEE_RE.test(t) && (hasLinkOrInvite(t) || /QR|ＱＲ|條碼/i.test(t) || ADD_LINE.test(t)) },
+  // 10/24 情資：領券／折價券／送東西要人回傳驗證碼。假投票規則已命中時不重複。只通知。
+  { name: CODE_COUPON, score: 4, direct: true, match: (t, ctx = {}) => !ctx.protectedSender && !ANTI_SCAM_WARNING.test(t) && SEND_CODE.test(t) && COUPON.test(t) && !(VOTE.test(t) && ASK_CODE.test(t)) },
 ];
 
+const WORK_MONEY_RE = /(?:帳戶|戶頭)\s*(?:的\s*)?餘額|(?:匯|轉)(?:款|錢)?\s*(?:到|至)\s*.{0,6}指定(?:的)?\s*(?:帳戶|帳號)/;
+const WORK_TONE = /幫我|馬上|立刻|立即|今天先|先幫|先匯|先轉|老闆(?:交代|說|要|吩咐)|主管(?:交代|說|要)|趕快|盡快|急/;
+const FAKE_VERIFY_RE = /金流認證|實名制?\s*認證|帳戶驗證失敗|支付運費/;
+const ADD_LINE = /加\s*(?:我\s*)?(?:的\s*)?(?:LINE|line|ＬＩＮＥ|賴)|私訊|加\s*(?:我\s*)?好友/;
+const JOIN_GROUP = /(?:加入|進|入)\s*.{0,6}群|群組邀請/;
+const FREE_LURE = /免費餐券|合資訂單/;
+const WITHDRAW_FEE_RE = /(?:先|補)\s*繳?\s*(?:保證金|稅金|解凍費)|繳\s*(?:解凍費)/;
+const SEND_CODE = /回傳\s*(?:簡訊)?\s*驗證碼|(?:傳|給)\s*(?:簡訊)?\s*驗證碼\s*給我|驗證碼\s*(?:傳|給|回傳)\s*(?:給)?\s*我/;
+const COUPON = /領券|折價券|優惠券|送/;
 const MOVE_GROUP = /(?:機器人|廣告|外掛).{0,6}(?:洗版|洗頻|刷屏)|開(?:了)?新群|搬群|換新群|移到新群|加入新群/;
 function hasLinkOrInvite(t) { return INVITE_RE.test(t) || (String(t).match(URL_RE) ?? []).length > 0; }
 const VOTE = /投票|票選|比賽|幫.{0,4}投(?:票|一票|一下|給)|拉票/;
@@ -46,6 +68,10 @@ export function noticeTips(names = []) {
   const tips = [];
   if (names.some((n) => n === "假管理員搬群話術" || n === "假群組公告")) tips.push("真管理員的皇冠是 LINE 介面在名字旁的標示，畫在頭像圖裡的皇冠不算；社群不會叫大家搬到新群，這類是假群組。");
   if (names.includes("假投票／活動騙認證碼")) tips.push("投票不需要輸入手機號碼或 LINE 認證碼，輸入了帳號可能被盜。");
+  if (names.includes(WORK_MONEY)) tips.push("說要匯款或問帳戶餘額，請先打電話給本人確認（用你原本存的號碼，不要用訊息裡給的）。");
+  if (names.includes(FAKE_VERIFY)) tips.push("銀行、賣場不會叫你加 LINE 做金流認證、實名認證或先付運費。");
+  if (names.includes(WITHDRAW_FEE)) tips.push("正規平台出金不會要你先繳保證金、稅金或解凍費。");
+  if (names.includes(CODE_COUPON)) tips.push("驗證碼不要給任何人，給了帳號可能被盜。");
   return tips;
 }
 
@@ -147,9 +173,9 @@ export function investSolicit(text) { return INVEST_SOLICIT.test(String(text ?? 
 
 export const REPEAT_SCAM = "同一人 24 小時內第 2 次判詐騙";
 /** 文字訊息的通知層判斷（呼叫端只在原本沒有處置時呼叫）。回 names（空陣列＝不通知）。 */
-export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, log }) {
+export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, protectedSender = false, log }) {
   const names = [];
-  const ns = notifyScore(text, { verdict: result.verdict, review: result.review });
+  const ns = notifyScore(text, { verdict: result.verdict, review: result.review, protectedSender });
   if (ns.notify) names.push(...ns.names);
   // 10/23 誤判（交易群只說「有入金一點」也被通知）：投資字眼單獨出現（入金、出金、翻倍、內線、帶單…）是交易群日常用語。
   // 只有第一層判 SCAM，或第一層 UNSURE 且文字是「明確招攬」（叫人入金、帶你賺、保證獲利、招收跟單…）才通知；單純提到＋不確定只記錄。
