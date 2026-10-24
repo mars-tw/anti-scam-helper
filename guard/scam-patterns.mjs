@@ -22,6 +22,15 @@ function similarity(a, b) {
   return common / (a.size + b.size - common);
 }
 
+/** 去掉連結佔位（［連結：…］）、空白與標點後剩下的字。只剩連結的訊息沒有可學的話術，當 SCAM 範例只會教模型「有連結就是詐騙」。 */
+export function patternBody(text) {
+  return String(text ?? "").replace(/［連結：[^］]*］/g, "").replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+/** 能不能當 SCAM 範例：去掉連結後至少 8 個字。 */
+export function learnablePattern(text) {
+  return patternBody(text).length >= 8;
+}
+
 export class ScamPatterns {
   constructor(dir) {
     this.dir = dir;
@@ -40,7 +49,8 @@ export class ScamPatterns {
       for (const line of readFileSync(join(this.dir, "confirmed.jsonl"), "utf8").split("\n")) {
         if (!line.trim()) continue;
         const entry = JSON.parse(line);
-        if (entry.label !== "bad") items.push({ label: "SCAM", category: entry.category ?? "Meta 確認", text: entry.text, source: "confirmed" });
+        // 只有連結、沒有話術的舊紀錄不當範例（自動反思 10/25：一般科技／知識網址被誤當詐騙範例）。
+        if (entry.label !== "bad" && learnablePattern(entry.text)) items.push({ label: "SCAM", category: entry.category ?? "Meta 確認", text: entry.text, source: "confirmed" });
       }
     } catch {}
     for (const item of items) item.grams = bigrams(item.text);
@@ -63,7 +73,7 @@ export class ScamPatterns {
   /** 累積 Meta 確認的詐騙訊息（呼叫端須先去識別化）；和既有範例幾乎一樣的就不重複存。 */
   addConfirmed(text, category, meta = {}) {
     const clean = String(text ?? "").trim().slice(0, 400);
-    if (clean.length < 8) return false;
+    if (clean.length < 8 || !learnablePattern(clean)) return false;
     const grams = bigrams(clean);
     if (this.load().some((item) => similarity(grams, item.grams) > 0.85)) return false;
     const path = join(this.dir, "confirmed.jsonl");
