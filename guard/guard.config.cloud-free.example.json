@@ -3,7 +3,7 @@
   "dryRun": true,
   "deleteMessage": true,
   "strongScore": 6,
-  "checkEveryMessage": false,
+  "localScreenAll": false,
   "whitelist": [],
   "protectedMembers": [
     {
@@ -19,9 +19,19 @@
     "maxTokensField": "max_tokens",
     "timeoutMs": 180000
   },
+  "review": {
+    "backend": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "請填入覆核模型名稱",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxTokens": 2000,
+    "timeoutMs": 60000
+  },
+  "reviewScore": 3,
   "chat": {
     "enabled": true,
     "name": "小助手",
+    "ownerNames": [],
     "triggers": [
       "小助手"
     ],
@@ -49,6 +59,7 @@
     "enabled": true,
     "allow": []
   },
+  "linkAllow": [],
   "vision": {
     "enabled": true,
     "action": "report",
@@ -56,5 +67,34 @@
     "maxQueue": 20,
     "maxSide": 768
   },
-  "logDir": "logs"
+  "logDir": "logs",
+  "scamLink": {
+    "deleteOnConfirmed": false
+  },
+  "scamShop": {
+    "enabled": false,
+    "fetchPage": false,
+    "kickRepeat": false
+  },
+  "impersonation": {
+    "kick": false,
+    "kickWithInvite": false
+  },
+  "fakeAdmin": {
+    "enabled": false,
+    "avatar": true,
+    "cooldownHours": 12
+  },
+  "aiSummary": {
+    "enabled": false,
+    "cooldownMinutes": 10,
+    "budgetTokens": 4000000,
+    "chunkTokens": 180000,
+    "llm": {
+      "backend": "openai",
+      "baseUrl": "https://api.x.ai/v1",
+      "model": "grok-4.20-0309-non-reasoning",
+      "apiKeyEnv": "XAI_API_KEY"
+    }
+  }
 }

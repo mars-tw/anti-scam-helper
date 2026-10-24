@@ -13,6 +13,11 @@ import { ChatStore } from "./model/store.js";
 import { UpdateChecker } from "./update/checker.js";
 import { createHub } from "./ws/hub.js";
 
+const RESTORE_FIRST_DELAY_MS = 30_000;
+const RESTORE_MAX_DELAY_MS = 10 * 60_000;
+const RESTORE_MAX_ATTEMPTS = 20;
+const RECOVERY_EXIT_TIMEOUT_MS = 15_000;
+
 async function main(): Promise<void> {
   process.umask(0o077);
   const config = await loadConfig();
@@ -35,6 +40,7 @@ async function main(): Promise<void> {
     onChecked: (chatId) => hub.handleChecked(chatId),
     onChatsChanged: () => hub.handleChatsChanged(),
     onReactions: (chatId, messageId, reactions) => hub.handleReactions(chatId, messageId, reactions),
+    onNoteStatus: (chatIds, noteCount, latestCreatedAt) => hub.handleNoteStatus(chatIds, noteCount, latestCreatedAt),
     onStatus: (state) => {
       console.info(`LINE 狀態：${state}`);
       hub.setStatus(state);
@@ -43,7 +49,17 @@ async function main(): Promise<void> {
       console.error(code);
       if (code === "SESSION_WRITE_FAILED") login.fail();
     },
+    // A connection that died silently (host suspended, sockets gone) cannot be trusted to recover in
+    // place: the pooled HTTP/2 sessions are dead too. Exit and let the process manager start a fresh one,
+    // which is exactly what a manual restart does. The session token is kept on disk.
+    onStale: (reason, detail) => {
+      console.error(`LINE_STALE reason=${reason} silent=${Math.round(detail.silentMs / 1000)}s${detail.jumpMs !== undefined ? ` jump=${Math.round(detail.jumpMs / 1000)}s` : ""}：連線已失效，結束行程交給 pm2 重啟`);
+      restartForRecovery();
+    },
   }, proxyFetch, config.limits.downloadMaxBytes);
+  let stopping = false;
+  // Set once `stop` exists; the provider can only report a stale connection after login, i.e. later.
+  let restartForRecovery = (): void => { process.exitCode = 1; };
   const login = new LoginController(provider);
   const media = new MediaService(config.cache.mediaMaxBytes, provider);
   const apiTokens = new ApiTokenStore(resolve("api-token.json"));
@@ -86,13 +102,28 @@ async function main(): Promise<void> {
   if (config.jev.token) console.info(`詐騙訊息分析：已啟用（TypeSafe ${config.jev.model}；只在你對訊息按右鍵選擇分析時送出該則文字）`);
   if (proxy) console.info(`對外連線經代理：${describeProxy(proxy)}`);
   console.info("請使用次要帳號；QR 與 PIN 僅於網頁顯示。");
-  void login.restore();
+  // A restore that fails because the network is not back yet (e.g. right after a wake) would leave the
+  // service signed out until someone restarts it. Retry while a saved token exists; a token LINE rejects
+  // stops being retried after a bounded number of attempts.
+  let restoreAttempt = 0;
+  let restoreTimer: NodeJS.Timeout | undefined;
+  const restore = async (): Promise<void> => {
+    await login.restore();
+    if (stopping || login.state === "ready" || restoreAttempt >= RESTORE_MAX_ATTEMPTS) return;
+    const token = await storage.get("userAuthToken").catch(() => undefined);
+    if (typeof token !== "string" || !token) return;
+    const delay = Math.min(RESTORE_FIRST_DELAY_MS * 2 ** restoreAttempt, RESTORE_MAX_DELAY_MS);
+    restoreAttempt++;
+    console.warn(`LINE_RESTORE_RETRY attempt=${restoreAttempt} in=${Math.round(delay / 1000)}s：登入狀態還原失敗，稍後重試`);
+    restoreTimer = setTimeout(() => { void restore(); }, delay);
+  };
+  void restore();
   const updates = config.update.check ? new UpdateChecker({ current: manifest.version, onUpdate: (info) => hub.setUpdate(info) }) : undefined;
   updates?.start();
-  let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    clearTimeout(restoreTimer);
     updates?.stop();
     hub.close();
     web.server.close();
@@ -106,6 +137,12 @@ async function main(): Promise<void> {
       await releasePid().catch(() => {});
       process.exit(1);
     }
+  };
+  restartForRecovery = () => {
+    process.exitCode = 1;
+    // Teardown touches the dead connection; never let it keep the process alive.
+    setTimeout(() => process.exit(1), RECOVERY_EXIT_TIMEOUT_MS).unref();
+    void stop();
   };
   process.once("SIGINT", () => { void stop(); });
   process.once("SIGTERM", () => { void stop(); });

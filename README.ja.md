@@ -14,6 +14,14 @@ LINE.js をもとに改変した、LINE グループとオープンチャット�
 
 本作品は非公式の LINE API を使用しており、アカウントの制限や停止につながる可能性があります。**まずサブアカウントで検証してください**。メインアカウントで直接テストしないでください。
 
+**詐欺対策ガードのクイックスタート**（詳しい手順は [guard/DEPLOY.md](guard/DEPLOY.md)、設定は [guard/README.md](guard/README.md) を参照）：
+1. Node.js **≥ 22**（`node -v` で確認。システムの node が古い場合は Node 22 を別途インストール）と、LINE の**サブアカウント**。オープンチャットのメンバーを退会させるには、そのアカウントがオープンチャットの管理者または共同管理者である必要があります。
+2. `git clone https://github.com/mars-tw/anti-scam-helper.git && cd anti-scam-helper && npm install && npm run build && npm install --prefix guard`。
+3. プロキシを使う場合は**ログイン前**に設定します。`npm start` のあと `npm run cli -- login` を実行し、ターミナルに表示された QR コードをスマートフォンで読み取って PIN を入力します（QR コードと PIN はターミナルにのみ表示され、ファイルには書き込まれません。ターミナルで QR コードを表示できない場合は Web ログインを使います。詳しくは [guard/DEPLOY.md](guard/DEPLOY.md)）。
+4. `config.yaml` に `api.enabled: true`、`api.chats`、`api.moderation: true` を設定し、再起動してから `npm run -s cli -- token --yes` で Token を生成します。
+5. `guard/guard.config.*.example.json` を `guard/guard.config.json` にコピーします。任意の設定：階層型パトロール（ローカルモデルによる一次チェックと、OpenAI 互換または Responses エンドポイントによる再確認）、自分のグループのリンクを許可する `linkAllow`、グループごとの管理者通知、@ メンションにのみ返信する設定。
+6. **まず `dryRun: true` で試運転**し、誤判定がないことを確認してからメンバーの退会処理を有効にします。`ecosystem.config.example.cjs` を使って pm2 で常駐させ、`pm2 save && pm2 startup` で起動時に自動で立ち上がるようにします。
+
 **クイックナビ**：[インストールと起動](#インストールと起動)｜[管理スクリプト](#管理スクリプト)｜[設定](#設定)｜[ボット API](#ボット-apiapiws)｜[ターミナルインターフェース（CLI）](#ターミナルインターフェースcli)｜[バージョン更新](#バージョン更新)｜[セキュリティポリシー](SECURITY.md)
 
 ## 目標システム構成（後続の Gate を含む）

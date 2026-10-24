@@ -15,3 +15,25 @@ guard/guard.config.json
 guard/token.txt
 guard/logs/
 guard/node_modules/
+
+# 聊天應答學習資料庫（本機，不進 git）
+data/
+
+# 本機部署檔（範本：ecosystem.config.example.cjs、scripts/*.example.sh、scripts/env.example）
+ecosystem.config.cjs
+run-server.sh
+run-guard.sh
+.env
+.env.*
+env
+*.env
+# 備份
+backups/
+*.bak
+*.backup
+config.yaml.*
+guard/guard.config.json.*
+guard/token.txt.*
+
+# 部署前備份檔（含真實資料，不進 git）
+*.pre-*
