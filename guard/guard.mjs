@@ -17,7 +17,7 @@ import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RUL
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { isAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
+import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
@@ -1709,7 +1709,8 @@ async function handle(ws, message) {
   learnAdmin(message);
   noteActivity(message);
   // 10/25：其他防詐機器人的「疑似詐騙提醒」：不回覆、不回收到／處置、不通知、不計標記（依內容判斷，涵蓋同類機器人）。
-  if (text && isAntiScamBotAlert(text)) {
+  // 補洞：只有純文字、沒有網址／短網址／群組邀請／LINE ID 的才跳過；圖片（可能有 QR）與有連結的照一般流程，回覆仍由 question()／isBotText 擋。
+  if (text && message.contentType !== "IMAGE" && isPlainAntiScamBotAlert(text) && !hasLineInfo(text)) {
     record({ action: "bot-alert-skipped", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
     return;
   }

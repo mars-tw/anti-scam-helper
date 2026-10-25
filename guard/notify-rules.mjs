@@ -1,4 +1,4 @@
-import { isAntiScamBotAlert } from "./policy.mjs";
+import { isPlainAntiScamBotAlert } from "./policy.mjs";
 const INVITE_RE = /line\.me\/(?:R\/)?ti\/g2?\/|openchat\.line\.me\/|line\.me\/(?:R\/)?square\//i;
 export const CROSS_INVITE = "同群組邀請跨群出現";
 /** 踢人群（per-chat kickMode:kick，維護者 10/22 15:51）可刪踢的通知層理由；其他群一律只通知。 */
@@ -176,7 +176,7 @@ export const REPEAT_SCAM = "同一人 24 小時內第 2 次判詐騙";
 /** 文字訊息的通知層判斷（呼叫端只在原本沒有處置時呼叫）。回 names（空陣列＝不通知）。 */
 export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, protectedSender = false, log }) {
   const names = [];
-  if (isAntiScamBotAlert(text)) return names; // 其他防詐機器人的提醒：不通知
+  if (isPlainAntiScamBotAlert(text)) return names; // 其他防詐機器人的提醒且沒有任何連結訊號：不通知（有連結照一般流程）
 
   const ns = notifyScore(text, { verdict: result.verdict, review: result.review, protectedSender });
   if (ns.notify) names.push(...ns.names);

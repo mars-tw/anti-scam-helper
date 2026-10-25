@@ -486,3 +486,14 @@ export function isAntiScamBotAlert(text) {
   const markers = [/詐騙機率[:：]?\d/, /訊息ID[:：]?\d/, /並非事實判定/, /手法信心度/, /請管理員查證/, /手法[:：]/].filter((re) => re.test(t)).length;
   return markers >= 2;
 }
+
+// 10/25 補洞：詐騙者可能抄提醒欄位再夾連結。只要有網址、短網址、裸網域、LINE 邀請或 LINE ID，就照一般流程判（通知／標記／踢人規則不變）。
+const ALERT_BARE_HOST = /(?<![\w@-])(?:[a-z0-9-]+\.)+(?:ly|gl|gd|cc|me|io|xyz|top|link|app|co|com|net|org|tw|vip|shop|site|club|info|cn|hk|to|su|ru|online|store|live|fun|icu|win|asia|pro|in)(?![a-z0-9-])/i;
+export function alertHasLinkSignal(text) {
+  const t = String(text ?? "").normalize("NFKC");
+  return LINK.test(t) || LINE_ID.test(t) || ALERT_BARE_HOST.test(t) || /line\s*id|賴\s*id|加\s*賴/i.test(t);
+}
+/** 只有「沒有任何連結訊號」的防詐機器人提醒，才跳過通知／標記；有連結的照一般流程。回覆一律不回（用 isAntiScamBotAlert）。 */
+export function isPlainAntiScamBotAlert(text) {
+  return isAntiScamBotAlert(text) && !alertHasLinkSignal(text);
+}
