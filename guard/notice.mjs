@@ -41,35 +41,60 @@ export function stripMentions(text, mentions = []) {
   return out.replace(/\n[ \t]+/g, "\n");
 }
 
-/**
- * 送出通知：先「回覆該則訊息＋@」，失敗就依序退成「只 @」「只回覆」「純文字」；
- * 不帶 mention 的版本一律拿掉 @名字（不留錯誤的純文字 @）。
- * 只有伺服器明確拒絕（沒送出）才退一步；逾時（可能已送出）或限流就停，避免重複發。
- * @param send (frame) => Promise<reply>，reply.type 為 "sent" 或 "error"（含 code）
- */
 export const NOTICE_LABEL = "（AI代理）";
 /** 守門員送進群的每則訊息結尾都帶（AI代理）；已經有就不重複加（加在結尾，不影響 @ 位置）。 */
 export function withAgentLabel(text) {
   const body = String(text ?? "");
   return body.includes(NOTICE_LABEL) ? body : `${body.replace(/\s+$/, "")}${NOTICE_LABEL}`;
 }
-export async function sendNotice(send, { chatId, text, mentions = [], replyTo }) {
+
+/**
+ * 只留下 keep(userId) 為 true 的 @：其餘 @ 段落從文字刪掉，留下的 @ 位置跟著平移。
+ * 原因：LINE 服務只准 @「最近在這個聊天室發過言」的人，只要有一個不符合，整則就回 INVALID_REQUEST。
+ */
+export function keepMentions(text, mentions = [], keep = () => true) {
+  const sorted = [...mentions].sort((a, b) => a.start - b.start);
+  const dropped = sorted.filter((m) => !keep(m.userId));
+  if (!dropped.length) return { text: String(text ?? ""), mentions: sorted };
+  const out = stripMentions(text, dropped);
+  const src = String(text ?? "");
+  const kept = [];
+  for (const m of sorted) {
+    if (!keep(m.userId)) continue;
+    const label = src.slice(m.start, m.end);
+    const from = kept.length ? kept.at(-1).end : 0;
+    const start = out.indexOf(label, from);
+    if (start < 0) continue;
+    kept.push({ ...m, start, end: start + label.length });
+  }
+  return { text: out, mentions: kept };
+}
+
+/**
+ * 送出通知（同一則最多補送一次）：
+ * 1. 先送「引用該則訊息＋@」（@ 只留 canMention 准的人，其他人名字整段拿掉）。
+ * 2. 伺服器明確拒絕（INVALID_REQUEST／SEND_FAILED 等）才補送一次：拿掉所有 @（不留「@名字」純文字）；
+ *    帶 @ 被拒（INVALID_REQUEST）時保留引用，否則（LINE 端 SEND_FAILED 或本來就沒 @）連引用一起拿掉。
+ * 逾時（可能已送出）或限流就停，不補送，避免重複發。
+ * @param send (frame) => Promise<reply>，reply.type 為 "sent" 或 "error"（含 code）
+ */
+export async function sendNotice(send, { chatId, text, mentions = [], replyTo, canMention }) {
   text = withAgentLabel(text);
-  const attempts = [];
   const plain = mentions.length ? stripMentions(text, mentions) : text;
-  const add = (withReply, withMentions) => {
-    if (withReply && !replyTo) return;
-    if (withMentions && !mentions.length) return;
-    const frame = { type: "message:send", chatId, text: withMentions ? text : plain, ...(withMentions ? { mentions } : {}), ...(withReply ? { replyTo } : {}) };
-    if (!attempts.some((known) => JSON.stringify(known) === JSON.stringify(frame))) attempts.push(frame);
-  };
-  add(true, true); add(false, true); add(true, false); add(false, false);
-  let answer = { type: "error", code: "NOT_SENT" };
+  const first = canMention ? keepMentions(text, mentions, canMention) : { text, mentions };
+  const frameOf = (body, ms, reply) => ({ type: "message:send", chatId, text: body, ...(ms.length ? { mentions: ms } : {}), ...(reply ? { replyTo: reply } : {}) });
   const tried = [];
-  for (const frame of attempts) {
-    answer = await send(frame);
+  const attempt = async (frame) => {
+    const answer = await send(frame);
     tried.push({ reply: Boolean(frame.replyTo), mentions: Boolean(frame.mentions), result: answer.type === "sent" ? "sent" : answer.code });
-    if (answer.type === "sent" || answer.code === "TIMEOUT" || answer.code === "RATE_LIMITED") break;
+    return answer;
+  };
+  const firstFrame = frameOf(first.mentions.length ? first.text : plain, first.mentions, replyTo);
+  let answer = await attempt(firstFrame);
+  if (answer.type !== "sent" && answer.code !== "TIMEOUT" && answer.code !== "RATE_LIMITED") {
+    const keepReply = Boolean(firstFrame.mentions) && answer.code === "INVALID_REQUEST" ? replyTo : undefined;
+    const retry = frameOf(plain, [], keepReply);
+    if (JSON.stringify(retry) !== JSON.stringify(firstFrame)) answer = await attempt(retry);
   }
   const last = tried.at(-1);
   return { answer, tried, replied: answer.type === "sent" && Boolean(last?.reply), mentioned: answer.type === "sent" && Boolean(last?.mentions) };

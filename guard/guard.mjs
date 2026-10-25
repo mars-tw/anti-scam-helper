@@ -781,11 +781,18 @@ function saveSelfIds() {
 }
 // 最近訊息的發言者（訊息 id → 成員 id）：判斷「回覆的是不是本人的訊息」，重啟前的本人訊息也算（補抓歷史時一起記）。
 const recentSenders = new Map();
+// 各聊天室最近發過言的成員（通知只 @ 這些人；LINE 服務不准 @ 最近沒發言的人，否則整則 INVALID_REQUEST）。
+const chatSpeakers = new Map();
 function noteSender(message) {
   if (!message?.messageId || !message.senderId) return;
+  if (message.channelId) {
+    if (!chatSpeakers.has(message.channelId)) chatSpeakers.set(message.channelId, new Set());
+    chatSpeakers.get(message.channelId).add(message.senderId);
+  }
   recentSenders.set(message.messageId, message.senderId);
   if (recentSenders.size > 20000) recentSenders.delete(recentSenders.keys().next().value);
 }
+const canMentionIn = (chatId) => (userId) => chatSpeakers.get(chatId)?.has(userId) === true;
 function repliesToSelf(message) {
   return replyTargetsSelf(message, { ownIds: { has: (id) => ownMessages.has(id) || sentByBot.has(id) }, senderOf: (id) => recentSenders.get(id), isSelf });
 }
@@ -2328,7 +2335,7 @@ async function remindAsker(ws, message, failed, { replyTo = message.messageId, f
   }
   if (!notifyChats.has(message.channelId)) { record({ action: "asker-remind-skipped", reason: "chat-not-allowed", chatId: message.channelId }); return false; }
   // 回覆（引用）他貼的那則訊息；刪掉了或伺服器不認得就退成不引用。
-  const { answer, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(text, blockedWords), mentions, replyTo });
+  const { answer, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(text, blockedWords), mentions, replyTo, canMention: canMentionIn(message.channelId) });
   if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
   record({ action: answer.type === "sent" ? "asker-reminded" : "asker-remind-failed", chatId: message.channelId, senderId: message.senderId, failed, code: answer.code, replied, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
   return answer.type === "sent";
@@ -2433,7 +2440,7 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   }
   // 回覆（引用）那則詐騙訊息，大家看得出是哪一則；訊息已刪除或伺服器不認得就退成不引用。
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
-  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId });
+  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId, canMention: canMentionIn(entry.chatId) });
   if (reply.type === "sent" && reply.messageId) { sentByBot.add(reply.messageId); ownMessages.add(reply.messageId); }
   record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, mentioned: Boolean(reply.type === "sent" && tried.at(-1)?.mentions), tried: tried.map((t) => t.result), attempts: tried.length, mentions: mentions.map((m) => m.userId) });
   return reply.type === "sent";
@@ -2868,7 +2875,7 @@ async function notifyNote(ws, entry, note, deleting) {
     record({ action: "note-notify-dry-run", ...entry, noticeChars: text.length });
     return;
   }
-  const { answer, tried } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions });
+  const { answer, tried } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, canMention: canMentionIn(entry.chatId) });
   if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
   record({ action: answer.type === "sent" ? "note-notified" : "note-notify-failed", ...entry, code: answer.code, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
   if (deleting) record({ action: "note-delete-unsupported", chatId: entry.chatId, notePostId: entry.notePostId });
@@ -3228,6 +3235,7 @@ function connect() {
         watermarks.bump(message.channelId, message.createdAt);
         if (seenIds.has(message.messageId)) return;
         markSeen(message.messageId);
+        noteSender(message);
         if (learnOnly.has(message.channelId)) {
           // 機器人訓練群：先開始回覆（不等學習、延伸學習），再收進參考資料。
           if (botCamp.has(message.channelId)) void botCampAct(ws, message, Date.now()).catch((error) => recordError("bot-camp", String(error?.message ?? error).slice(0, 80)));

@@ -32,12 +32,48 @@ test("通知先引用那則訊息並 @；成功就只送一次", async () => {
   assert.equal(result.replied, true);
 });
 
-test("伺服器拒絕時依序退成：只 @ → 只引用 → 純文字", async () => {
-  const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "SEND_FAILED" }, { type: "sent", messageId: "2" }]);
-  const result = await sendNotice(server.send, { chatId: "c", text: "t", mentions: [{ userId: "u", start: 0, end: 2 }], replyTo: "999" });
-  assert.deepEqual(server.frames.map((f) => [Boolean(f.replyTo), Boolean(f.mentions)]), [[true, true], [false, true], [true, false], [false, false]]);
+test("伺服器拒絕時只補送一次：帶 @ 被拒（INVALID_REQUEST）→ 保留引用、拿掉 @", async () => {
+  const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "sent", messageId: "2" }, { type: "sent" }]);
+  const result = await sendNotice(server.send, { chatId: "c", text: "@u t", mentions: [{ userId: "u", start: 0, end: 2 }], replyTo: "999" });
+  assert.deepEqual(server.frames.map((f) => [Boolean(f.replyTo), Boolean(f.mentions)]), [[true, true], [true, false]]);
   assert.equal(result.answer.type, "sent");
-  assert.equal(result.replied, false);
+  assert.equal(result.replied, true);
+  assert.ok(server.frames[1].text.endsWith("（AI代理）"));
+});
+
+test("補送也失敗就停，不再送第三次", async () => {
+  const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "SEND_FAILED" }, { type: "sent" }]);
+  const result = await sendNotice(server.send, { chatId: "c", text: "@u t", mentions: [{ userId: "u", start: 0, end: 2 }], replyTo: "999" });
+  assert.equal(server.frames.length, 2);
+  assert.equal(result.answer.type, "error");
+});
+
+test("LINE 端 SEND_FAILED：補送拿掉 @ 與引用", async () => {
+  const server = fakeServer([{ type: "error", code: "SEND_FAILED" }, { type: "sent" }]);
+  await sendNotice(server.send, { chatId: "c", text: "@u t", mentions: [{ userId: "u", start: 0, end: 2 }], replyTo: "999" });
+  assert.deepEqual(server.frames.map((f) => [Boolean(f.replyTo), Boolean(f.mentions)]), [[true, true], [false, false]]);
+});
+
+test("canMention：只 @ 最近發過言的人，其餘名字拿掉、位置平移", async () => {
+  const text = "注意\n@甲 @乙 @丙 請管理員留意";
+  const at = (n) => text.indexOf(n) - 1;
+  const mentions = [{ userId: "a", start: at("甲"), end: at("甲") + 2 }, { userId: "b", start: at("乙"), end: at("乙") + 2 }, { userId: "c", start: at("丙"), end: at("丙") + 2 }];
+  const server = fakeServer([{ type: "sent" }]);
+  const result = await sendNotice(server.send, { chatId: "c", text, mentions, replyTo: "9", canMention: (id) => id !== "b" });
+  const f = server.frames[0];
+  assert.equal(server.frames.length, 1);
+  assert.equal(f.text, "注意\n@甲 @丙 請管理員留意（AI代理）");
+  assert.deepEqual(f.mentions.map((m) => [m.userId, f.text.slice(m.start, m.end)]), [["a", "@甲"], ["c", "@丙"]]);
+  assert.equal(result.mentioned, true);
+});
+
+test("canMention 全部不准：直接送引用＋不帶 @ 版本，不留 @ 純文字", async () => {
+  const server = fakeServer([{ type: "sent" }]);
+  await sendNotice(server.send, { chatId: "c", text: "x\n@甲 請留意", mentions: [{ userId: "a", start: 2, end: 4 }], replyTo: "9", canMention: () => false });
+  assert.equal(server.frames.length, 1);
+  assert.ok(!server.frames[0].mentions);
+  assert.equal(server.frames[0].replyTo, "9");
+  assert.ok(!server.frames[0].text.includes("@"));
 });
 
 test("逾時或限流就停，不重送（避免重複發）", async () => {
@@ -74,12 +110,12 @@ test("@ 送不出去時，退回的版本不留「@名字」純文字", async ()
   const text = "⚠️ 反詐小幫手：「Abe ⠀⠀⠀⠀」的訊息疑似詐騙\n@Abe 請群主與管理員留意";
   const start = text.indexOf("@Abe");
   const mentions = [{ userId: "pOWNER", start, end: start + 4 }];
-  const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "error", code: "INVALID_REQUEST" }, { type: "sent", messageId: "3" }]);
+  const server = fakeServer([{ type: "error", code: "INVALID_REQUEST" }, { type: "sent", messageId: "3" }]);
   const result = await sendNotice(server.send, { chatId: "c", text, mentions, replyTo: "9" });
   assert.equal(server.frames[0].text, `${text}（AI代理）`);
-  assert.ok(!server.frames[2].mentions);
-  assert.ok(!server.frames[2].text.includes("@"));
-  assert.ok(server.frames[2].text.endsWith("\n請群主與管理員留意（AI代理）"));
+  assert.ok(!server.frames[1].mentions);
+  assert.ok(!server.frames[1].text.includes("@"));
+  assert.ok(server.frames[1].text.endsWith("\n請群主與管理員留意（AI代理）"));
   assert.equal(result.mentioned, false);
   assert.equal(result.replied, true);
 });
