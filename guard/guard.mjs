@@ -17,7 +17,7 @@ import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RUL
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
+import { isAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
@@ -728,7 +728,7 @@ const replyTimes = [];
 const rememberedIds = new Set(); // 已放進 recent 的訊息 id（歷史與即時重複時只記一次）
 const messageText = new Map(); // 訊息 id → 「名字：內容」，回覆串上下文用（只在記憶體）
 function isBotText(text) {
-  return text.startsWith("⚠️ 反詐小幫手") || text.includes("（自動提醒）") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text.includes("（AI代理）") || text.includes("（自動回覆）") || text === chat.hardRefusal;
+  return isAntiScamBotAlert(text) || text.startsWith("⚠️ 反詐小幫手") || text.includes("（自動提醒）") || text.startsWith("這個要等本人親自回覆") || (chat.signature && text.includes(chat.signature)) || text.includes("（AI代理）") || text.includes("（自動回覆）") || text === chat.hardRefusal;
 }
 function remember(message, text) {
   if (!text || rememberedIds.has(message.messageId) || sentByBot.has(message.messageId) || isBotText(text)) return;
@@ -825,6 +825,7 @@ function mentionsSelfByName(message, mention) {
 const staleLogged = new Set();
 function question(message, text) {
   if (!chat.enabled || !message.text) return undefined;
+  if (isAntiScamBotAlert(text ?? message.text)) return undefined; // 其他防詐機器人的提醒：就算 @ 本帳號也不回
   if (chat.chats && !chat.chats.includes(message.channelId)) return undefined;
   if (chat.mentionOnly) {
     const mentioned = message.mentions?.some((mention) => isSelf(message.channelId, mention.userId) || mentionsSelfByName(message, mention));
@@ -1707,6 +1708,11 @@ async function handle(ws, message) {
   }
   learnAdmin(message);
   noteActivity(message);
+  // 10/25：其他防詐機器人的「疑似詐騙提醒」：不回覆、不回收到／處置、不通知、不計標記（依內容判斷，涵蓋同類機器人）。
+  if (text && isAntiScamBotAlert(text)) {
+    record({ action: "bot-alert-skipped", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+    return;
+  }
   // /ai整理：任何成員都能叫（含管理員）；工作在背景跑，不卡住巡邏佇列。
   if (text && summaryCfg.enabled) {
     const command = parseSummaryCommand(text);

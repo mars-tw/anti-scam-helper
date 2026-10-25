@@ -475,3 +475,14 @@ export function visionHasLink(reason, { qr = false } = {}) {
 export function visionSoloMayNotify({ reason, qr = false, review } = {}) {
   return visionHasLink(reason, { qr }) || review === "SCAM";
 }
+
+/**
+ * 10/25：其他防詐機器人發的「疑似詐騙提醒」（標題＋詐騙機率／訊息 ID／並非事實判定這類固定欄位，常一次 @ 一大串成員）。
+ * 依內容判斷，不靠成員 ID，所以同類的其他機器人也涵蓋。守衛對它不回覆、不回收到／處置、不通知、不計標記、不學習。
+ */
+export function isAntiScamBotAlert(text) {
+  const t = String(text ?? "").normalize("NFKC").replace(/[\s\u200b]+/g, "");
+  if (!/疑似詐騙(提醒|警示|通知|訊息)|詐騙警示|防詐提醒/.test(t)) return false;
+  const markers = [/詐騙機率[:：]?\d/, /訊息ID[:：]?\d/, /並非事實判定/, /手法信心度/, /請管理員查證/, /手法[:：]/].filter((re) => re.test(t)).length;
+  return markers >= 2;
+}
