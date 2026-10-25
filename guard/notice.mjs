@@ -100,6 +100,45 @@ export async function sendNotice(send, { chatId, text, mentions = [], replyTo, c
   return { answer, tried, replied: answer.type === "sent" && Boolean(last?.reply), mentioned: answer.type === "sent" && Boolean(last?.mentions) };
 }
 
+/**
+ * 各聊天室最近發言者（成員 id → 最後發言時間）：通知只 @ 有效期內發過言的人。
+ * 依時間淘汰（預設 7 天），每群有上限（預設 500 人，滿了淘汰最久沒發言的）。
+ */
+export class SpeakerBook {
+  constructor({ ttlMs = 7 * 24 * 3600_000, maxPerChat = 500, now = () => Date.now() } = {}) {
+    this.ttlMs = ttlMs; this.maxPerChat = maxPerChat; this.now = now; this.chats = new Map();
+  }
+  note(chatId, userId, at) {
+    if (!chatId || !userId) return;
+    const now = this.now();
+    const when = Math.min(Number.isFinite(at) ? at : now, now);
+    if (now - when > this.ttlMs) return;
+    let chat = this.chats.get(chatId);
+    if (!chat) this.chats.set(chatId, chat = new Map());
+    const prev = chat.get(userId);
+    if (prev !== undefined && prev >= when) return;
+    chat.delete(userId);
+    chat.set(userId, when);
+    this.prune(chatId);
+  }
+  prune(chatId) {
+    const chat = this.chats.get(chatId);
+    if (!chat) return;
+    const cutoff = this.now() - this.ttlMs;
+    for (const [id, when] of chat) if (when < cutoff) chat.delete(id);
+    if (chat.size > this.maxPerChat) {
+      const oldest = [...chat].sort((a, b) => a[1] - b[1]).slice(0, chat.size - this.maxPerChat);
+      for (const [id] of oldest) chat.delete(id);
+    }
+    if (!chat.size) this.chats.delete(chatId);
+  }
+  has(chatId, userId) {
+    const when = this.chats.get(chatId)?.get(userId);
+    return when !== undefined && this.now() - when <= this.ttlMs;
+  }
+  size(chatId) { return this.chats.get(chatId)?.size ?? 0; }
+}
+
 /** 通知要 @ 的對象：排除被判詐騙的人本人，以及暱稱含隱形／顯示不出來字元的人（冒名常見手法）。 */
 export const INVISIBLE_NAME = /[\u2800\u3164\u115f\u1160\uffa0\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad\u034f\u180e]/;
 export function safeMentionTargets(admins = [], { excludeIds = [] } = {}) {

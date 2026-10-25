@@ -22,7 +22,7 @@ import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exch
 import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
-import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, withAgentLabel } from "./notice.mjs";
+import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, SpeakerBook, withAgentLabel } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
 import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
@@ -782,17 +782,14 @@ function saveSelfIds() {
 // 最近訊息的發言者（訊息 id → 成員 id）：判斷「回覆的是不是本人的訊息」，重啟前的本人訊息也算（補抓歷史時一起記）。
 const recentSenders = new Map();
 // 各聊天室最近發過言的成員（通知只 @ 這些人；LINE 服務不准 @ 最近沒發言的人，否則整則 INVALID_REQUEST）。
-const chatSpeakers = new Map();
+const chatSpeakers = new SpeakerBook({ ttlMs: 7 * 24 * 3600_000, maxPerChat: 500 });
 function noteSender(message) {
   if (!message?.messageId || !message.senderId) return;
-  if (message.channelId) {
-    if (!chatSpeakers.has(message.channelId)) chatSpeakers.set(message.channelId, new Set());
-    chatSpeakers.get(message.channelId).add(message.senderId);
-  }
+  if (message.channelId) chatSpeakers.note(message.channelId, message.senderId, typeof message.createdAt === "number" ? message.createdAt : Date.parse(message.createdAt ?? "") || undefined);
   recentSenders.set(message.messageId, message.senderId);
   if (recentSenders.size > 20000) recentSenders.delete(recentSenders.keys().next().value);
 }
-const canMentionIn = (chatId) => (userId) => chatSpeakers.get(chatId)?.has(userId) === true;
+const canMentionIn = (chatId) => (userId) => chatSpeakers.has(chatId, userId);
 function repliesToSelf(message) {
   return replyTargetsSelf(message, { ownIds: { has: (id) => ownMessages.has(id) || sentByBot.has(id) }, senderOf: (id) => recentSenders.get(id), isSelf });
 }

@@ -129,3 +129,44 @@ test("@ 對象排除被判詐騙者本人與暱稱含隱形字元者，只留真
   const admins = [["pOWNER", { name: "Abe", role: "admin" }], ["pFAKE", { name: "Abe ⠀⠀⠀⠀", role: "coAdmin" }], ["pSCAM", { name: "小美", role: "coAdmin" }], ["pZW", { name: "Abe\u200b", role: "coAdmin" }]];
   assert.deepEqual(safeMentionTargets(admins, { excludeIds: ["pSCAM"] }).map(([id]) => id), ["pOWNER"]);
 });
+
+import { SpeakerBook } from "../guard/notice.mjs";
+
+test("SpeakerBook：超過有效期就不能 @，也會被淘汰", () => {
+  let now = 1_000_000;
+  const book = new SpeakerBook({ ttlMs: 1000, maxPerChat: 10, now: () => now });
+  book.note("c", "a", now);
+  assert.ok(book.has("c", "a"));
+  now += 1001;
+  assert.equal(book.has("c", "a"), false);
+  book.note("c", "b", now);
+  assert.equal(book.size("c"), 1);
+  book.note("c", "old", now - 5000);
+  assert.equal(book.has("c", "old"), false);
+});
+
+test("SpeakerBook：每群上限，滿了淘汰最久沒發言的", () => {
+  let now = 0;
+  const book = new SpeakerBook({ ttlMs: 1e9, maxPerChat: 3, now: () => now });
+  for (const id of ["a", "b", "c", "d"]) { now += 1; book.note("c1", id, now); }
+  assert.equal(book.size("c1"), 3);
+  assert.equal(book.has("c1", "a"), false);
+  assert.ok(book.has("c1", "d"));
+  book.note("c2", "a", now);
+  assert.ok(book.has("c2", "a"));
+});
+
+test("SpeakerBook：重新發言會刷新時間，不被當成最舊淘汰", () => {
+  let now = 0;
+  const book = new SpeakerBook({ ttlMs: 100, maxPerChat: 2, now: () => now });
+  book.note("c", "a", now); now = 10; book.note("c", "b", now);
+  now = 90; book.note("c", "a", now);
+  now = 95; book.note("c", "x", now);
+  assert.ok(book.has("c", "a"));
+  assert.equal(book.has("c", "b"), false);
+  now = 150;
+  assert.ok(book.has("c", "a"));
+  assert.equal(book.has("c", "x"), true);
+  now = 191;
+  assert.equal(book.has("c", "a"), false);
+});
