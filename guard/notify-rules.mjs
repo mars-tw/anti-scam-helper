@@ -10,7 +10,7 @@ export function minerAction({ perChatKick, reasons = [], verdict, model, review,
 }
 // 通知層（10/22 誤判審查／情資分析）：只決定「要不要通知管理員」，分數只算通知分，絕不計入踢人分數，也不刪文。
 import { createHash } from "node:crypto";
-import { ANTI_SCAM_WARNING, MAINSTREAM_CONTENT_DOMAINS, PLATFORM_SHORTENERS } from "./rules.mjs";
+import { ANTI_SCAM_WARNING, MAINSTREAM_CONTENT_DOMAINS, PLATFORM_SHORTENERS, SHORTENERS as RULE_SHORTENERS } from "./rules.mjs";
 
 const URL_RE = /(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?/gi;
 const INVEST = /投資|帶單|跟單|老師|獲利|報酬|收益|配息|股票|虛擬貨幣|幣圈|合約|USDT|期貨|黃金/i;
@@ -201,6 +201,7 @@ export function textNotifyReasons({ text, chatId, senderId, result, tracker, sho
     const host = (u.replace(/^https?:\/\//i, "").split(/[/?#]/)[0] || "").toLowerCase();
     if (shorteners.some((d) => host.endsWith(`.${d}`) && host !== `www.${d}`)) { names.push("子網域短網址"); break; }
   }
+  names.push(...intelNotify1025(text, { protectedSender, shorteners }));
   if (tracker.followsProfit(chatId, senderId, text)) names.push("獲利截圖後接著貼網址／叫人私訊");
   // 10/22 20:51 誤判後：0 分只靠模型判詐不通知；要有確定特徵（群組邀請、未知短網址、已知詐騙網域）才通知。
   if (result.zeroScoreScamReviewed && zeroScoreShouldNotify(result.names)) names.push("0 分但第一層與雲端覆核都判詐騙");
@@ -296,4 +297,40 @@ export function onlyMainstreamMediaLinks(text) {
 /** 規則 0 分、模型判詐：只有帶確定特徵時才通知，否則只記錄。 */
 export function zeroScoreShouldNotify(names = []) {
   return (names ?? []).some((n) => CERTAIN_FEATURES.has(n));
+}
+
+// ── 10/25 情資（只通知，絕不進 rules.mjs 踢人計分、不在 MINER_KICKABLE）─────────────
+// 共同排除：白名單／真管理員（protectedSender）、防詐提醒語氣（含「這是詐騙嗎」）、提到派網但沒附連結。
+// YouTube 與主流平台官方短網址不算短網址／非官方網域。
+export const INTEL_MOVE3 = "換群三段式（舊群刪除＋加新群＋連結）";
+export const INTEL_SUBSHORT = "短網址前加子網域＋短代碼";
+export const INTEL_VOTE_COUPON = "投票／領券＋非官方連結或回傳驗證碼";
+const ASK_IF_SCAM = /(?:這|此|這個|這是|是不是|是否).{0,6}詐騙(?:嗎|吗|\?|？)|詐騙嗎/;
+const WARN_EXTRA = /(?:是|為)(?:詐騙|假群|假的)|(?:別|不要|勿|千萬別)上當|防詐(?:提醒|宣導)/;
+const SPACES = /[\s\u3000\u200B-\u200D\u2060\uFEFF]/g;
+const OLD_GROUP_GONE = /(?:舊|本|此|這個|原|目前的?|現在的?)?(?:群|群組|社群|社團)(?:即將|將|會|明天|今天|明日|今日|已經?|要)?.{0,6}(?:刪除|解散|關閉|停用|收掉)|(?:刪除|解散|關閉)(?:本|此|舊|這個)?(?:群|群組|社群)/;
+const JOIN_NEW = /(?:加入|進入?|移到|移至|轉到|搬到|前往|點擊?加入).{0,6}新(?:的)?(?:群|群組|社群|社團|族群)|新(?:的)?(?:群|群組|社群|社團|族群).{0,8}(?:加入|連結|入口)/;
+const VOTE_COUPON = /投票|拉票|票選|幫.{0,4}投(?:票|一票)|領(?:取)?.{0,4}(?:飲料券|折價券|優惠券|禮券)|(?:飲料券|折價券|優惠券).{0,6}(?:領|送)/;
+const CODE_BACK = /(?:回傳|傳|給|提供|輸入|告訴).{0,6}(?:簡訊)?(?:驗證碼|認證碼)|(?:驗證碼|認證碼).{0,6}(?:傳|給|回傳|截圖|告訴)/;
+const SHORTCODE_PATH = /^\/[A-Za-z0-9_-]{3,12}\/?$/;
+function urlsOf(t) { return String(t).match(URL_RE) ?? []; }
+function pathOf(u) { const m = String(u).replace(/^https?:\/\//i, "").match(/^[^/?#]+(\/[^?#\s]*)?/); return m?.[1] ?? ""; }
+function isShortHost(host, shorteners) { return !isMainstreamMediaHost(host) && shorteners.some((d) => host === d || host.endsWith(`.${d}`)); }
+/** 回 10/25 三條只通知規則的命中理由。 */
+export function intelNotify1025(text, { protectedSender = false, shorteners = RULE_SHORTENERS } = {}) {
+  if (protectedSender) return [];
+  const raw = String(text ?? "");
+  const t = raw.replace(SPACES, "").normalize("NFKC");
+  const urls = urlsOf(raw.normalize("NFKC"));
+  const invite = INVITE_RE.test(t);
+  if (ANTI_SCAM_WARNING.test(t) || ASK_IF_SCAM.test(t) || WARN_EXTRA.test(t)) return [];
+  if (/派網|pionex/i.test(t) && !urls.length && !invite) return [];
+  const hosts = urls.map(hostOf).map((h) => h.split(":")[0]);
+  const names = [];
+  const shortUrl = hosts.some((h) => isShortHost(h, shorteners));
+  if (OLD_GROUP_GONE.test(t) && JOIN_NEW.test(t) && (invite || shortUrl)) names.push(INTEL_MOVE3);
+  if (urls.some((u) => { const h = hostOf(u).split(":")[0]; return shorteners.some((d) => h.endsWith(`.${d}`) && h !== `www.${d}`) && !isMainstreamMediaHost(h) && SHORTCODE_PATH.test(pathOf(u)); })) names.push(INTEL_SUBSHORT);
+  const offHost = hosts.some((h) => !isMainstreamMediaHost(h) && !OFFICIAL_HOST.test(h));
+  if (VOTE_COUPON.test(t) && (offHost || shortUrl || CODE_BACK.test(t))) names.push(INTEL_VOTE_COUPON);
+  return names;
 }
