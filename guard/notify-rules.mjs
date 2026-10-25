@@ -21,6 +21,7 @@ export const WORK_MONEY = "工作指示要匯款／問帳戶餘額";
 export const FAKE_VERIFY = "假認證／運費＋加 LINE";
 export const WITHDRAW_FEE = "出金要先繳費＋聯絡方式";
 export const CODE_COUPON = "領券／贈品要回傳驗證碼";
+export const LOAN_LURE = "代償／債務整合借貸＋私下聯絡";
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -46,7 +47,20 @@ export const NOTIFY_RULES = [
   { name: WITHDRAW_FEE, score: 4, direct: true, match: (t, ctx = {}) => !ctx.protectedSender && !ANTI_SCAM_WARNING.test(t) && /出金/.test(t) && WITHDRAW_FEE_RE.test(t) && (hasLinkOrInvite(t) || /QR|ＱＲ|條碼/i.test(t) || ADD_LINE.test(t)) },
   // 10/24 情資：領券／折價券／送東西要人回傳驗證碼。假投票規則已命中時不重複。只通知。
   { name: CODE_COUPON, score: 4, direct: true, match: (t, ctx = {}) => !ctx.protectedSender && !ANTI_SCAM_WARNING.test(t) && SEND_CODE.test(t) && COUPON.test(t) && !(VOTE.test(t) && ASK_CODE.test(t)) },
+  // 10/26 自動反思：「代償高利小額、整合週轉…留個訊息 賴:數字-數字（去掉-）」借貸詐騙，規則 0 分、兩個模型都判詐卻只記錄。只通知，不進踢人分數，不在 MINER_KICKABLE。
+  // 要「代償／債務整合／小額借款」字眼＋私下聯絡。寫出具體聯絡方式（LINE ID、電話、去掉-拆字、連結）時，夾防詐字眼也照算（防繞過）；
+  // 只有「私訊／加我」這種沒具體聯絡方式的，防詐提醒語氣與「這是詐騙嗎」不算。第一層與覆核都判 OK 不算；提到派網沒附連結不算。
+  { name: LOAN_LURE, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = String(t).normalize("NFKC").replace(SPACES, "");
+    if (ctx.protectedSender || !LOAN_RE.test(c) || (ctx.verdict === "OK" && ctx.review === "OK")) return false;
+    if (/派網|pionex/i.test(c) && !hasLinkOrInvite(c) && !LOAN_CONCRETE.test(c)) return false;
+    if (LOAN_CONCRETE.test(c)) return true;
+    return LOAN_SOFT.test(c) && !ANTI_SCAM_WARNING.test(c) && !ASK_IF_SCAM.test(c) && !WARN_EXTRA.test(c);
+  } },
 ];
+const LOAN_RE = /代償|債務整合|整合(?:負債|債務|貸款|信貸|卡債|週轉|周轉)|借錢不是丟臉|(?:小額|快速|免審核?|低利|無息|當日)(?:借款|貸款|借貸|撥款)|高利.{0,4}(?:小額|代償|整合)/;
+const LOAN_CONCRETE = /(?:賴|line)(?:id)?[:：]@?[\w.-]{3,}|(?<!\d)(?:\+?886-?|0)9\d{2}[-.]?\d{3}[-.]?\d{3}(?!\d)|去掉|lin\.ee|line\.me|https?:\/\//i;
+const LOAN_SOFT = /加(?:我)?(?:的)?(?:line|賴|好友)|私訊|私我|密我|留(?:個)?(?:訊息|言)|聯[繫絡]我|找我/i;
 
 const WORK_MONEY_RE = /(?:帳戶|戶頭)\s*(?:的\s*)?餘額|(?:匯|轉)(?:款|錢)?\s*(?:到|至)\s*.{0,6}指定(?:的)?\s*(?:帳戶|帳號)/;
 const WORK_TONE = /幫我|馬上|立刻|立即|今天先|先幫|先匯|先轉|老闆(?:交代|說|要|吩咐)|主管(?:交代|說|要)|趕快|盡快|急/;
@@ -73,6 +87,7 @@ export function noticeTips(names = []) {
   if (names.includes(FAKE_VERIFY)) tips.push("銀行、賣場不會叫你加 LINE 做金流認證、實名認證或先付運費。");
   if (names.includes(WITHDRAW_FEE)) tips.push("正規平台出金不會要你先繳保證金、稅金或解凍費。");
   if (names.includes(CODE_COUPON)) tips.push("驗證碼不要給任何人，給了帳號可能被盜。");
+  if (names.includes(LOAN_LURE)) tips.push("正規銀行不會在群裡叫人私下加 LINE 辦代償或債務整合；先收費、要存摺或提款卡的都是詐騙。");
   return tips;
 }
 
@@ -86,6 +101,13 @@ export function notifyScore(text, ctx = {}) {
     if (rule.direct) direct = true;
   }
   return { score, names, notify: direct || score >= 2 };
+}
+
+/** 10/26：只學習＋判斷通知群用：只看「直接通知」的文字規則（不含要累積分數的福利／合資這類），回命中理由。 */
+export function directNotifyNames(text, ctx = {}) {
+  const t = String(text ?? "");
+  if (isPlainAntiScamBotAlert(t)) return [];
+  return NOTIFY_RULES.filter((rule) => rule.direct && (rule.match ? rule.match(t, ctx) : rule.pattern.test(t))).map((rule) => rule.name);
 }
 
 const KNOWLEDGE = /(?:^|\.)(?:github\.com|gitlab\.com|youtube\.com|youtu\.be|medium\.com|wikipedia\.org|notion\.site|docs\.[a-z0-9-]+\.[a-z]+|readthedocs\.io|stackoverflow\.com|arxiv\.org|hackmd\.io|vocus\.cc|substack\.com|dev\.to|npmjs\.com|huggingface\.co)$/i;

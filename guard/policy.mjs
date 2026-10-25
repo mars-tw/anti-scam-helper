@@ -482,16 +482,20 @@ export function visionSoloMayNotify({ reason, qr = false, review } = {}) {
  */
 export function isAntiScamBotAlert(text) {
   const t = String(text ?? "").normalize("NFKC").replace(/[\s\u200b]+/g, "");
-  if (!/疑似詐騙(提醒|警示|通知|訊息)|詐騙警示|防詐提醒/.test(t)) return false;
-  const markers = [/詐騙機率[:：]?\d/, /訊息ID[:：]?\d/, /並非事實判定/, /手法信心度/, /請管理員查證/, /手法[:：]/].filter((re) => re.test(t)).length;
+  // 10/26 自動反思：同類機器人的「疑似冒充管理員提醒」「疑似詐騙提醒＋風險提醒／疑似類別」格式也算（之前漏認，守衛回了「問題有點長」）。
+  if (!/疑似.{0,6}(詐騙|冒充|假冒|冒名).{0,6}(提醒|警示|通知|訊息)|詐騙警示|防詐提醒/.test(t)) return false;
+  const markers = [/詐騙機率[:：]?\d/, /訊息ID[:：]?\d/, /並非事實(判定|認定)/, /手法信心度/, /請管理員(協助)?(查證|核對)/, /手法[:：]/,
+    /成員ID[:：]?[a-z0-9]/i, /(假冒|冒充|假皇冠)機率[:：]/, /此為(自動|模型)(判定|估計)/, /尚未認定/, /疑似類別[:：]/].filter((re) => re.test(t)).length;
   return markers >= 2;
 }
 
 // 10/25 補洞：詐騙者可能抄提醒欄位再夾連結。只要有網址、短網址、裸網域、LINE 邀請或 LINE ID，就照一般流程判（通知／標記／踢人規則不變）。
 const ALERT_BARE_HOST = /(?<![\w@-])(?:[a-z0-9-]+\.)+(?:ly|gl|gd|cc|me|io|xyz|top|link|app|co|com|net|org|tw|vip|shop|site|club|info|cn|hk|to|su|ru|online|store|live|fun|icu|win|asia|pro|in)(?![a-z0-9-])/i;
+const ALERT_CONTACT = /(?<!\d)(?:\+?886[-\s.]?|0)9\d{2}[-\s.]?\d{3}[-\s.]?\d{3}(?!\d)|去掉|私訊|私我|密我|加我|聯[繫絡系]我|找我|telegram|whatsapp|wechat|微信|飛機|tg\s*[:：]/i;
 export function alertHasLinkSignal(text) {
   const t = String(text ?? "").normalize("NFKC");
-  return LINK.test(t) || LINE_ID.test(t) || ALERT_BARE_HOST.test(t) || /line\s*id|賴\s*id|加\s*賴/i.test(t);
+  // 10/26 補洞：電話號碼、「去掉-」這類拆字聯絡方式、叫人私訊／加我、其他通訊軟體，也算私下聯絡訊號（假提醒夾這些照一般流程）。
+  return LINK.test(t) || LINE_ID.test(t) || ALERT_BARE_HOST.test(t) || /line\s*id|賴\s*id|加\s*賴/i.test(t) || ALERT_CONTACT.test(t);
 }
 /** 只有「沒有任何連結訊號」的防詐機器人提醒，才跳過通知／標記；有連結的照一般流程。回覆一律不回（用 isAntiScamBotAlert）。 */
 export function isPlainAntiScamBotAlert(text) {

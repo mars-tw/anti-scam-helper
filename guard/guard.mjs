@@ -19,7 +19,7 @@ import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
 import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
-import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips } from "./notify-rules.mjs";
+import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, withAgentLabel } from "./notice.mjs";
@@ -1566,6 +1566,8 @@ async function scanNotifyMessage(ws, message) {
   if (message.contentType === "IMAGE") return queueAuditImage(ws, message);
   const text = textOf(message);
   if (!text) return;
+  // 10/26：只學習＋判斷通知群也跳過其他防詐機器人的純文字提醒（之前被送模型、還被當成一般訊息學習）；有連結／LINE 資訊的照一般流程。
+  if (isPlainAntiScamBotAlert(text) && !hasLineInfo(text)) { record({ action: "bot-alert-skipped", scanNotify: true, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId }); return; }
   const link = hasLink(sanitizeLinks(text).text);
   const names = [message.senderName, ...ownerNames].filter(Boolean);
   const desc = cleanText(text, { names, maxChars: 200 });
@@ -1581,6 +1583,11 @@ async function scanNotifyMessage(ws, message) {
   const result = await decide(message, text);
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
   if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", scanNotify: true, ...entry });
+  // 10/26：「直接通知」的文字規則（例如代償借貸＋私下聯絡、收購門號；不含要累積分數的）在這類群也算，只發通知；提到派網沒附連結不算。
+  if (!(result.kick || result.action === "delete" || result.action === "notice") && !exchangeTextNoLink(text)) {
+    const direct = directNotifyNames(text, { verdict: result.verdict, review: result.review, protectedSender: neverKick(message) });
+    if (direct.length) { result.action = "notice"; entry.action = "notice"; entry.names = [...(result.names ?? []), ...direct]; result.names = entry.names; record({ action: "notify-rule", scanNotify: true, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: direct }); }
+  }
   const flagged = result.kick || result.action === "delete" || result.action === "notice";
   if (flagged || link || result.score > 0 || (result.verdict !== "SKIP" && result.verdict !== "OK")) {
     learnAudit(message, { kind: link ? "link" : "text", verdict: flagged ? `SUSPECT_${result.review ?? result.verdict}` : result.verdict, reason: (result.names ?? []).join("、"), desc });
