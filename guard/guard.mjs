@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { complete, onModelError } from "./llm.mjs";
+import { makeReplySkip } from "./reply-skip.mjs";
 import { classifyQrOrigin, isLineInvite, qrReviewContext, readQr, shrinkForModel, squareTicket } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
@@ -233,6 +234,9 @@ const botIds = new Set([
   ...(config.protectedIds ?? []).filter((e) => e && typeof e === "object" && /機器人|bot/i.test(e.note ?? "")).flatMap((e) => [...(e.ids ?? []), ...(e.id ? [e.id] : [])]),
   ...(community.botIds ?? []),
 ]);
+// 發訊者是機器人 ID（protectedIds 裡 note 標機器人／bot，或 chat.community.botIds）時不自動回覆（只依 ID），見 reply-skip.mjs。
+// 保護名單裡的真人（共同管理員等）照常可以問守衛。
+const skipReplyTo = makeReplySkip({ botIds: [...botIds] });
 const memoryAllowDomains = [...new Set([...(chat.allowedLinkDomains ?? []), ...(community.allowDomains ?? [])])];
 // 這些紀錄代表發言者被判詐騙／可疑：他的參考資料整批刪掉、之後不收。
 const FLAG_ACTIONS = /^(removed|flagged|failed|notified|suspect-flag|impersonation-(flag|suspect|invite)|qr-(impersonation|flag)|vision-flag|scam-shop-(suspect|handled)|scam-link-flag|repeat-flag|kick-suppressed|fake-admin-(notify|avatar)|asker-redact|dry-run|notify-dry-run)/;
@@ -955,6 +959,10 @@ async function replyOut(ws, message, labeled, text) {
 async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   if (repliedIds.has(message.messageId)) return;
   markReplied(message.messageId);
+  if (skipReplyTo(message.senderId)) {
+    record({ action: "reply-skip-bot", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, via });
+    return;
+  }
   const senderKey = `${message.channelId} ${message.senderId}`;
   // 機器人訓練群：已經過群組自己的上限（每人／每群每分鐘），不再套一般群的冷卻（每人 5 分鐘、全帳號每分鐘、每群每小時）。
   const byName = !camp && nameTriggered.has(message.messageId);
