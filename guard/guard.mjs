@@ -32,6 +32,7 @@ import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, n
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
+import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, digestDate, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
@@ -2592,6 +2593,8 @@ function buildNotice(entry, kind, admins) {
 async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   if (!notify.enabled || !entry?.chatId) return false;
   if (!notifyChats.has(entry.chatId)) { record({ action: "notify-skipped", reason: "chat-not-allowed", chatId: entry.chatId }); return false; }
+  // 10/27 F：一般連結的「可能詐騙」評分只在 > 0 分時貼（0 分、一般分享、一般投資訊息不貼）。
+  if (!shouldPostLinkScore({ kind, score: entry.score })) { record({ action: "link-score-zero-skip", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId }); return false; }
   const now = Date.now();
   if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", chatId: entry.chatId, senderName: entry.senderName }); return false; }
   lastNotified.set(entry.chatId, now);
@@ -3019,11 +3022,20 @@ async function handleNote(ws, chatId, note) {
   const message = { messageId: `note:${note.postId}`, channelId: chatId, senderId: note.authorId, senderName: note.authorName, contentType: "NOTE", createdAt: note.createdAt, text };
   if (redPacketAllowed(chatId, text)) return record({ action: "note-checked", ...base, verdict: "RED_PACKET_ALLOWED" });
   const protectedAuthor = Boolean(note.authorId) && (neverKick(message) || protectedMembers.some((entry) => entry.ids.has(note.authorId)) || botIds.has(note.authorId));
-  const result = await decide(message, text);
+  // 10/27 B：記事本也唯讀展開短網址；結果只用於評分與通知（不刪不踢，踢人條件不變）。
+  let expanded;
+  const shortUrl = config.shortUrlExpand === true ? sanitizeLinks(text).text.match(SHORT_URL)?.[0] : undefined;
+  if (shortUrl) {
+    expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
+    record({ action: "note-short-url-expanded", chatId, notePostId: note.postId, result: expanded ? (expanded.invite ? "invite" : "normal") : "unreachable" });
+  }
+  const { extraNames } = noteLinkOutcome({ expanded });
+  const result = await decide(message, text, extraNames.length ? { extraNames } : undefined);
   const old = at < notesSeen.baseline || Date.now() - at > notesCfg.maxAgeHours * 3_600_000;
   const canDelete = notifyChats.has(chatId) && !noAction(chatId) && selfIsAdmin(chatId);
-  const action = decideNoteAction({ score: result.score, verdict: result.verdict, review: result.review, strongScore, notifyScore: config.notifyScore ?? 3,
+  let action = decideNoteAction({ score: result.score, verdict: result.verdict, review: result.review, strongScore, notifyScore: config.notifyScore ?? 3,
     protectedAuthor, deleteOnConfirmed: notesCfg.deleteOnConfirmed === true, canDelete, deleteSupported: NOTE_DELETE_SUPPORTED });
+  action = noteLinkOutcome({ expanded, action }).action;
   const entry = { ...base, score: result.score, names: result.names, verdict: result.verdict, review: result.review, noteAction: action, protectedAuthor };
   if (action === "none") { if (result.score > 0 || result.verdict === "SCAM") record({ action: "note-checked", ...entry }); return; }
   if (action === "notify" || action === "notice") { if (exchangeTextNoLink(text) && !outOfScopeNames(result.names)) { record({ action: "pionex-nolink-skip", ...entry }); return; } }
@@ -3454,6 +3466,7 @@ function connect() {
 for (const entry of protectedMembers) {
   if (entry.ids.size === 0) console.log(`提醒：受保護名字「${entry.name}」沒有填本人 ID，只在社群（靠管理員身分）偵測冒名。`);
 }
+console.log(startupStatusLine(config));
 if (questionRedact.enabled) console.log(`詢問者遮蔽已啟用：問詐騙＋前後 ${questionRedact.windowSeconds} 秒內貼外部 QR／LINE 資訊 → 刪除並提醒（不踢）`);
 if (vision.enabled) console.log(`看圖模型已啟用（${vision.action === "remove" ? "判定詐騙就移除" : "沒有 QR 的截圖只記錄，不通知、不移除"}）`);
 if (!reviewLlm) console.log("提醒：設定檔沒有 review（覆核模型），沿用分層巡邏之前的舊流程：不經覆核，依模型判定與規則分數踢人（kickPolicy 預設：模型判 SCAM 就踢；strict：還要規則分數達 strongScore），冒名與 LINE 邀請 QR 直接移除。要改成覆核才踢，請加上 review 區段，見 guard/README.md〈分層巡邏〉。");
