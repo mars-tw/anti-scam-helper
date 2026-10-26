@@ -58,7 +58,7 @@ export const NOTIFY_RULES = [
     return LOAN_SOFT.test(c) && !ANTI_SCAM_WARNING.test(c) && !ASK_IF_SCAM.test(c) && !WARN_EXTRA.test(c);
   } },
 ];
-const LOAN_RE = /代償|債務整合|整合(?:負債|債務|貸款|信貸|卡債|週轉|周轉)|借錢不是丟臉|(?:小額|快速|免審核?|低利|無息|當日)(?:借款|貸款|借貸|撥款)|高利.{0,4}(?:小額|代償|整合)/;
+const LOAN_RE = /代償|債務整合|整合(?:負債|債務|貸款|信貸|卡債|週轉|周轉)|借錢不是丟臉|(?:小額|快速|免審核?|低利|無息|當日)(?:借款|貸款|借貸|撥款)|高利.{0,4}(?:小額|代償|整合)|免聯徵|保證過件|美化(?:帳戶|存摺|金流)|寄(?:出|送)?(?:存摺|提款卡|金融卡)|(?:存摺|提款卡|金融卡).{0,4}寄(?:給|來|過來|出)|(?:貸|借).{0,12}約定轉帳|約定轉帳.{0,12}(?:貸|借|撥款)/;  // 10/26 情資：免聯徵、保證過件、美化帳戶、寄存摺／提款卡、借貸＋約定轉帳
 const LOAN_CONCRETE = /(?:賴|line)(?:id)?[:：]@?[\w.-]{3,}|(?<!\d)(?:\+?886-?|0)9\d{2}[-.]?\d{3}[-.]?\d{3}(?!\d)|去掉|lin\.ee|line\.me|https?:\/\//i;
 const LOAN_SOFT = /加(?:我)?(?:的)?(?:line|賴|好友)|私訊|私我|密我|留(?:個)?(?:訊息|言)|聯[繫絡]我|找我/i;
 
@@ -227,6 +227,7 @@ export function textNotifyReasons({ text, chatId, senderId, result, tracker, sho
     if (shorteners.some((d) => host.endsWith(`.${d}`) && host !== `www.${d}`)) { names.push("子網域短網址"); break; }
   }
   names.push(...intelNotify1025(text, { protectedSender, shorteners }));
+  names.push(...intelNotify1026(text, { protectedSender }));
   if (tracker.followsProfit(chatId, senderId, text)) names.push("獲利截圖後接著貼網址／叫人私訊");
   // 10/22 20:51 誤判後：0 分只靠模型判詐不通知；要有確定特徵（群組邀請、未知短網址、已知詐騙網域）才通知。
   if (result.zeroScoreScamReviewed && zeroScoreShouldNotify(result.names)) names.push("0 分但第一層與雲端覆核都判詐騙");
@@ -357,5 +358,28 @@ export function intelNotify1025(text, { protectedSender = false, shorteners = RU
   if (urls.some((u) => { const h = hostOf(u).split(":")[0]; return shorteners.some((d) => h.endsWith(`.${d}`) && h !== `www.${d}`) && !isMainstreamMediaHost(h) && SHORTCODE_PATH.test(pathOf(u)); })) names.push(INTEL_SUBSHORT);
   const offHost = hosts.some((h) => !isMainstreamMediaHost(h) && !OFFICIAL_HOST.test(h));
   if (VOTE_COUPON.test(t) && (offHost || shortUrl || CODE_BACK.test(t))) names.push(INTEL_VOTE_COUPON);
+  return names;
+}
+
+// ── 10/26 情資（只通知，絕不進 rules.mjs 踢人計分、不在 MINER_KICKABLE）─────────────
+// 1) 一般成員模仿守衛／防詐機器人警示樣式，又附連結、QR 或叫人「到新群驗證」。沒附連結／QR／新群驗證不通知。
+//    警示樣式本身就是防詐語氣，所以這條不套用防詐提醒排除；真管理員／白名單排除；只有 YouTube 等主流平台連結不算。
+// 2) 叫人「回傳群組 QR」（假主管叫人建群並回傳群組 QR）。防詐提醒語氣、「這是詐騙嗎」不算。
+export const INTEL_FAKE_GUARD = "模仿防詐警示樣式＋連結／QR／新群驗證";
+export const INTEL_SEND_GROUP_QR = "叫人回傳群組 QR";
+const GUARD_STYLE = /反詐提醒|防詐提醒|已移除(?:可疑|詐騙)?成員|本群已(?:啟用|開啟|加入)(?:防詐|反詐)|(?:防詐|反詐)(?:機器人|系統|守衛)(?:已|提醒|通知)/;
+const NEW_GROUP_VERIFY = /(?:到|去|進|加入|前往|移至)(?:新|備用|驗證)?(?:的)?(?:群|群組|社群).{0,8}(?:驗證|認證)|(?:驗證|認證).{0,6}(?:新群|新的群)/;
+const WARN_NEG = /(?:不要|勿|別|切勿|請勿|千萬別|千萬不要|不可|避免).{0,6}(?:掃|加入|加|點|驗證|相信|理會|上當)/;
+const QR_RE = /QR|ＱＲ|二維碼|條碼/i;
+const SEND_GROUP_QR = /(?:回傳|傳|發|給|提供|截圖).{0,6}(?:群組|群|社群)(?:的)?(?:QR|二維碼|條碼)|(?:群組|群|社群)(?:的)?(?:QR|二維碼|條碼).{0,8}(?:回傳|傳給|發給|給我|截圖給|私訊給)/i;
+export function intelNotify1026(text, { protectedSender = false } = {}) {
+  if (protectedSender) return [];
+  const t = String(text ?? "").replace(SPACES, "").normalize("NFKC");
+  const names = [];
+  const urls = urlsOf(t).filter((u) => !isMainstreamMediaHost(hostOf(u).split(":")[0]));
+  // 群友轉貼警告（「防詐提醒：不要掃這個 QR／這個網址是詐騙」）不算；但有「到新群驗證」這種叫人行動的照算。
+  const realWarn = (WARN_NEG.test(t) || WARN_EXTRA.test(t) || ASK_IF_SCAM.test(t)) && !NEW_GROUP_VERIFY.test(t);
+  if (GUARD_STYLE.test(t) && !realWarn && (urls.length || INVITE_RE.test(t) || QR_RE.test(t) || NEW_GROUP_VERIFY.test(t))) names.push(INTEL_FAKE_GUARD);
+  if (SEND_GROUP_QR.test(t) && !/小心|當心|謹防|慎防|注意|提醒大家|有人(?:叫|要)|被(?:叫|要求)/.test(t) && !WARN_NEG.test(t) && !ANTI_SCAM_WARNING.test(t) && !ASK_IF_SCAM.test(t) && !WARN_EXTRA.test(t)) names.push(INTEL_SEND_GROUP_QR);
   return names;
 }
