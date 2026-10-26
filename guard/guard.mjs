@@ -30,7 +30,7 @@ import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange
 import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
-import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, UNRECOGNIZED_REPLY } from "./kick-scope.mjs";
+import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
@@ -1435,6 +1435,12 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets, 
   record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick, review: "PENDING" });
   // 冒名＋邀請是規則判定（不經模型）；10/22 起另外跑一次雲端覆核，只寫日誌（review／reviewModel），不影響處置。
   if (message.text) metaReview(sanitizeLinks(message.text).text, "發訊者冒用管理員／群主名義並貼外部邀請或假群組公告。").then((rv) => record({ action: "impersonation-invite-review", chatId: entry.chatId, messageId: entry.messageId, review: rv.verdict ?? "UNAVAILABLE", reviewModel: rv.model })).catch((error) => recordError("model", `impersonation-review：${String(error?.message).slice(0, 60)}`));
+  // 10/26 23:47：冒名＋一般連結（不是群組邀請、不是 QR）→ 只回評分，不刪文；冒名＋假群組公告沒連結 → 只通知。
+  const groupy = GROUP_INVITE.test(textOf(message) || message.noteText || "") || Boolean(message.qrContent);
+  if (!kick && !groupy && config.kickScope?.ordinaryLinkScoreOnly !== false) {
+    record({ action: "impersonation-score-only", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+    return notifyAdmins(ws, { ...entry, score: entry.score ?? strongScore }, /https?:\/\//i.test(textOf(message) || "") ? "link-score" : "suspect", { force: true });
+  }
   if (config.dryRun) { record({ action: "dry-run", ...entry }); return; }
   if (warnOnly.has(message.channelId)) {
     record({ action: "kick-suppressed", reason: "warn-only", ...entry });
@@ -1522,8 +1528,11 @@ async function checkScamShop(ws, message, rawText) {
   shopOffenses[message.senderId] = [...(shopOffenses[message.senderId] ?? []), now];
   saveShopOffenses();
   const scope = kickScopeFor(message, { names: entry.names, verdict: "SCAM", review: entry.review });
-  const kick = repeat && scamShop.kickRepeat === true && !neverKick(message) && scope.kick;
-  record({ action: repeat ? "scam-shop-repeat" : "scam-shop-first", ...entry, kick, ...(repeat && scamShop.kickRepeat === true && !kick ? { kickScope: scope.reason } : {}) });
+  // 10/26 23:47：假精品「確認」（高仿／1:1 字眼＋連結＋兩層都 SCAM）第一次就刪文＋踢，不等再犯。
+  // 要踢的群：該群 kickMode=kick、kickScope.allChats=true，或 scamShop.kickRepeat=true（舊開關，沿用為「購物詐騙可踢」）。
+  const shopKickAllowed = chatKickMode(message.channelId) === "kick" || config.kickScope?.allChats === true || scamShop.kickRepeat === true;
+  const kick = shopKickAllowed && !neverKick(message) && scope.kick && scope.category === KICK_FAKE_LUXURY;
+  record({ action: repeat ? "scam-shop-repeat" : "scam-shop-first", ...entry, kick, ...(shopKickAllowed && !kick ? { kickScope: scope.reason ?? "not-fake-luxury" } : {}) });
   // 23:01：一頁式購物也是「普通連結」——不是假精品可踢，就只在群裡列出可能詐騙的評分，不刪不踢（kickScope.ordinaryLinkScoreOnly=false 回到舊的刪文）。
   if (!kick && config.kickScope?.ordinaryLinkScoreOnly !== false) {
     record({ action: "scam-shop-score-only", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: entry.score });
@@ -1604,7 +1613,7 @@ async function checkFile(ws, message) {
 // ── 23:01：無法辨識的連結（Cloudflare 挑戰頁）──────────────────
 // 只有 classifyFetch 判成 cf-challenge 才處理；逾時、DNS、一般 403／5xx 不算（避免把暫時掛掉的正常網站大量刪掉）。
 // 放行網站（benignDomains、主流影音）、LINE 連結、只學習／只警告／kickScope.excludeChats 的群、受保護成員與管理員都不處理。
-// 私下回報：寫進 logs/unrecognized-links.jsonl（權限 600）給維護者人工辨識；kickScope.reportChat 有設（既有的維護者通知管道）才另外送。
+// 私下回報：寫進 logs/unrecognized-links.jsonl（權限 600）給維護者人工辨識；unrecognizedLink.reportChat 有設才把連結私下發到那個聊天；沒設就只寫 log。
 const unrecognized = { enabled: false, timeoutMs: 5000, ...config.unrecognizedLink };
 async function checkUnrecognizedLink(ws, message, text) {
   if (!unrecognized.enabled || neverKick(message)) return false;
@@ -1632,8 +1641,9 @@ async function checkUnrecognizedLink(ws, message, text) {
   await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(UNRECOGNIZED_REPLY, blockedWords), mentions: [], replyTo: message.messageId }).catch(() => undefined);
   const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
   const deleted = answer.type === "message:deleted";
-  if (unrecognized.reportChat) await call(ws, { type: "message:send", chatId: unrecognized.reportChat, text: withAgentLabel(`反詐小幫手：有一則連結無法辨識（被 Cloudflare 擋住），請人工確認：${url}`) }).catch(() => undefined);
-  record({ action: deleted ? "unrecognized-link-deleted" : "unrecognized-link-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, reported: Boolean(unrecognized.reportChat) });
+  const report = unrecognizedReport({ reportChat: unrecognized.reportChat, url, chatId: message.channelId });
+  if (report) await call(ws, { ...report, text: withAgentLabel(report.text) }).catch(() => undefined);
+  record({ action: deleted ? "unrecognized-link-deleted" : "unrecognized-link-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, reported: Boolean(report) });
   return true;
 }
 
@@ -2028,6 +2038,9 @@ async function handle(ws, message) {
     } else if (result.verdict === "SCAM" && !exchangeNoLink) notifyTracker.scam(message.senderId);
     if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK" || entry.urlKind)) record({ action: "none", ...entry });
     // 沒到踢人門檻，但 Meta 判 SCAM 且（規則 ≥ notifyScore，或地端也判 SCAM 且含連結）：引用回覆該則、通知群主與管理員確認，不踢。
+    // 10/26 23:47：kickScope.allChats=true → 22:59 可踢類別（群組邀請／確認詐騙群／假精品）在全部守護群都送 remove()；
+    // 範圍、排除群、只學習／只警告、沒管理員權限（noDeleteChats）都在 remove() 裡再擋。
+    if (!result.kick && config.kickScope?.allChats === true && kickScopeFor(message, entry).kick) return remove(ws, message, entry);
     if (result.action === "delete") return deleteScamLink(ws, message, entry);
     // 地端判 SCAM＋含連結，但 Meta 不可用：不處置，只記錄。
     if (result.verdict === "SCAM" && result.link && result.review === "UNAVAILABLE") record({ action: "scam-link-meta-unavailable", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: result.score, names: result.names });

@@ -24,7 +24,8 @@ const MOVE_RULE_NAMES = new Set(["假群組公告", "假群組連結", "催促�
 const WARNING = /(?:疑似|可能是?|小心|注意|提醒|警告|防範|謹防|當心).{0,10}(?:詐騙|假群|假冒|冒充|冒用|被騙)|(?:不要|勿|別|切勿|請勿|千萬別|千萬不要)\s*(?:隨便|亂)?\s*(?:加入|點|加|相信|理會|上當|掃)|是詐騙嗎|是不是(詐騙|假的)|這.{0,4}(可信|能信)(嗎|不)|165/;
 
 // 假精品：1:1／複刻／高仿／原單／尾單／AAA／名牌超低價。
-export const FAKE_LUXURY = /1[:：比]1|複刻|復刻|高仿|原單|尾單|A{3}級?|頂級(精品|名牌)|精品.{0,4}(複刻|高仿|代購)|名牌.{0,6}(超低價|[1-9]折|特價|出清)|(LV|Gucci|Chanel|香奈兒|愛馬仕|Hermes|Rolex|勞力士|Prada|Dior|Cartier|卡地亞).{0,12}(超低價|[1-9]折|出清|特價|只要\s*[$＄]?\s*\d)/i;
+// 10/26 23:47：「確認假精品」的字眼只認高仿／1:1（一比一）；低價、折扣、名牌字眼不算（那些走一般連結只評分）。
+export const FAKE_LUXURY = /1\s*[:：比]\s*1|一比一|高仿/i;
 // 假色情 PDF：檔名或文字是 PDF＋色情／外流／偷拍字眼。
 export const PDF = /\.pdf\b|PDF|pdf檔|電子書/i;
 export const PORN = /色情|成人|18禁|十八禁|裸|露點|外流|偷拍|私密|自拍|約炮|約砲|性愛|無碼|av女優|AV|寫真|全套|福利(片|影片|圖)|老司機|小黃片|情色/i;
@@ -104,6 +105,11 @@ export function unrecognizedLinkAction({ kind, allowed = false, excluded = false
   const chat = kickScopeChat(chatId, scope);
   if (!chat.ok) return { act: false, reason: chat.reason };
   return { act: true };
+}
+/** 無法辨識連結的私下回報：reportChat 有設才回一個送訊框（連結只發到該聊天）；沒設回 undefined（只寫 log）。 */
+export function unrecognizedReport({ reportChat, url, chatId } = {}) {
+  if (typeof reportChat !== "string" || !reportChat.trim() || !url || reportChat === chatId) return undefined;
+  return { type: "message:send", chatId: reportChat.trim(), text: `反詐小幫手：有一則連結無法辨識（被 Cloudflare 擋住），請人工確認：${url}` };
 }
 export const UNRECOGNIZED_REPLY = "⚠️ 反詐小幫手：這則訊息裡的連結無法辨識內容，不提供放在群組，已先刪除；需要的話請私下詢問管理員。（AI代理）";
 

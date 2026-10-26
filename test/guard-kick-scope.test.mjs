@@ -1,7 +1,7 @@
 // 10/26 踢人範圍改版（22:59／23:01／23:02／23:07／23:15）：純函式測試。全部是假 ID、假網域。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyFetch, friendAddOnly, FRIEND_NOTE, kickCategory, kickScopeDecision, KICK_FAKE_GROUP, KICK_FAKE_LUXURY, KICK_FAKE_PORN_PDF, KICK_SCAM_GROUP, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, UNRECOGNIZED_REPLY } from "../guard/kick-scope.mjs";
+import { unrecognizedReport, classifyFetch, friendAddOnly, FRIEND_NOTE, kickCategory, kickScopeDecision, KICK_FAKE_GROUP, KICK_FAKE_LUXURY, KICK_FAKE_PORN_PDF, KICK_SCAM_GROUP, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, UNRECOGNIZED_REPLY } from "../guard/kick-scope.mjs";
 import { scanFile } from "../guard/file-scan.mjs";
 import { makePdf } from "./fake-pdf.mjs";
 
@@ -137,4 +137,17 @@ test("23:15 檔案掃描：假 PDF 三種（群組 QR、一般連結、沒有連
   assert.equal((await scanFile(Buffer.alloc(0))).error, "EMPTY");
   const slow = await scanFile(await makePdf({ text: "x" }), { pdftotext: "sleep-not-a-tool" });
   assert.ok(slow.error, "外部程式不存在 → 回 error，不丟例外");
+});
+
+test("23:47 reportChat：有設才私下發連結；沒設、空字串、跟原群相同 → 只寫 log", () => {
+  const f = unrecognizedReport({ reportChat: "uOwnerFake", url: "https://blocked.example/x", chatId: "cA" });
+  assert.equal(f.type, "message:send"); assert.equal(f.chatId, "uOwnerFake"); assert.ok(f.text.includes("https://blocked.example/x"));
+  assert.equal(unrecognizedReport({ url: "https://blocked.example/x", chatId: "cA" }), undefined);
+  assert.equal(unrecognizedReport({ reportChat: " ", url: "https://blocked.example/x", chatId: "cA" }), undefined);
+  assert.equal(unrecognizedReport({ reportChat: "cA", url: "https://blocked.example/x", chatId: "cA" }), undefined, "不可回報到原群（會把連結放回群組）");
+});
+test("23:47 假精品確認字眼只認高仿／1:1", () => {
+  assert.equal(kickCategory({ text: "Gucci 一比一 https://x.example/a", ...SCAM }), KICK_FAKE_LUXURY);
+  assert.equal(kickCategory({ text: "LV 名牌包只要 $399 https://x.example/a", ...SCAM }), undefined);
+  assert.equal(kickCategory({ text: "香奈兒 3折出清 https://x.example/a", ...SCAM }), undefined);
 });

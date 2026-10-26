@@ -66,7 +66,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
   child.kill();
   await Promise.race([exited, new Promise((done) => setTimeout(done, 3000))]);
   wss.close(); llm.close();
-  rmSync(dir, { recursive: true, force: true });
+  if (process.env.GUARD_E2E_KEEP) console.error(`guard-e2e dir: ${dir}`); else rmSync(dir, { recursive: true, force: true });
   return { frames, removes: frames.filter((f) => f.type === "member:remove"), deletes: frames.filter((f) => f.type === "message:delete"), sends: frames.filter((f) => f.type === "message:send") };
 }
 
@@ -260,13 +260,20 @@ test("詐騙購物：第一次 → 10/26 23:01 起只引用回覆列出詐騙評
   assert.ok(!r.sends[0].text.includes("lv-bags-sale"));
 });
 
-test("詐騙購物：假精品再犯 kickRepeat=true → 踢（即使 kickMode=notify）；第一次只評分不刪", async () => {
+const LUX_AD = "LV 1:1 高仿包 名牌包只要 $399 貨到付款 https://lv-bags-sale.shop/a";
+test("10/26 23:47 假精品確認（高仿／1:1＋連結＋兩層 SCAM）→ 第一次就刪文＋踢（kickRepeat=true，即使 kickMode=notify）", async () => {
+  const r = await runGuard({ kickMode: "notify", scamShop: { enabled: true, kickRepeat: true } }, [
+    { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: LUX_AD },
+  ], { waitMs: 3500 });
+  assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
+  assert.equal(r.removes[0].deleteMessage, true);
+});
+test("10/26 23:47 只有低價名牌字眼（沒有高仿／1:1）→ 不踢，只評分", async () => {
   const r = await runGuard({ kickMode: "notify", scamShop: { enabled: true, kickRepeat: true } }, [
     { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD },
     { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD.replace("/a", "/b") },
   ], { waitMs: 3500 });
-  assert.equal(r.deletes.length, 0);
-  assert.deepEqual(r.removes.map((f) => f.messageId), ["m2"]);
+  assert.equal(r.removes.length + r.deletes.length, 0);
 });
 
 test("詐騙購物：再犯 kickRepeat=false → 只列評分，不刪不踢", async () => {
@@ -776,4 +783,62 @@ test("23:15 檔案：PDF 只有一般連結 → 只列評分，不刪不踢；�
     const r = await runGuard({ fileScan: { enabled: true } }, [FILE_MSG], { file: { name: "a.pdf", data }, waitMs: 4000 });
     assert.equal(r.removes.length + r.deletes.length + r.sends.length, 0);
   }
+});
+
+// ── 10/26 23:47：kickScope.allChats=true（正式設定會開；預設關）──
+const ALL = { kickMode: "notify", kickScope: { allChats: true }, scamShop: { enabled: true, fetchPage: false }, impersonation: { kickWithInvite: true } };
+test("allChats：一般群換群連結 → 踢；預設（沒開 allChats、kickMode=notify）→ 不踢", async () => {
+  const on = await runGuard(ALL, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
+  assert.equal(on.removes.length, 1);
+  const off = await runGuard({ kickMode: "notify" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
+  assert.equal(off.removes.length, 0);
+});
+test("allChats：excludeChats／learnOnly／warnOnly 的群 → 換群連結、假精品都一定不踢", async () => {
+  for (const extra of [{ kickScope: { allChats: true, excludeChats: ["cA"] } }, { groupPolicies: { cA: { learnOnly: true } } }, { groupPolicies: { cA: { warnOnly: true } } }]) {
+    const r = await runGuard({ ...ALL, ...extra }, [
+      { messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE },
+      { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: LUX_AD },
+    ], { waitMs: 3500 });
+    assert.equal(r.removes.length, 0, JSON.stringify(extra));
+  }
+});
+test("allChats：沒有管理員權限的群（noDeleteChats）→ 只通知，不送刪文／踢人", async () => {
+  const r = await runGuard({ ...ALL, questionRedact: { noDeleteChats: ["cA"] } }, [
+    { messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE },
+    { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: LUX_AD },
+  ], { waitMs: 3500 });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.ok(r.sends.length >= 1);
+});
+test("allChats：檔案路徑照同一套 → 一般群踢；排除群、只學習群、只警告群、沒權限群不刪不踢", async () => {
+  const data = (await makePdf({ text: "hello", qr: KS_GROUP })).toString("base64");
+  const on = await runGuard({ ...ALL, fileScan: { enabled: true } }, [FILE_MSG], { file: { name: "a.pdf", data }, waitMs: 5000 });
+  assert.equal(on.removes.length, 1);
+  for (const extra of [{ kickScope: { allChats: true, excludeChats: ["cA"] } }, { groupPolicies: { cA: { learnOnly: true } } }, { groupPolicies: { cA: { warnOnly: true } } }, { questionRedact: { noDeleteChats: ["cA"] } }]) {
+    const r = await runGuard({ ...ALL, fileScan: { enabled: true }, ...extra }, [FILE_MSG], { file: { name: "a.pdf", data }, waitMs: 5000 });
+    assert.equal(r.removes.length + r.deletes.length, 0, JSON.stringify(extra));
+  }
+});
+const IMP_HISTORY = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
+test("23:47 冒名＋一般連結 → 只回評分，不刪不踢（allChats 開著也一樣）", async () => {
+  const r = await runGuard(ALL, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "大家看這篇 https://scam-site.xyz/a" }], { history: IMP_HISTORY, waitMs: 3500 });
+  assert.equal(r.removes.length + r.deletes.length, 0);
+  assert.ok(r.sends.some((f) => String(f.text).includes("詐騙評分")), JSON.stringify(r.sends.map((f) => f.text)));
+});
+test("23:47 冒名＋外部群組邀請 → 仍刪文＋踢", async () => {
+  const r = await runGuard(ALL, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: `新群在這 ${KS_GROUP}` }], { history: IMP_HISTORY, waitMs: 3500 });
+  assert.equal(r.removes.length, 1);
+});
+test("23:47 冒用群主＋私聊 ID、冒充負責人叫匯款、保證獲利、帶單 → allChats 開著也不踢", async () => {
+  const r = await runGuard(ALL, [
+    { messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "有問題私訊我 加我賴：fakeadmin99" },
+    { messageId: "m2", channelId: "cA", senderId: "pX", senderName: "財務負責人", text: "我是負責人，請大家今天匯款到這個帳戶 000-1234567" },
+    { messageId: "m3", channelId: "cA", senderId: "pY", senderName: "老師", text: "保證獲利 每天帶單 穩賺不賠 https://scam-site.xyz/vip" },
+  ], { history: IMP_HISTORY, waitMs: 4000 });
+  assert.equal(r.removes.length, 0);
+});
+test("23:47 冒用群主＋私聊 QR（ti/p）→ 不踢", async () => {
+  const png = (await QRCode.toBuffer("https://line.me/ti/p/FakeFriendQr", { width: 300 })).toString("base64");
+  const r = await runGuard({ ...ALL, qr: { enabled: true, kickOnConfirmed: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", contentType: "IMAGE" }], { media: png, history: IMP_HISTORY, waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
 });
