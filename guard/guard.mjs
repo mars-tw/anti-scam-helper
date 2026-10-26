@@ -30,6 +30,8 @@ import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange
 import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
+import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, UNRECOGNIZED_REPLY } from "./kick-scope.mjs";
+import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
 import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
@@ -1173,8 +1175,25 @@ async function remove(ws, message, entry) {
   const mode = chatKickMode(message.channelId);
   const escalate = mode === "notify" ? impersonationKickDecision(message, entry) : undefined;
   if (escalate?.kick) record({ action: "impersonation-kick-escalated", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, victim: escalate.victim });
+  // 維護者 10/26 22:59：只有「換群／假新群／假二群的群組連結或 QR」與「確認詐騙群組／假精品／假色情 PDF」才踢。
+  // 其他（計分到門檻、假管理員、跨群相同、冒充負責人要匯款、短網址……）降級：踢人群改刪文＋通知（只限含群組邀請／QR），其餘只通知。
+  // 23:15：檔案內含外部群組邀請（entry.forceScopeKick）照 22:59 刪文＋踢人，不受全域 kickMode=notify 影響；範圍與排除照舊。
+  // kickScope.allChats=true：其他可踢類別也在全部守護群生效（預設關閉，見疑問清單）。
+  const forced = entry.forceScopeKick === true || config.kickScope?.allChats === true;
+  if (mode === "kick" || escalate?.kick || forced) {
+    const scope = kickScopeFor(message, entry, escalate?.kick ? escalate.victim : undefined);
+    if (!scope.kick) {
+      record({ action: "kick-out-of-scope", reason: scope.reason, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, verdict: entry.verdict, names: entry.names });
+      kicked.add(`${message.channelId} ${message.senderId}`);
+      const groupy = GROUP_INVITE.test(textOf(message) || message.noteText || "") || Boolean(message.qrContent);
+      if (groupy && !noAction(message.channelId) && notifyChats.has(message.channelId) && !config.dryRun) return deleteScamLink(ws, message, entry);
+      return notifyAdmins(ws, { ...entry, noticeKind: undefined }, "suspect");
+    }
+    record({ action: "kick-in-scope", category: scope.category, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+  }
+  const scopeForced = forced && mode === "notify" && !escalate?.kick;
   if (mode === "kick" && kickMode === "notify") record({ action: "chat-kick-override", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
-  if (mode === "notify" && !escalate?.kick) {
+  if (mode === "notify" && !escalate?.kick && !scopeForced) {
     record({ ...entry, action: "kick-suppressed", reason: "kickMode-notify", ...(escalate && escalate.reason !== "no-invisible" ? { escalateSkip: escalate.reason } : {}) });
     kicked.add(`${message.channelId} ${message.senderId}`);
     return notifyAdmins(ws, { ...entry, noticeKind: undefined }, "suspect");
@@ -1395,13 +1414,24 @@ async function checkFakeAdmin(ws, message, text) {
   return false;
 }
 // 這兩條（冒名＋邀請、購物再犯）直接送踢人、不經 remove()，送出前再擋一次：受保護成員、管理員、群主、本帳號絕不踢。
+/** 22:59 踢人範圍：群（只學習／只警告／kickScope.excludeChats）＋內容類別。 */
+function kickScopeFor(message, entry = {}, impersonating) {
+  return kickScopeDecision({
+    chatId: message.channelId, excluded: neverKick(message),
+    scope: { excludeChats: config.kickScope?.excludeChats ?? [], learnOnly, warnOnly },
+    text: textOf(message) || message.noteText || "", fileName: message.fileName, names: entry.names ?? [], verdict: entry.verdict === "QR_LINE_INVITE" ? undefined : entry.verdict, review: entry.review,
+    qrContent: message.qrContent, fileGroupInvite: message.fileInvite === true, inviteExpanded: (entry.names ?? []).includes("短網址導向群組邀請"), impersonating,
+  });
+}
 function neverKick(message) {
   return Boolean(message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)
     || [...chatAdmins.values()].some((admins) => admins.has(message.senderId)) || isStaff(message) || nameGuard.protects(message));
 }
 async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false } = {}) {
   const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names: [`冒用「${victim}」`, notice ? "假群組公告" : "外部邀請／引流連結或 QR code"] };
-  const kick = config.impersonation?.kickWithInvite === true && !neverKick(message);
+  const scope = kickScopeFor(message, { names: entry.names }, victim);
+  const kick = config.impersonation?.kickWithInvite === true && !neverKick(message) && scope.kick;
+  if (config.impersonation?.kickWithInvite === true && !kick) record({ action: "kick-out-of-scope", reason: scope.reason, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, verdict: entry.verdict });
   record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick, review: "PENDING" });
   // 冒名＋邀請是規則判定（不經模型）；10/22 起另外跑一次雲端覆核，只寫日誌（review／reviewModel），不影響處置。
   if (message.text) metaReview(sanitizeLinks(message.text).text, "發訊者冒用管理員／群主名義並貼外部邀請或假群組公告。").then((rv) => record({ action: "impersonation-invite-review", chatId: entry.chatId, messageId: entry.messageId, review: rv.verdict ?? "UNAVAILABLE", reviewModel: rv.model })).catch((error) => recordError("model", `impersonation-review：${String(error?.message).slice(0, 60)}`));
@@ -1491,8 +1521,15 @@ async function checkScamShop(ws, message, rawText) {
   const repeat = (shopOffenses[message.senderId] ?? []).length > 0;
   shopOffenses[message.senderId] = [...(shopOffenses[message.senderId] ?? []), now];
   saveShopOffenses();
-  const kick = repeat && scamShop.kickRepeat === true && !neverKick(message);
-  record({ action: repeat ? "scam-shop-repeat" : "scam-shop-first", ...entry, kick });
+  const scope = kickScopeFor(message, { names: entry.names, verdict: "SCAM", review: entry.review });
+  const kick = repeat && scamShop.kickRepeat === true && !neverKick(message) && scope.kick;
+  record({ action: repeat ? "scam-shop-repeat" : "scam-shop-first", ...entry, kick, ...(repeat && scamShop.kickRepeat === true && !kick ? { kickScope: scope.reason } : {}) });
+  // 23:01：一頁式購物也是「普通連結」——不是假精品可踢，就只在群裡列出可能詐騙的評分，不刪不踢（kickScope.ordinaryLinkScoreOnly=false 回到舊的刪文）。
+  if (!kick && config.kickScope?.ordinaryLinkScoreOnly !== false) {
+    record({ action: "scam-shop-score-only", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: entry.score });
+    notifyAdmins(ws, entry, "link-score", { force: true });
+    return true;
+  }
   if (config.dryRun) { record({ action: "dry-run", ...entry }); return true; }
   if (warnOnly.has(message.channelId)) {
     record({ action: "kick-suppressed", reason: "warn-only", ...entry });
@@ -1521,12 +1558,96 @@ async function checkScamShop(ws, message, rawText) {
   return true;
 }
 
+// ── 23:07：加好友備註 ───────────────────────────────────────
+const friendGate = makeFriendNoteGate({ cooldownMs: (config.kickScope?.friendNoteCooldownMinutes ?? 360) * 60_000 });
+async function friendNote(ws, message) {
+  const ok = notifyChats.has(message.channelId) && !neverKick(message) && friendGate({ chatId: message.channelId, senderId: message.senderId, learnOnly });
+  record({ action: "friend-add-note", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, sent: ok && !config.dryRun });
+  if (!ok || config.dryRun) return;
+  // 不是詐騙警告：不附分數、不 @ 管理員。只警告群也發，只學習群不發（friendGate 擋）。
+  await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: FRIEND_NOTE, mentions: [], replyTo: message.messageId }).catch(() => undefined);
+}
+
+// ── 23:15：檔案（PDF 等）掃群組連結／QR ───────────────────────────
+// 檔案裡有外部 LINE 群組／社群邀請（文字連結、連結註解或頁面 QR）→ 22:59 詐騙群組（有色情字眼＝假色情 PDF）：刪文＋踢人（範圍／排除照舊）。
+// 只有一般連結 → 23:01：達 notifyScore 才列出可能詐騙的評分，不刪不踢。沒有連結 → 不處理。檔案處理完不留存。
+const fileScan = { enabled: false, ...FILE_SCAN_DEFAULTS, ...config.fileScan };
+async function checkFile(ws, message) {
+  if (neverKick(message)) return;
+  let got;
+  try { got = await call(ws, { type: "file:fetch", chatId: message.channelId, messageId: message.messageId }); } catch (error) { return recordError("file", error.message); }
+  if (got?.type !== "file") return recordError("file", got?.code);
+  let scan;
+  try { scan = await scanFile(Buffer.from(String(got.data ?? ""), "base64"), fileScan); } catch { scan = { urls: [], qrs: [], text: "", error: "SCAN_FAILED" }; }
+  got.data = undefined;
+  message.fileName = String(got.name ?? message.card?.name ?? "").slice(0, 120);
+  record({ action: "file-scan", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, kind: scan.kind, pages: scan.pages, urls: scan.urls.length, qrs: scan.qrs.length, error: scan.error });
+  const found = [...scan.urls, ...scan.qrs];
+  let external = false;
+  for (const link of found.filter((u) => GROUP_INVITE.test(u)).slice(0, 5)) {
+    const origin = await qrOrigin(ws, message.channelId, link).catch(() => ({ origin: "unknown" }));
+    if (origin.origin !== "own") { external = true; break; }
+  }
+  const base = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "FILE" };
+  if (external) {
+    message.fileInvite = true;
+    return remove(ws, message, { ...base, verdict: "FILE_GROUP_INVITE", names: ["檔案內含外部 LINE 群組邀請連結／QR code"], score: strongScore, forceScopeKick: true });
+  }
+  const ordinary = scan.urls.filter((u) => !/(?:line\.me|lin\.ee)\//i.test(u) && !(benignUrl.lastIndex = 0, benignUrl.test(u)));
+  benignUrl.lastIndex = 0;
+  if (!ordinary.length) return;
+  const scored = ruleScore(message, `${message.fileName} ${ordinary.join(" ")} ${scan.text.slice(0, 2000)}`);
+  record({ action: "file-links", ...base, links: ordinary.length, score: scored.score, names: scored.names });
+  if (scored.score >= (config.notifyScore ?? 3)) await notifyAdmins(ws, { ...base, names: scored.names, score: scored.score }, "link-score");
+}
+
+// ── 23:01：無法辨識的連結（Cloudflare 挑戰頁）──────────────────
+// 只有 classifyFetch 判成 cf-challenge 才處理；逾時、DNS、一般 403／5xx 不算（避免把暫時掛掉的正常網站大量刪掉）。
+// 放行網站（benignDomains、主流影音）、LINE 連結、只學習／只警告／kickScope.excludeChats 的群、受保護成員與管理員都不處理。
+// 私下回報：寫進 logs/unrecognized-links.jsonl（權限 600）給維護者人工辨識；kickScope.reportChat 有設（既有的維護者通知管道）才另外送。
+const unrecognized = { enabled: false, timeoutMs: 5000, ...config.unrecognizedLink };
+async function checkUnrecognizedLink(ws, message, text) {
+  if (!unrecognized.enabled || neverKick(message)) return false;
+  const clean = sanitizeLinks(text).text;
+  if (GROUP_INVITE.test(clean)) return false; // 群組邀請交給踢人／換群規則
+  const url = (clean.replace(benignUrl, " ").match(/https?:\/\/[^\s<>"'）)]+/i) ?? [])[0];
+  if (!url || /(?:^|\.|\/)(?:line\.me|lin\.ee)\//i.test(url) || onlyMainstreamMediaLinks(url)) return false;
+  const pre = unrecognizedLinkAction({ kind: "cf-challenge", chatId: message.channelId, scope: { excludeChats: config.kickScope?.excludeChats ?? [], learnOnly, warnOnly } });
+  if (!pre.act || noAction(message.channelId) || !notifyChats.has(message.channelId)) return false;
+  const fetched = await expandUrlSafe(url, { timeoutMs: unrecognized.timeoutMs }).catch(() => undefined);
+  const kind = fetched?.kind ?? "unreachable";
+  let allowed = false;
+  try { allowed = fetched?.url ? (benignUrl.lastIndex = 0, benignUrl.test(fetched.url)) || isMainstreamMediaHost(new URL(fetched.url).hostname) : false; } catch {}
+  benignUrl.lastIndex = 0;
+  const decision = unrecognizedLinkAction({ kind, allowed, excluded: neverKick(message), chatId: message.channelId, scope: { excludeChats: config.kickScope?.excludeChats ?? [], learnOnly, warnOnly } });
+  record({ action: "link-probe", chatId: message.channelId, messageId: message.messageId, result: kind, act: decision.act });
+  if (!decision.act) return false;
+  try {
+    const file = resolve(logDir, unrecognized.reportFile ?? "unrecognized-links.jsonl");
+    appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, url })}\n`, { mode: 0o600 });
+    chmodSync(file, 0o600);
+  } catch (error) { recordError("unrecognized-report", error.message); }
+  if (config.dryRun) { record({ action: "unrecognized-link-dry-run", chatId: message.channelId, messageId: message.messageId }); return true; }
+  // 先引用回覆（不含連結，結尾（AI代理）），再刪那則（刪了就引用不到）。
+  await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(UNRECOGNIZED_REPLY, blockedWords), mentions: [], replyTo: message.messageId }).catch(() => undefined);
+  const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
+  const deleted = answer.type === "message:deleted";
+  if (unrecognized.reportChat) await call(ws, { type: "message:send", chatId: unrecognized.reportChat, text: withAgentLabel(`反詐小幫手：有一則連結無法辨識（被 Cloudflare 擋住），請人工確認：${url}`) }).catch(() => undefined);
+  record({ action: deleted ? "unrecognized-link-deleted" : "unrecognized-link-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, reported: Boolean(unrecognized.reportChat) });
+  return true;
+}
+
 // scamLink.deleteOnConfirmed：本帳號是管理員的群（不在 noDeleteChats、在 notify.chats），
 // 地端＋Meta 都判 SCAM 且含外部連結 → 先引用回覆發通知「將刪除」，等 notify.beforeActionMs，再刪這則訊息（不踢人）。
 // 刪不掉就補發「請發文者自行收回或請管理員處理」（不受冷卻限制）。公開版預設關閉。
 const scamLink = { deleteOnConfirmed: false, ...config.scamLink };
 async function deleteScamLink(ws, message, entry) {
   if (isStaff(message) || message.senderId === me) return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
+  // 23:01：一般連結（不是 LINE 群組邀請、不是 QR）只在群裡列出「可能是詐騙」的評分，不刪不踢。
+  if (config.kickScope?.ordinaryLinkScoreOnly !== false && !GROUP_INVITE.test(textOf(message) || message.noteText || "") && !message.qrContent && !(entry.names ?? []).includes("短網址導向群組邀請")) {
+    record({ action: "link-score-only", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review });
+    return notifyAdmins(ws, entry, "link-score");
+  }
   record({ action: "scam-link-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review, reviewModel: entry.reviewModel });
   if (config.dryRun) {
     record({ action: "scam-link-dry-run", chatId: entry.chatId, messageId: entry.messageId });
@@ -1769,6 +1890,7 @@ async function handle(ws, message) {
   }
   const trusted = message.senderRole || whitelist.has(message.senderId);
   if (!text) {
+    if (!trusted && fileScan.enabled && (message.contentType === "FILE" || message.card?.kind === "file")) return checkFile(ws, message);
     if (message.contentType === "IMAGE" && !trusted) {
       if (questionRedact.enabled && !isStaff(message)) noteAsker(message, { kind: "image", risky: false });
       if (qr.enabled) await checkImage(ws, message);
@@ -1806,7 +1928,24 @@ async function handle(ws, message) {
       await notifyAdmins(ws, le, "suspect");
     }
   }
+  // 維護者 10/26 23:07：加好友（個人：賴、LINE ID、加好友連結）不列入詐騙、不刪不踢；只回一則溫和備註（同人同群冷卻）。
+  if (!trusted && config.kickScope?.friendNote !== false && friendAddOnly(text)) {
+    await friendNote(ws, message);
+    remember(message, text);
+    return;
+  }
+  // 維護者 10/26 23:02：一般投資訊息、一般分享（沒有拉群、加好友、私聊、QR、ID、入金、保證獲利、帶單這類導流）不列入詐騙評分、不提醒。
+  if (!trusted && config.kickScope?.plainShareSkip !== false) {
+    const cleanShare = sanitizeLinks(text).text;
+    if (plainInfoShare(cleanShare, { ruleNames: ruleScore(message, cleanShare).names, benignOnly: !hasLink(cleanShare.replace(benignUrl, " ")) })) {
+      record({ action: "plain-share-skip", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(text) });
+      remember(message, text);
+      return;
+    }
+  }
   if (!trusted && repeatOffense(message) && hasLineInfo(text)) return punishRepeat(ws, message, { ...contentRef(text) });
+  // 維護者 10/26 23:01：連結被 Cloudflare 擋住（挑戰頁）無法辨識 → 刪文＋引用留言「無法辨識、不提供放在群組」＋私下回報連結給維護者人工辨識；不踢。
+  if (!trusted && await checkUnrecognizedLink(ws, message, text)) return;
   if (!trusted && await checkScamShop(ws, message, text)) return;
   if (!trusted) {
     // 已知短網址服務：唯讀展開（維護者 10/22 F／G）。導向群組邀請 → 判詐騙；購物頁 → 照常判斷，沒處置時在群內提醒勿亂下單；
@@ -2001,6 +2140,7 @@ async function checkImage(ws, message) {
   if (isLineInvite(content)) {
     // 本群（同一個社群）自己的邀請 QR：放行，和白名單一樣處理。一般群組 ti/g/ 仍只靠白名單。
     const origin = await qrOrigin(ws, message.channelId, content);
+    message.qrContent = content; // 給踢人範圍判斷用（不寫進日誌）
     entry.qrOrigin = origin.origin;
     entry.qrOriginVia = origin.via;
     if (origin.origin === "own") {
@@ -2009,6 +2149,11 @@ async function checkImage(ws, message) {
       return record({ action: "none", verdict: "QR_OWN_GROUP", ...entry });
     }
     if (await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_LINE_INVITE" });
+    // 23:07：個人加好友 QR（ti/p、lin.ee）不算詐騙：只回溫和備註，不覆核、不刪不踢。
+    if (config.kickScope?.friendNote !== false && friendAddOnly("", { qrContent: content })) {
+      record({ action: "qr-friend", ...entry });
+      return friendNote(ws, message);
+    }
     // 詢問者遮蔽：這張是外部 LINE 邀請 QR。發的人前後有問「是不是詐騙」就刪圖＋提醒，不送覆核、不踢。
     if (repeatOffense(message)) return punishRepeat(ws, message, { contentType: "IMAGE_QR", ...contentRef(content) });
     if (questionRedact.enabled && !isStaff(message)) {
@@ -2407,6 +2552,8 @@ function buildNotice(entry, kind, admins) {
         ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，含可疑連結，將刪除這則訊息。`
       : kind === "link-delete-failed"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」的訊息疑似詐騙${reason}，但本帳號無法刪除，請發文者自行收回，或請管理員處理。`
+      : kind === "link-score"
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的連結可能是詐騙${reason}（詐騙評分 ${Number(entry.score ?? 0)} 分），請不要點擊、不要下單或輸入資料，請管理員確認。`
       : kind === "suspect"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」的訊息疑似詐騙${reason}，請管理員確認。`
       : kind === "qr"

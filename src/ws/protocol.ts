@@ -47,6 +47,8 @@ export type ServerFrame =
   | { type: "message:deleted"; requestId: string; chatId: string; messageId: string }
   /** Answer to a bot's `media:fetch`: the picture of a received image message, base64. */
   | { type: "media"; requestId: string; chatId: string; messageId: string; mime: string; data: string }
+  /** Answer to a bot's `file:fetch`: the bytes of a received FILE message, base64. */
+  | { type: "file"; requestId: string; chatId: string; messageId: string; name: string; data: string }
   /** Answer to a bot's `notes:list`: the OpenChat's recent notes (記事本), newest first. */
   | { type: "notes"; requestId: string; chatId: string; notes: Note[] }
   /** Answer to a bot's `invite:own`: this OpenChat's existing invitation links (read-only) and its square mid. */
@@ -87,6 +89,7 @@ export type ClientFrame =
   | { type: "thread:fetch"; requestId: string; chatId: string; threadId: string; limit?: number }
   /** Bots only, with `api.moderation`: the picture of an image message shown by this server (e.g. to read QR codes). */
   | { type: "media:fetch"; requestId: string; chatId: string; messageId: string }
+  | { type: "file:fetch"; requestId: string; chatId: string; messageId: string }
   /** This account's own id, name and picture, on demand (pages and bots alike). */
   | { type: "profile:get"; requestId: string }
   | { type: "stickers:list"; requestId: string }

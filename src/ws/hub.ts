@@ -29,6 +29,7 @@ const DELETIONS_PER_MINUTE = 20;
 // Pictures for moderation bots (QR checks): bounded so a bot cannot turn this server into a bulk downloader.
 const BOT_MEDIA_PER_MINUTE = 30;
 const BOT_MEDIA_MAX_BYTES = 5 * 1024 * 1024;
+const BOT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 // A connection that has not answered a ping by the next round is gone (a sleeping laptop, a dropped
 // network): it is closed so broadcasts stop piling up behind it and the page can reconnect.
 const HEARTBEAT_MS = 30_000;
@@ -624,6 +625,34 @@ export function createHub(options: HubOptions): Hub {
     }
   }
 
+  /**
+   * Bot-only: the bytes of a received FILE message (e.g. a PDF), so the guard can look for group links / QR codes inside.
+   * Same scope, moderation switch and rate limit as media:fetch; capped at BOT_FILE_MAX_BYTES. The hub keeps nothing extra.
+   */
+  async function handleBotFile(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseMessageRequest(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, messageId } = parsed.value;
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    if (login.state !== "ready" || !store.channelOf(chatId) || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    const message = store.get(messageId, chatId);
+    const card = message?.card;
+    if (!message || message.unsent || card?.kind !== "file" || card.fileId !== `file-${messageId}`) return fail(socket, "INVALID_REQUEST", requestId);
+    if (typeof card.size === "number" && card.size > BOT_FILE_MAX_BYTES) return fail(socket, "MEDIA_FAILED", requestId);
+    if (!botMediaLimiter.allow()) return fail(socket, "RATE_LIMITED", requestId);
+    const account = generation;
+    try {
+      const file = await media.get(card.fileId);
+      if (account !== generation || login.state !== "ready") return;
+      if (!file || file.bytes.length > BOT_FILE_MAX_BYTES) return fail(socket, "MEDIA_FAILED", requestId);
+      send(socket, { type: "file", requestId, chatId, messageId, name: card.name, data: file.bytes.toString("base64") });
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("MEDIA_FAILED", error);
+      fail(socket, "MEDIA_FAILED", requestId);
+    }
+  }
+
   /** Stores and announces new reactions; returns the message as now cached, or undefined if nothing changed. */
   function updateReactions(chatId: string, messageId: string, reactions: Reactions | undefined): Message | undefined {
     const before = store.channelOf(chatId);
@@ -838,6 +867,9 @@ export function createHub(options: HubOptions): Hub {
           return;
         case "media:fetch":
           void handleBotMedia(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "file:fetch":
+          void handleBotFile(socket, frame as Record<string, unknown>, botScope);
           return;
         case "thread:fetch":
           if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));

@@ -1,3 +1,4 @@
+import { classifyFetch } from "./kick-scope.mjs";
 // 一頁式詐騙購物站：網域特徵＋訊息文字＋（選用）安全抓頁面（不執行 JS、短逾時、限大小、拒絕內網）。
 // 只輸出分數與訊號名稱，不記網址內容。
 import { lookup } from "node:dns/promises";
@@ -138,7 +139,8 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
     } catch { return undefined; }
     if (response.status >= 300 && response.status < 400 && response.headers.get("location")) { target = new URL(response.headers.get("location"), parsed).toString(); continue; }
     let html = "";
-    if (response.ok && /text\/html|application\/xhtml/i.test(response.headers.get("content-type") ?? "")) {
+    const cfServer = /cloudflare/i.test(response.headers.get("server") ?? "") || response.headers.has?.("cf-ray");
+    if ((response.ok || (cfServer && [403, 429, 503].includes(response.status))) && /text\/html|application\/xhtml/i.test(response.headers.get("content-type") ?? "")) {
       const reader = response.body?.getReader();
       const chunks = []; let size = 0;
       while (reader && size < maxBytes) { const { done, value } = await reader.read().catch(() => ({ done: true })); if (done) break; chunks.push(value); size += value.length; }
@@ -149,7 +151,10 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
     // 短網址中繼頁用 meta refresh 或 location 轉址（不是 3xx）：再跟下一跳，免得只停在第一跳。
     const next = invite ? undefined : html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*\d*\s*;?\s*url\s*=\s*['"]?([^"'>\s]+)/i)?.[1] ?? html.match(/(?:window\.)?location(?:\.href)?\s*(?:=|\.replace\(|\.assign\()\s*["'](https?:\/\/[^"']+)["']/i)?.[1];
     if (next && hop < 4) { try { target = new URL(next.replace(/&amp;/g, "&"), parsed).toString(); continue; } catch {} }
-    return { url: parsed.toString(), html, invite, status: response.status };
+    const headers = {}; for (const key of ["server", "cf-ray", "cf-mitigated"]) { const v = response.headers.get(key); if (v !== null) headers[key] = v; }
+    const kind = classifyFetch({ status: response.status, headers, html });
+    // CF 挑戰頁的 html 不是網站內容：不交給後面判斷。
+    return { url: parsed.toString(), html: kind === "cf-challenge" ? "" : (response.ok ? html : ""), invite, status: response.status, kind };
   }
   return undefined;
 }

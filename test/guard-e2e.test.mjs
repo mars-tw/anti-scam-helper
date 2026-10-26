@@ -10,12 +10,13 @@ import test from "node:test";
 import QRCode from "qrcode";
 import { WebSocketServer } from "../guard/node_modules/ws/wrapper.mjs";
 import { KnowledgeCache } from "../guard/knowledge.mjs";
+import { makePdf } from "./fake-pdf.mjs";
 
 const SCAM_TEXT = "通知：本群明天要刪除了，請大家加入新群 https://scam-site.xyz/join 快點";
 const NORMAL_TEXT = "我剛剛醒，睡很久";
 const now = Date.now();
 
-async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, media, setup, channels, invites = {} } = {}) {
+async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, media, setup, channels, invites = {}, file } = {}) {
   const llm = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
@@ -41,6 +42,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
       else if (f.type === "message:send") socket.send(JSON.stringify({ type: "sent", requestId: f.requestId, messageId: `sent${++seq}` }));
       else if (f.type === "member:remove") socket.send(JSON.stringify({ type: "member:removed", requestId: f.requestId, chatId: f.chatId, messageId: f.messageId, memberId: "x", messageDeleted: true }));
       else if (f.type === "media:fetch") socket.send(JSON.stringify(media ? { type: "media", requestId: f.requestId, mime: "image/png", data: media } : { type: "error", requestId: f.requestId, code: "NOT_FOUND" }));
+      else if (f.type === "file:fetch") socket.send(JSON.stringify(file ? { type: "file", requestId: f.requestId, chatId: f.chatId, messageId: f.messageId, name: file.name, data: file.data } : { type: "error", requestId: f.requestId, code: "NOT_FOUND" }));
       else if (f.type === "message:delete") socket.send(JSON.stringify({ type: "message:deleted", requestId: f.requestId }));
       else if (f.type === "invite:own") socket.send(JSON.stringify({ type: "invite:own", requestId: f.requestId, chatId: f.chatId, squareMid: `s-${f.chatId}`, links: invites.own ?? [] }));
       else if (f.type === "invite:lookup") socket.send(JSON.stringify(invites.lookup?.[f.ticket] ? { type: "invite:lookup", requestId: f.requestId, chatId: f.chatId, found: true, squareMid: invites.lookup[f.ticket] } : { type: "invite:lookup", requestId: f.requestId, chatId: f.chatId, found: false }));
@@ -68,9 +70,16 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
   return { frames, removes: frames.filter((f) => f.type === "member:remove"), deletes: frames.filter((f) => f.type === "message:delete"), sends: frames.filter((f) => f.type === "message:send") };
 }
 
-test("對照：一般成員貼高分詐騙＋兩模型 SCAM → 會送踢人（確認測試抓得到）", async () => {
-  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
+test("對照：換群文字＋LINE 群組邀請＋兩模型 SCAM → 會送踢人（確認測試抓得到）", async () => {
+  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: "通知：本群明天要刪除了，請大家加入新群 https://line.me/ti/g2/FakeGroup0001 快點" }]);
   assert.equal(r.removes.length, 1);
+});
+
+test("10/26 22:59：高分詐騙但只有一般連結（不是群組邀請）→ 不踢、不刪，只通知", async () => {
+  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.deletes.length, 0);
+  assert.equal(r.sends.length, 1);
 });
 
 test("受保護成員（protectedIds）：就算模型都判 SCAM 也不踢、不刪、不通知", async () => {
@@ -103,10 +112,10 @@ test("kickMode=notify：達踢人門檻也只通知，不踢", async () => {
   assert.equal(r.sends.length, 1);
 });
 
-test("對照：impersonation.kick=true 才會因冒名踢人（舊行為，預設關閉）", async () => {
+test("10/26 22:59：impersonation.kick=true 只有冒名、沒有群組邀請 → 不踢（舊行為會踢）", async () => {
   const history = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
   const r = await runGuard({ impersonation: { kick: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pOther", senderName: "阿明", text: NORMAL_TEXT }], { history });
-  assert.equal(r.removes.length, 1);
+  assert.equal(r.removes.length, 0);
 });
 
 // 小助手：問到踢人、刪除、管理員權限等，只回固定句，不讓模型說明。
@@ -242,29 +251,30 @@ test("非管理員的群：冒名＋連結只通知（請管理員處理）", as
 const SHOP_AD = "LV 精品快閃店 名牌包只要 $399 貨到付款 https://lv-bags-sale.shop/a";
 const SHOP = { scamShop: { enabled: true, fetchPage: false, kickRepeat: false } };
 
-test("詐騙購物：第一次 → 引用回覆警告＋刪除", async () => {
+test("詐騙購物：第一次 → 10/26 23:01 起只引用回覆列出詐騙評分，不刪不踢", async () => {
   const r = await runGuard({ ...SHOP }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
-  assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
+  assert.equal(r.deletes.length, 0);
   assert.equal(r.removes.length, 0);
   assert.equal(r.sends[0].replyTo, "m1");
-  assert.ok(r.sends[0].text.includes("一頁式詐騙購物"));
+  assert.ok(r.sends[0].text.includes("詐騙評分"), r.sends[0].text);
+  assert.ok(!r.sends[0].text.includes("lv-bags-sale"));
 });
 
-test("詐騙購物：再犯 kickRepeat=true → 踢（即使 kickMode=notify）", async () => {
+test("詐騙購物：假精品再犯 kickRepeat=true → 踢（即使 kickMode=notify）；第一次只評分不刪", async () => {
   const r = await runGuard({ kickMode: "notify", scamShop: { enabled: true, kickRepeat: true } }, [
     { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD },
     { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD.replace("/a", "/b") },
   ], { waitMs: 3500 });
-  assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
+  assert.equal(r.deletes.length, 0);
   assert.deepEqual(r.removes.map((f) => f.messageId), ["m2"]);
 });
 
-test("詐騙購物：再犯 kickRepeat=false → 刪除＋警告，不踢", async () => {
+test("詐騙購物：再犯 kickRepeat=false → 只列評分，不刪不踢", async () => {
   const r = await runGuard({ ...SHOP }, [
     { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD },
     { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD.replace("/a", "/b") },
   ], { waitMs: 3500 });
-  assert.deepEqual(r.deletes.map((f) => f.messageId).sort(), ["m1", "m2"]);
+  assert.equal(r.deletes.length, 0);
   assert.equal(r.removes.length, 0);
 });
 
@@ -524,17 +534,14 @@ test("社群參考資料：機器人指令、成員對話進參考；詐騙與�
   assert.ok(!block.includes("成員甲") && !block.includes("pM"), block);
 });
 
-test("冒充群主（暱稱含社群品牌名）＋假群組公告（沒連結）：kickWithInvite 踢人並刪除，通知不用禁字", async () => {
+test("冒充群主（暱稱含社群品牌名）＋假群組公告（沒連結）：10/26 22:59 起沒有群組連結／QR 不踢，通知不用禁字", async () => {
   const channels = [{ channelId: "cA", name: "示範研究社 - 測試小隊長 / (新手區) 示範研究社 - 測試小隊長", kind: "square" }];
   const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: true } }, [
     { messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "測試小隊長.-Ann", text: "請大家搬到新3群，週五統一審核" },
     { messageId: "m2", channelId: "cA", senderId: "pImp", senderName: "測試小隊長.-Ann", text: "麻煩大家重新加入喔" },
   ], { channels, waitMs: 4000 });
-  assert.equal(r.removes.length, 1);
-  assert.ok(r.sends.length >= 1);
+  assert.equal(r.removes.length, 0);
   for (const f of r.sends) assert.ok(!String(f.text).includes("換群"));
-  const gone = new Set([...r.removes.map((f) => f.messageId), ...r.deletes.map((f) => f.messageId)]);
-  assert.ok(gone.has("m1") && gone.has("m2"), JSON.stringify([...gone]));
 });
 
 test("冒充群主暱稱但只是閒聊：不踢不刪", async () => {
@@ -558,7 +565,7 @@ test("只學習的群（groupPolicies.learnOnly）：收進參考資料，但不
     { messageId: "b2", channelId: "cB", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT },
     { messageId: "b3", channelId: "cB", senderId: "pAsk", senderName: "成員乙", text: "阿華 網格要怎麼設？", mentions: [{ userId: "pSelf" }] },
     { messageId: "b4", channelId: "cB", senderId: "pAsk", senderName: "成員乙", text: "/ai整理" },
-    { messageId: "a1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT },
+    { messageId: "a1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: "通知：本群明天要刪除了，請大家加入新群 https://line.me/ti/g2/FakeGroup0001 快點" },
   ], { history, chatAnswer: OK_ANSWER, waitMs: 7000 });
   const toB = r.frames.filter((f) => f.chatId === "cB" && !["history:fetch", "notes:list"].includes(f.type));
   assert.deepEqual(toB, [], JSON.stringify(toB));
@@ -579,7 +586,7 @@ test("只警告的群（groupPolicies.warnOnly）：詐騙、冒名＋邀請、�
     { messageId: "b1", channelId: "cB", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT },
     { messageId: "b2", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE },
     { messageId: "b3", channelId: "cB", senderId: "pShop", senderName: "賣包包", text: "LV 精品快閃店 名牌包只要 $399 貨到付款 https://lv-bags-sale.shop/a" },
-    { messageId: "a1", channelId: "cA", senderId: "pBad2", senderName: "陌生人二", text: SCAM_TEXT },
+    { messageId: "a1", channelId: "cA", senderId: "pBad2", senderName: "陌生人二", text: "通知：本群明天要刪除了，請大家加入新群 https://line.me/ti/g2/FakeGroup0001 快點" },
   ], { history, waitMs: 5000 });
   const inB = r.frames.filter((f) => f.chatId === "cB" && (f.type === "member:remove" || f.type === "message:delete"));
   assert.deepEqual(inB, [], JSON.stringify(inB));
@@ -708,4 +715,65 @@ test("仿冒群主／管理員直接刪踢只限踢人群：其他群貼 👑 �
   ], { history });
   assert.equal(r.removes.length, 0);
   assert.equal(r.deletes.length, 0);
+});
+
+// ── 10/26 踢人範圍改版（22:59／23:01／23:02／23:07／23:15）端對端 ──
+const KS_GROUP = "https://line.me/ti/g2/FakeGroup0001";
+const KS_MOVE = `本群要解散了，請大家加入新群 ${KS_GROUP}`;
+
+test("22:59 範圍：kickScope.excludeChats（排除群）、只學習、只警告群 → 換群連結也不踢", async () => {
+  for (const extra of [{ kickScope: { excludeChats: ["cA"] } }, { groupPolicies: { cA: { learnOnly: true } } }, { groupPolicies: { cA: { warnOnly: true } } }]) {
+    const r = await runGuard(extra, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
+    assert.equal(r.removes.length, 0, JSON.stringify(extra));
+  }
+});
+test("22:59 受保護（白名單）貼換群連結 → 不踢", async () => {
+  const r = await runGuard({ whitelist: ["pFriend"] }, [{ messageId: "m1", channelId: "cA", senderId: "pFriend", senderName: "好友", text: KS_MOVE }]);
+  assert.equal(r.removes.length, 0);
+});
+test("23:02 一般投資新聞分享 → 不評分、不通知", async () => {
+  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pX", senderName: "股友", text: "台積電今天大漲 3%，分享一則美股新聞大家參考" }]);
+  assert.equal(r.sends.length + r.deletes.length + r.removes.length, 0);
+});
+test("23:07 教入金 → 不評分、不刪、不踢", async () => {
+  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pX", senderName: "股友", text: "教大家怎麼在派網入金，先綁銀行帳戶再儲值" }]);
+  assert.equal(r.sends.length + r.deletes.length + r.removes.length, 0);
+});
+test("23:07 加好友 → 只發一次溫和備註（無評分、無 @），同人同群冷卻", async () => {
+  const r = await runGuard({}, [
+    { messageId: "m1", channelId: "cA", senderId: "pX", senderName: "網友", text: "加我賴：fakeid123 交個朋友" },
+    { messageId: "m2", channelId: "cA", senderId: "pX", senderName: "網友", text: "加我賴：fakeid123 交個朋友喔" },
+  ], { waitMs: 3500 });
+  assert.equal(r.deletes.length + r.removes.length, 0);
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.includes("網路交友需謹慎") && r.sends[0].text.includes("（AI代理）"));
+  assert.ok(!r.sends[0].text.includes("分") && !(r.sends[0].mentions ?? []).length);
+});
+test("23:07 只學習群加好友 → 不發備註", async () => {
+  const r = await runGuard({ groupPolicies: { cA: { learnOnly: true } } }, [{ messageId: "m1", channelId: "cA", senderId: "pX", senderName: "網友", text: "加我賴：fakeid123" }]);
+  assert.equal(r.sends.length, 0);
+});
+test("23:07 對抗：加好友文字夾群組邀請 → 照群組規則踢", async () => {
+  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pX", senderName: "網友", text: `加我賴：fake，也可以來新群 ${KS_GROUP}` }]);
+  assert.equal(r.removes.length, 1);
+});
+
+const FILE_MSG = { messageId: "f1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "FILE", card: { kind: "file", name: "x.pdf", size: 1, fileId: "file-f1" } };
+test("23:15 檔案：PDF 內含群組 QR → 刪文＋踢", async () => {
+  const data = (await makePdf({ text: "hello", qr: KS_GROUP })).toString("base64");
+  const r = await runGuard({ fileScan: { enabled: true } }, [FILE_MSG], { file: { name: "外流私密.pdf", data }, waitMs: 5000 });
+  assert.equal(r.removes.length, 1);
+});
+test("23:15 檔案：排除群（excludeChats）的群組 QR PDF → 不踢", async () => {
+  const data = (await makePdf({ text: "hello", qr: KS_GROUP })).toString("base64");
+  const r = await runGuard({ fileScan: { enabled: true }, kickScope: { excludeChats: ["cA"] } }, [FILE_MSG], { file: { name: "a.pdf", data }, waitMs: 5000 });
+  assert.equal(r.removes.length, 0);
+});
+test("23:15 檔案：PDF 只有一般連結 → 只列評分，不刪不踢；沒有連結／壞檔 → 什麼都不做", async () => {
+  const link = await runGuard({ fileScan: { enabled: true } }, [FILE_MSG], { file: { name: "a.pdf", data: (await makePdf({ text: "join now https://scam-site.xyz/join guaranteed profit" })).toString("base64") }, waitMs: 5000 });
+  assert.equal(link.removes.length + link.deletes.length, 0);
+  for (const data of [(await makePdf({ text: "no links here" })).toString("base64"), Buffer.from("%PDF-1.4 garbage").toString("base64")]) {
+    const r = await runGuard({ fileScan: { enabled: true } }, [FILE_MSG], { file: { name: "a.pdf", data }, waitMs: 4000 });
+    assert.equal(r.removes.length + r.deletes.length + r.sends.length, 0);
+  }
 });
