@@ -175,10 +175,21 @@ export function localDate(t = Date.now()) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 /** 該不該寫今天的筆記：今天還沒寫、且已過 digestHour 點；force（手動觸發）一律寫。 */
-export function digestDue(dir, { now = Date.now(), digestHour = LEARN_EXT_DEFAULTS.digestHour, force = false } = {}) {
-  if (force) return true;
-  if (new Date(now).getHours() < digestHour) return false;
-  return !existsSync(join(dir, `${localDate(now)}.md`));
+export function digestDue(dir, opts = {}) { return Boolean(digestDate(dir, opts)); }
+/**
+ * 要寫哪一天的筆記（回日期字串；不用寫回 undefined）。
+ * 10/27 自動反思：10/26 22:55 跑完、23 點後守衛部署重啟把計時器歸零，下一輪已過午夜，前一天筆記就漏寫。
+ * 補寫：還沒到 digestHour、昨天的筆記沒寫、而且以前寫過筆記（不是第一次啟用）→ 補寫昨天的。只影響本機學習筆記。
+ */
+export function digestDate(dir, { now = Date.now(), digestHour = LEARN_EXT_DEFAULTS.digestHour, force = false } = {}) {
+  const today = localDate(now);
+  if (force) return today;
+  if (new Date(now).getHours() >= digestHour) return existsSync(join(dir, `${today}.md`)) ? undefined : today;
+  const d = new Date(now); d.setDate(d.getDate() - 1);
+  const yesterday = localDate(d.getTime());
+  if (existsSync(join(dir, `${yesterday}.md`))) return undefined;
+  const older = listNotes(dir).filter((n) => n.slice(0, 10) < yesterday);
+  return older.length ? yesterday : undefined;
 }
 
 /** 稽核案例（訓練用）：判定＋理由＋去識別化描述；不含 ID、暱稱、網址、原圖。kind：text／link／image／qr。 */

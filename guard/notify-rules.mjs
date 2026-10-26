@@ -22,6 +22,7 @@ export const FAKE_VERIFY = "假認證／運費＋加 LINE";
 export const WITHDRAW_FEE = "出金要先繳費＋聯絡方式";
 export const CODE_COUPON = "領券／贈品要回傳驗證碼";
 export const LOAN_LURE = "代償／債務整合借貸＋私下聯絡";
+export const ADVISOR_LURE = "投顧／分析師一對一引流＋外部連結";
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -57,7 +58,24 @@ export const NOTIFY_RULES = [
     if (LOAN_CONCRETE.test(c)) return true;
     return LOAN_SOFT.test(c) && !ANTI_SCAM_WARNING.test(c) && !ASK_IF_SCAM.test(c) && !WARN_EXTRA.test(c);
   } },
+  // 10/27 自動反思：投顧／分析師一對一帶當沖、號稱新手也能跟的引流文＋外部短網址，兩個模型都判詐，規則只有 1 分沒通知（漏抓）。
+  // 只通知，不進 rules.mjs 踢人分數，不在 MINER_KICKABLE，也不是踢人類別。
+  // 要同時有「投顧／分析師／操盤手」＋「一對一／免費諮詢／新手也能跟／解套…」引流字眼＋非主流網站連結或私下聯絡。
+  // 只有 YouTube、新聞、交易所等主流網址不算；一般投資分享（沒引流字眼）不算；白名單／真管理員不算；第一層與覆核都判 OK 不算。
+  // 防繞過：防詐提醒語氣只在第一層「沒」判 SCAM 時才排除（詐騙者加「小心詐騙」字樣、模型仍判 SCAM 時照通知）。
+  { name: ADVISOR_LURE, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = String(t).normalize("NFKC").replace(SPACES, "");
+    if (ctx.protectedSender || (ctx.verdict === "OK" && ctx.review === "OK")) return false;
+    if (!ADVISOR_RE.test(c) || !ADVISOR_PULL.test(c)) return false;
+    const offLink = (c.match(URL_RE) ?? []).some((u) => { const h = hostOf(u).split(":")[0]; return !isMainstreamMediaHost(h) && !OFFICIAL_HOST.test(h); });
+    if (!offLink && !INVITE_RE.test(c) && !ADD_LINE.test(c) && !ADVISOR_CONTACT.test(c)) return false;
+    if (ctx.verdict !== "SCAM" && (ANTI_SCAM_WARNING.test(c) || ASK_IF_SCAM.test(c) || WARN_EXTRA.test(c))) return false;
+    return true;
+  } },
 ];
+const ADVISOR_CONTACT = /(?:賴|line)(?:id)?[:：]@?[\w.-]{3,}|(?<!\d)(?:\+?886-?|0)9\d{2}[-.]?\d{3}[-.]?\d{3}(?!\d)|lin\.ee\//i;
+const ADVISOR_RE = /投顧|分析師|操盤手|股市(?:老師|專家|達人)|財經(?:老師|專家)|資深(?:操盤|交易員)/;
+const ADVISOR_PULL = /一對一|1對1|1v1|一對1|免費(?:分享|諮詢|指導|診股|領取|加入|體驗)|新手也(?:能|可以)|輕鬆跟(?:隨|上|單)|跟隨|解套|診股|精品當沖|當沖.{0,4}(?:分享|指導|帶)|盤前.{0,6}(?:佈局|布局|規劃)|名額有限/i;
 const LOAN_RE = /代償|債務整合|整合(?:負債|債務|貸款|信貸|卡債|週轉|周轉)|借錢不是丟臉|(?:小額|快速|免審核?|低利|無息|當日)(?:借款|貸款|借貸|撥款)|高利.{0,4}(?:小額|代償|整合)|免聯徵|保證過件|美化(?:帳戶|存摺|金流)|寄(?:出|送)?(?:存摺|提款卡|金融卡)|(?:存摺|提款卡|金融卡).{0,4}寄(?:給|來|過來|出)|(?:貸|借).{0,12}約定轉帳|約定轉帳.{0,12}(?:貸|借|撥款)/;  // 10/26 情資：免聯徵、保證過件、美化帳戶、寄存摺／提款卡、借貸＋約定轉帳
 const LOAN_CONCRETE = /(?:賴|line)(?:id)?[:：]@?[\w.-]{3,}|(?<!\d)(?:\+?886-?|0)9\d{2}[-.]?\d{3}[-.]?\d{3}(?!\d)|去掉|lin\.ee|line\.me|https?:\/\//i;
 const LOAN_SOFT = /加(?:我)?(?:的)?(?:line|賴|好友)|私訊|私我|密我|留(?:個)?(?:訊息|言)|聯[繫絡]我|找我/i;
@@ -88,6 +106,7 @@ export function noticeTips(names = []) {
   if (names.includes(WITHDRAW_FEE)) tips.push("正規平台出金不會要你先繳保證金、稅金或解凍費。");
   if (names.includes(CODE_COUPON)) tips.push("驗證碼不要給任何人，給了帳號可能被盜。");
   if (names.includes(LOAN_LURE)) tips.push("正規銀行不會在群裡叫人私下加 LINE 辦代償或債務整合；先收費、要存摺或提款卡的都是詐騙。");
+  if (names.includes(ADVISOR_LURE)) tips.push("合法投顧不會在群裡貼外部連結找人一對一帶當沖；點進去加 LINE 的「老師」多半是投資詐騙。");
   return tips;
 }
 

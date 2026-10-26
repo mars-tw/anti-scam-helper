@@ -34,7 +34,7 @@ import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriend
 import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
-import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
+import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, digestDate, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
 
 // 任何沒接住的錯誤都結束程序，交給 supervise.mjs（或 pm2）重新啟動，不留在半壞狀態。
@@ -3165,7 +3165,8 @@ async function learnThreads(ws, chatId, threadIds, names) {
 /** 筆記裡的群名稱：groupPolicies[id].learnExtLabel（自訂、去識別化的稱呼），沒設就用「群 N」。 */
 const learnExtLabel = (chatId, index) => sectionLabel(policyOf(chatId), index);
 async function writeDigest(chatIds, names, { force = false } = {}) {
-  if (!memory || !digestDue(learnNotesDir, { digestHour: learnExtCfg.digestHour, force })) return undefined;
+  const noteDate = memory ? digestDate(learnNotesDir, { digestHour: learnExtCfg.digestHour, force }) : undefined;
+  if (!noteDate) return undefined;
   const since = listNotes(learnNotesDir).length ? Date.now() - 86_400_000 : Date.now() - 7 * 86_400_000;
   const parts = []; const total = { messages: 0, threads: 0, threadMessages: 0, images: 0 };
   for (const [index, chatId] of chatIds.entries()) {
@@ -3179,7 +3180,8 @@ async function writeDigest(chatIds, names, { force = false } = {}) {
     record({ action: "learn-notes", chatId, model: used.model ?? "none", ...counts });
   }
   if (!parts.length) return undefined;
-  return writeNotes(learnNotesDir, localDate(), parts.join("\n\n---\n\n"), total);
+  if (noteDate !== localDate()) record({ action: "learn-notes-catchup", date: noteDate });
+  return writeNotes(learnNotesDir, noteDate, parts.join("\n\n---\n\n"), total);
 }
 async function runLearnExt(ws, { force = false } = {}) {
   if (!extStore || extBusy || ws?.readyState !== WebSocket.OPEN) return;

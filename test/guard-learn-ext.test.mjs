@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LearnExtStore, buildDigestInput, replyChains, sectionLabel, cleanDescription, cleanNotes, digestDue, makeHourlyCap, readLatestNotes, writeNotes, localDate, LEARN_EXT_DEFAULTS } from "../guard/learn-ext.mjs";
+import { LearnExtStore, buildDigestInput, replyChains, sectionLabel, cleanDescription, cleanNotes, digestDue, digestDate, makeHourlyCap, readLatestNotes, writeNotes, localDate, LEARN_EXT_DEFAULTS } from "../guard/learn-ext.mjs";
 import { blockedForLearnOnly, learnExtChats } from "../guard/policy.mjs";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "learnext-"));
@@ -93,4 +93,18 @@ test("筆記分節：用自訂的去識別化群名稱，沒設就用群 N，不
   assert.equal(sectionLabel({ learnExtLabel: "技術交流群" }, 0), "技術交流群");
   assert.equal(sectionLabel({}, 1), "群 2");
   assert.equal(sectionLabel({ learnExtLabel: "# 壞\n名" }, 0), "壞名");
+});
+
+test("10/27 補寫：過午夜才跑、昨天筆記沒寫 → 補昨天；第一次啟用、昨天已寫都不補", () => {
+  const at = (d, h) => { const x = new Date(2026, 9, d, h, 5, 0, 0); return x.getTime(); };
+  const dir = tmp();
+  writeNotes(dir, "2026-10-25", "## 主題\n- a", {});
+  assert.equal(digestDate(dir, { now: at(27, 0), digestHour: 23 }), "2026-10-26");
+  assert.equal(digestDue(dir, { now: at(27, 0), digestHour: 23 }), true);
+  writeNotes(dir, "2026-10-26", "## 主題\n- b", {});
+  assert.equal(digestDate(dir, { now: at(27, 0), digestHour: 23 }), undefined);
+  assert.equal(digestDate(dir, { now: at(27, 23), digestHour: 23 }), "2026-10-27");
+  assert.equal(digestDate(tmp(), { now: at(27, 0), digestHour: 23 }), undefined);
+  assert.equal(digestDate(tmp(), { now: at(27, 23), digestHour: 23 }), "2026-10-27");
+  assert.equal(digestDate(dir, { now: at(27, 0), digestHour: 23, force: true }), "2026-10-27");
 });
