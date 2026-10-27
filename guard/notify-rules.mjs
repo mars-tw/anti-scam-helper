@@ -23,6 +23,9 @@ export const WITHDRAW_FEE = "出金要先繳費＋聯絡方式";
 export const CODE_COUPON = "領券／贈品要回傳驗證碼";
 export const LOAN_LURE = "代償／債務整合借貸＋私下聯絡";
 export const ADVISOR_LURE = "投顧／分析師一對一引流＋外部連結";
+export const SHIP_VERIFY = "賣貨便／實名認證假客服";
+export const SEX_PLATFORM = "色情應召轉假平台收費";
+export const LUXURY_URL = "一頁式精品網址樣式＋名牌／出清";
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -72,7 +75,49 @@ export const NOTIFY_RULES = [
     if (ctx.verdict !== "SCAM" && (ANTI_SCAM_WARNING.test(c) || ASK_IF_SCAM.test(c) || WARN_EXTRA.test(c))) return false;
     return true;
   } },
+  // 10/27 情資分析：以下三條只通知，不進 rules.mjs 踢人分數、不在 MINER_KICKABLE、不是踢人類別。
+  // 共同排除：白名單／真管理員、第一層與覆核都判 OK；防詐提醒語氣／「這是詐騙嗎」只在第一層沒判 SCAM 時排除（防繞過）。
+  // 1) 賣貨便實名認證假客服：五個字眼任兩個（不同的）同時出現。
+  { name: SHIP_VERIFY, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx)) return false;
+    return SHIP_TERMS.filter((re) => re.test(c)).length >= 2;
+  } },
+  // 2) 色情應召轉假平台：收費字眼＋（情色暗示或加 Telegram／LINE 私聊）。「保證金」不能單獨當收費字眼（要配情色暗示才算）。
+  { name: SEX_PLATFORM, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx)) return false;
+    const sexy = SEXY.test(c);
+    const fee = SEX_FEE.test(c) || (/保證金/.test(c) && sexy);
+    if (!fee) return false;
+    if (/派網|pionex/i.test(c) && !hasLinkOrInvite(c) && !sexy) return false;
+    return sexy || SEX_CONTACT.test(c);
+  } },
+  // 3) 一頁式精品網址樣式：主網域含 outlet/supplier/wholesale/retailer/express/forum 且結尾 .shop/.store/.cam/.top，同訊息要有名牌或出清字眼。主流網址不算。
+  { name: LUXURY_URL, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx) || !LUX_WORD.test(c)) return false;
+    return (c.match(URL_RE) ?? []).some((u) => {
+      const h = hostOf(u).split(":")[0];
+      if (isMainstreamMediaHost(h)) return false;
+      const parts = h.split(".");
+      return parts.length >= 2 && LUX_TLD.test(parts.at(-1)) && LUX_KEY.test(parts.at(-2));
+    });
+  } },
 ];
+function intelText(t) { return String(t ?? "").normalize("NFKC").replace(SPACES, ""); }
+function intelGate(c, ctx) {
+  if (ctx.protectedSender || (ctx.verdict === "OK" && ctx.review === "OK")) return false;
+  if (ctx.verdict !== "SCAM" && (ANTI_SCAM_WARNING.test(c) || ASK_IF_SCAM.test(c) || WARN_EXTRA.test(c))) return false;
+  return true;
+}
+const SHIP_TERMS = [/賣貨便/, /實名制?認證/, /郵(?:政|局)客服/, /開(?:通|啟|設)?網(?:路)?銀(?:行)?/, /截圖.{0,4}(?:帳戶|帳號|戶頭)|(?:帳戶|帳號|戶頭).{0,6}截圖/];
+const SEX_FEE = /會員費|約會卡|解凍金|認證金|車馬費|解鎖(?:照片|相片|私照|私密照)|遊戲點數/;
+const SEXY = /約砲|約炮|外約|應召|援交|兼職妹|定點服務|魚訊|私密照|裸照|裸聊|一夜情|約妹|全套|半套|色色|成人(?:服務|交友)|18禁|激情|性感(?:妹|美女)|找(?:妹|小姐)|叫小姐|伴遊|包養/;
+const SEX_CONTACT = /telegram|飛機(?:號|聯繫|聯絡|私聊)|\btg[:：@]|t\.me\/|加(?:我)?(?:的)?(?:line|賴)|私聊|私訊我|lin\.ee\//i;
+const LUX_KEY = /outlet|supplier|wholesale|retailer|express|forum/i;
+const LUX_TLD = /^(?:shop|store|cam|top)$/i;
+const LUX_WORD = /名牌|精品|專櫃|出清|清倉|\b(?:LV|Gucci|Chanel|Hermes|Prada|Dior|Rolex|Cartier|Celine|YSL|Burberry|Balenciaga|Fendi|Coach)\b|LouisVuitton|香奈兒|愛馬仕|迪奧|勞力士|卡地亞|巴黎世家|古馳/i;
 const ADVISOR_CONTACT = /(?:賴|line)(?:id)?[:：]@?[\w.-]{3,}|(?<!\d)(?:\+?886-?|0)9\d{2}[-.]?\d{3}[-.]?\d{3}(?!\d)|lin\.ee\//i;
 const ADVISOR_RE = /投顧|分析師|操盤手|股市(?:老師|專家|達人)|財經(?:老師|專家)|資深(?:操盤|交易員)/;
 const ADVISOR_PULL = /一對一|1對1|1v1|一對1|免費(?:分享|諮詢|指導|診股|領取|加入|體驗)|新手也(?:能|可以)|輕鬆跟(?:隨|上|單)|跟隨|解套|診股|精品當沖|當沖.{0,4}(?:分享|指導|帶)|盤前.{0,6}(?:佈局|布局|規劃)|名額有限/i;
@@ -107,6 +152,9 @@ export function noticeTips(names = []) {
   if (names.includes(CODE_COUPON)) tips.push("驗證碼不要給任何人，給了帳號可能被盜。");
   if (names.includes(LOAN_LURE)) tips.push("正規銀行不會在群裡叫人私下加 LINE 辦代償或債務整合；先收費、要存摺或提款卡的都是詐騙。");
   if (names.includes(ADVISOR_LURE)) tips.push("合法投顧不會在群裡貼外部連結找人一對一帶當沖；點進去加 LINE 的「老師」多半是投資詐騙。");
+  if (names.includes(SHIP_VERIFY)) tips.push("賣貨便、郵局不會叫你加客服做實名認證、開網銀或截圖帳戶。");
+  if (names.includes(SEX_PLATFORM)) tips.push("交友約會要先繳會員費、認證金、解凍金的都是詐騙，繳了只會被要更多。");
+  if (names.includes(LUXURY_URL)) tips.push("名牌超低價出清的一頁式網站多是詐騙，買到假貨或收不到貨。");
   return tips;
 }
 
