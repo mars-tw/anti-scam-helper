@@ -20,7 +20,7 @@ import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
 import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
-import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames } from "./notify-rules.mjs";
+import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, looksLike, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, SpeakerBook, withAgentLabel } from "./notice.mjs";
@@ -1971,8 +1971,10 @@ async function handle(ws, message) {
     // 16:31 誤判：第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → 只記錄，不通知不標記（不影響刪踢）。
     // 10/22 22:24 誤判：只因「疑似短網址」（不在清單的短網域，是猜的）被強制判詐，但第一層與覆核都沒判 SCAM → 只記錄（不影響踢人群）。
     const heuristicOnly = result.forced && forcedScamNames(result.names ?? []).every((n) => n === "疑似短網址") && result.verdict !== "SCAM" && result.review !== "SCAM";
-    if (!perChatKickHere && result.action === "notice" && (knowledgeLink || heuristicOnly || reviewOnlyScam(result))) {
-      record({ action: "review-only-scam-suppressed", heuristicOnly, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, verdict: result.verdict, model: result.model, review: result.review, reviewModel: result.reviewModel, names: result.names, knowledgeLink });
+    // 10/28 誤通知：只有無連結、無聯絡方式的「假群組公告」字樣，第一層與覆核都判 OK → 只記錄（不影響踢人群）。
+    const fakeNoticeOk = fakeNoticeModelsOk(result, text);
+    if (!perChatKickHere && result.action === "notice" && (knowledgeLink || heuristicOnly || fakeNoticeOk || reviewOnlyScam(result))) {
+      record({ action: "review-only-scam-suppressed", heuristicOnly, fakeNoticeOk, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, verdict: result.verdict, model: result.model, review: result.review, reviewModel: result.reviewModel, names: result.names, knowledgeLink });
       result.action = "none";
       result.suppressed = true;
     }
