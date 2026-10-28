@@ -92,6 +92,50 @@ export function findImpersonated({ nameKey, senderId, admins, adminIds = new Set
   return undefined;
 }
 
+// 冒名暱稱比對（已正規化的名字）：完全相同、原名加料、截短占六成、或差一個字。
+// 10/28：純英文／數字的受保護名不吃「英文單字中間的子字串」（例：gemini 不含 mini）；
+// 左右不能是英文字母或數字。中文名（或含中文）維持原本的 includes 行為。
+export function editDistance(a, b) {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    let previous = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const current = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = current;
+    }
+  }
+  return row[b.length];
+}
+const ASCII_TOKEN = /^[a-z0-9]+$/i;
+const ASCII_ALNUM = /[a-z0-9]/i;
+/** haystack 是否含 needle；needle 若為純英文數字，要求左右不是英文數字（字界）。 */
+export function containsNameToken(haystack, needle) {
+  if (!haystack || !needle) return false;
+  let from = 0;
+  while (true) {
+    const i = haystack.indexOf(needle, from);
+    if (i < 0) return false;
+    if (ASCII_TOKEN.test(needle)) {
+      const before = i > 0 ? haystack[i - 1] : "";
+      const after = i + needle.length < haystack.length ? haystack[i + needle.length] : "";
+      if (ASCII_ALNUM.test(before) || ASCII_ALNUM.test(after)) { from = i + 1; continue; }
+    }
+    return true;
+  }
+}
+/** name、protectedName 都已正規化（小寫、去空白符號）。 */
+export function looksLike(name, protectedName) {
+  if (name.length < 2 || protectedName.length < 2) return false;
+  if (name === protectedName) return true;
+  // 原名加料（「好鄰居社群 -Kevin 官方」）算冒名；截短的名字要占原名六成以上才算，
+  // 免得只叫「Kevin」的一般成員被誤踢。純英文名要求字界，避免 gemini 命中 mini。
+  if (protectedName.length >= 4 && containsNameToken(name, protectedName)) return true;
+  if (name.length >= 4 && containsNameToken(protectedName, name) && name.length >= protectedName.length * 0.6) return true;
+  return protectedName.length >= 5 && editDistance(name, protectedName) <= 1;
+}
+
 // ── 連結白名單 ───────────────────────────────────────────────
 export function normalizeUrl(url) {
   return String(url ?? "").trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").split(/[?#]/)[0].replace(/\/$/, "").replace(/\/(tw|th|jp|en|zh-hant)\/cover\//i, "/cover/").toLowerCase();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideAction, findImpersonated, hasLink, hasScamSignal, buildGuardFacts, ESCALATE_REPLY, labelReply, isFalseModerationClaim, isPromise, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
+import { decideAction, findImpersonated, looksLike, containsNameToken, hasLink, hasScamSignal, buildGuardFacts, ESCALATE_REPLY, labelReply, isFalseModerationClaim, isPromise, MODERATION_REPLY, sanitizeLinks, shouldScreenLocally, squareKey, visionCounts } from "../guard/policy.mjs";
 import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
@@ -65,6 +65,26 @@ test("冒名比對只在同一社群：本人（同 id 或本身是管理員）�
   assert.equal(findImpersonated({ nameKey: "阿明老師客服", senderId: "pX", admins, looksLike }), "阿明 老師");
   // 別的社群沒學到這位管理員：不比對。
   assert.equal(findImpersonated({ nameKey: "阿明老師分身", senderId: "pZ", admins: undefined, looksLike }), undefined);
+});
+
+test("英文冒名要比字界：gemini 類暱稱不命中 Mini；真冒名仍命中；中文名行為不變", () => {
+  const norm = (s) => String(s ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}\u115F\u1160\u3164\uFFA0]/gu, "");
+  // 虛構暱稱：長單字吃到英文子字串 → 不命中
+  for (const nick of ["gemini誤一生", "Gemini某某", "minimax助手", "adminmini", "xminiy"]) {
+    assert.equal(looksLike(norm(nick), norm("Mini")), false, nick);
+  }
+  // 真冒名仍命中
+  for (const nick of ["Mini", "管理員Mini", "Mini-小編", "Mini 官方", "mini客服"]) {
+    assert.equal(looksLike(norm(nick), norm("Mini")), true, nick);
+  }
+  // 同類：其他短英文名被長單字包含
+  assert.equal(looksLike(norm("organizer"), norm("gani")), false);
+  assert.equal(looksLike(norm("Gani-客服"), norm("Gani")), true);
+  // 中文名維持 includes（加料／截短 ≥4 且占六成）
+  assert.equal(looksLike(norm("阿明老師客服"), norm("阿明老師")), true);
+  assert.equal(looksLike(norm("測試小隊"), norm("測試小隊長")), true);
+  assert.equal(containsNameToken("gemini誤一生", "mini"), false);
+  assert.equal(containsNameToken("管理員mini", "mini"), true);
 });
 
 test("社群鍵：同社群的不同聊天室相同，不同社群不同", () => {

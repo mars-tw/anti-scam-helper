@@ -22,7 +22,7 @@ import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, block
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
-import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
+import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, looksLike, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, SpeakerBook, withAgentLabel } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
@@ -330,30 +330,6 @@ function textOf(message) {
 function normalizeName(name) {
   // 全形轉半形、去掉空白、標點、符號、表情與看不見的字元。
   return String(name ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}\u115F\u1160\u3164\uFFA0]/gu, "");
-}
-
-function editDistance(a, b) {
-  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i += 1) {
-    let previous = row[0];
-    row[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const current = row[j];
-      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
-      previous = current;
-    }
-  }
-  return row[b.length];
-}
-
-function looksLike(name, protectedName) {
-  if (name.length < 2 || protectedName.length < 2) return false;
-  if (name === protectedName) return true;
-  // 原名加料（「好鄰居社群 -Kevin 官方」）算冒名；截短的名字要占原名六成以上才算，
-  // 免得只叫「Kevin」的一般成員被誤踢。
-  if (protectedName.length >= 4 && name.includes(protectedName)) return true;
-  if (name.length >= 4 && protectedName.includes(name) && name.length >= protectedName.length * 0.6) return true;
-  return protectedName.length >= 5 && editDistance(name, protectedName) <= 1;
 }
 
 const protectedMembers = (config.protectedMembers ?? []).map((entry) => ({ name: entry.name, key: normalizeName(entry.name), ids: new Set(entry.ids ?? []) }));

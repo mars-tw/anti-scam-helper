@@ -65,6 +65,13 @@ test("d：同群頭像相同或暱稱 NFKC 相同且像真管理員", () => {
   lk.see({ chatId: "c", senderId: "x", senderName: "ＡＢＣ小編", adminNames: ["ABC小編"] });
   assert.ok(lk.see({ chatId: "c", senderId: "y", senderName: "ABC小編", adminNames: ["ABC小編"] }).includes("同群多個帳號暱稱相同且像真管理員"));
   assert.deepEqual(lk.see({ chatId: "c2", senderId: "y", senderName: "路人" }), []);
+  // 對抗：英文管理員名被長單字包含（gemini 含 mini）→ 不算像真管理員
+  const lk2 = makeLookalikeTracker();
+  lk2.see({ chatId: "c3", senderId: "g1", senderName: "gemini誤一生", adminNames: ["Mini"] });
+  assert.deepEqual(lk2.see({ chatId: "c3", senderId: "g2", senderName: "gemini誤一生", adminNames: ["Mini"] }), []);
+  const lk3 = makeLookalikeTracker();
+  lk3.see({ chatId: "c4", senderId: "m1", senderName: "管理員Mini", adminNames: ["Mini"] });
+  assert.ok(lk3.see({ chatId: "c4", senderId: "m2", senderName: "管理員Mini", adminNames: ["Mini"] }).includes("同群多個帳號暱稱相同且像真管理員"));
 });
 
 test("跨群（維護者 15:51 修正）：一般網址跨三群→不通知不踢；群組邀請跨兩群→踢人群踢、其他群通知", () => {

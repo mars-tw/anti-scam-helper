@@ -1,4 +1,4 @@
-import { isPlainAntiScamBotAlert } from "./policy.mjs";
+import { isPlainAntiScamBotAlert, containsNameToken } from "./policy.mjs";
 const INVITE_RE = /line\.me\/(?:R\/)?ti\/g2?\/|openchat\.line\.me\/|line\.me\/(?:R\/)?square\//i;
 export const CROSS_INVITE = "同群組邀請跨群出現";
 /** 踢人群（per-chat kickMode:kick，維護者 10/22 15:51）可刪踢的通知層理由；其他群一律只通知。 */
@@ -314,7 +314,7 @@ export function makeLookalikeTracker({ max = 5000 } = {}) {
       const names = [];
       if (avatarKey && add(byAvatar, `${chatId} ${avatarKey}`, senderId) >= 2) names.push("同群多個帳號頭像相同");
       const n = norm(senderName);
-      if (n && add(byName, `${chatId} ${n}`, senderId) >= 2 && adminNames.map(norm).some((a) => a && (a === n || n.includes(a) || a.includes(n)))) names.push("同群多個帳號暱稱相同且像真管理員");
+      if (n && add(byName, `${chatId} ${n}`, senderId) >= 2 && adminNames.map(norm).some((a) => a && (a === n || containsNameToken(n, a) || containsNameToken(a, n)))) names.push("同群多個帳號暱稱相同且像真管理員");
       return names;
     },
   };
