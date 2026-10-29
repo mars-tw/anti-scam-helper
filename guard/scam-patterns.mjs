@@ -41,6 +41,7 @@ export class ScamPatterns {
   load() {
     if (Date.now() - this.cache.at < 60_000) return this.cache.items;
     const items = [];
+    const bad = [];
     const library = [join(this.dir, "library.json"), join(here, "scam-patterns.example.json")].find((path) => existsSync(path));
     try {
       for (const example of JSON.parse(readFileSync(library, "utf8")).examples ?? []) items.push({ ...example, source: "library" });
@@ -50,11 +51,13 @@ export class ScamPatterns {
         if (!line.trim()) continue;
         const entry = JSON.parse(line);
         // 只有連結、沒有話術的舊紀錄不當範例（自動反思 10/25：一般科技／知識網址被誤當詐騙範例）。
-        if (entry.label !== "bad" && learnablePattern(entry.text)) items.push({ label: "SCAM", category: entry.category ?? "Meta 確認", text: entry.text, source: "confirmed" });
+        if (entry.label === "bad") { bad.push({ grams: bigrams(String(entry.text ?? "")) }); continue; }
+        if (learnablePattern(entry.text)) items.push({ label: "SCAM", category: entry.category ?? "Meta 確認", text: entry.text, source: "confirmed" });
       }
     } catch {}
     for (const item of items) item.grams = bigrams(item.text);
-    this.cache = { at: Date.now(), items };
+    // 自動反思 10/30：標 bad（誤判）的舊紀錄不當範例，也記下來讓 addConfirmed 不再把幾乎一樣的訊息收回去。
+    this.cache = { at: Date.now(), items, bad };
     return items;
   }
   /** 挑最相近的 scam 筆 SCAM 範例與 ok 筆 OK 範例。 */
@@ -76,6 +79,7 @@ export class ScamPatterns {
     if (clean.length < 8 || !learnablePattern(clean)) return false;
     const grams = bigrams(clean);
     if (this.load().some((item) => similarity(grams, item.grams) > 0.85)) return false;
+    if ((this.cache.bad ?? []).some((item) => similarity(grams, item.grams) > 0.85)) return false;
     const path = join(this.dir, "confirmed.jsonl");
     if (!existsSync(path)) appendFileSync(path, "", { mode: 0o600 });
     chmodSync(path, 0o600);

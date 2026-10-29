@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-16",
+  "updated": "2026-10-30",
   "note": "台灣常見 LINE 群詐騙話術範例庫。範例皆為依官方公告手法改寫的示意句，不是真實訊息原文、不含個資；ID、網址皆為虛構佔位。",
   "sources": [
     { "name": "刑事警察局：常見詐騙手法話術解析與因應之道（假網拍、假投資、ATM 解除分期、假愛情交友、猜猜我是誰、假冒機構、假求職、盜用帳號）", "url": "https://www.cib.npa.gov.tw/ch/app/data/list?id=1909&module=wg116" },
@@ -47,6 +47,7 @@
     { "label": "OK", "category": "正常：提醒", "text": "大家小心，最近有人冒充管理員叫大家搬到新群，那是詐騙不要點" },
     { "label": "OK", "category": "正常：投資閒聊", "text": "最近大盤震盪，我還是定期定額 ETF，比較安心" },
     { "label": "OK", "category": "正常：虛幣討論", "text": "比特幣 ETF 的費用率哪家比較低？我只是想長期持有" },
-    { "label": "OK", "category": "正常：自家群分享", "text": "新朋友可以分享本群連結給有興趣的同事" }
+    { "label": "OK", "category": "正常：自家群分享", "text": "新朋友可以分享本群連結給有興趣的同事" },
+    { "label": "OK", "category": "正常：分享作品", "text": "分享強者我朋友自己做的網頁小遊戲，大家有空玩玩看給點意見 https://example-game.pages.dev" }
   ]
 }
