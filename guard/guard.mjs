@@ -31,6 +31,7 @@ import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
+import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
@@ -1255,7 +1256,7 @@ function sameGroupAdminVictim(name, message) {
 /** 記下冒名者這則（invite：是否含外部連結／QR），湊滿條件就處理。有處理回 true。 */
 // fakeNotice：內容是假群組公告（搬到新群、明日統一核准、重新➕…）：冒名者發這種公告就算沒連結，也比照冒名＋邀請處理。
 const comboPending = new Map(); // 聊天室＋發言者 → 正在進行的冒名處置
-async function checkImpersonationInvite(ws, message, { invite, strictInvite = invite, fakeNotice = false }) {
+async function checkImpersonationInvite(ws, message, { invite, strictInvite = invite, fakeNotice = false, inviteExpanded = false, expandFailed = false }) {
   const linkInvite = invite;
   // 冒用特定的群主／管理員／社群品牌名＋假群組公告：就算沒連結也算（真人名被冒用時，公告本身就是引流）。
   // 只是暱稱自稱「管理員／小幫手」那種（FAKE_ADMIN_VICTIM）維持原規則：要有外部連結才踢。
@@ -1283,7 +1284,7 @@ async function checkImpersonationInvite(ws, message, { invite, strictInvite = in
     return true;
   }
   comboHandled.set(key, Date.now());
-  const pending = punishImpersonationInvite(ws, message, victim, invites.at(-1).messageId, list.map((item) => item.messageId), { notice: invites.every((item) => item.notice) });
+  const pending = punishImpersonationInvite(ws, message, victim, invites.at(-1).messageId, list.map((item) => item.messageId), { notice: invites.every((item) => item.notice), inviteExpanded, expandFailed });
   comboPending.set(key, pending);
   try { await pending; } finally { if (comboPending.get(key) === pending) comboPending.delete(key); }
   return true;
@@ -1424,8 +1425,10 @@ function neverKick(message) {
   return Boolean(message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)
     || [...chatAdmins.values()].some((admins) => admins.has(message.senderId)) || isStaff(message) || nameGuard.protects(message));
 }
-async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false } = {}) {
-  const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names: [`冒用「${victim}」`, notice ? "假群組公告" : "外部邀請／引流連結或 QR code"] };
+async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false, inviteExpanded = false, expandFailed = false } = {}) {
+  const names = [`冒用「${victim}」`, notice ? "假群組公告" : "外部邀請／引流連結或 QR code"];
+  if (inviteExpanded) names.push("短網址導向群組邀請");
+  const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names };
   const scope = kickScopeFor(message, { names: entry.names }, victim);
   const kick = config.impersonation?.kickWithInvite === true && !neverKick(message) && scope.kick;
   if (config.impersonation?.kickWithInvite === true && !kick) record({ action: "kick-out-of-scope", reason: scope.reason, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, verdict: entry.verdict });
@@ -1433,7 +1436,8 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets, 
   // 冒名＋邀請是規則判定（不經模型）；10/22 起另外跑一次雲端覆核，只寫日誌（review／reviewModel），不影響處置。
   if (message.text) metaReview(sanitizeLinks(message.text).text, "發訊者冒用管理員／群主名義並貼外部邀請或假群組公告。").then((rv) => record({ action: "impersonation-invite-review", chatId: entry.chatId, messageId: entry.messageId, review: rv.verdict ?? "UNAVAILABLE", reviewModel: rv.model })).catch((error) => recordError("model", `impersonation-review：${String(error?.message).slice(0, 60)}`));
   // 10/26 23:47：冒名＋一般連結（不是群組邀請、不是 QR）→ 只回評分，不刪文；冒名＋假群組公告沒連結 → 只通知。
-  const groupy = GROUP_INVITE.test(textOf(message) || message.noteText || "") || Boolean(message.qrContent);
+  // 10/29：短網址先展開；展開成群邀請也算 groupy；展開失敗不當成群邀請（不可直接踢）。
+  const groupy = impersonationInviteIsGroupy({ text: textOf(message) || message.noteText || "", qrContent: message.qrContent, inviteExpanded, expandFailed });
   if (!kick && !groupy && config.kickScope?.ordinaryLinkScoreOnly !== false) {
     record({ action: "impersonation-score-only", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
     return notifyAdmins(ws, { ...entry, score: entry.score ?? strongScore }, /https?:\/\//i.test(textOf(message) || "") ? "link-score" : "suspect", { force: true });
@@ -1867,10 +1871,26 @@ async function handle(ws, message) {
     if (command) { void requestSummary(ws, message, command); return; }
   }
   // 冒名＋外部連結（同一則或前後 2 分鐘內）：確認詐騙。圖片的 QR 在 checkImage 解碼後判斷。
+  // 10/29：判斷前先展開短網址；展開成群邀請也算；展開失敗不走冒名踢人，交給後面「無法辨識連結」。
   if (text && !message.senderRole && !whitelist.has(message.senderId)) {
     const cleaned = sanitizeLinks(text).text;
     const fakeNotice = ruleScore(message, cleaned).names.includes("假群組公告");
-    if (await checkImpersonationInvite(ws, message, { invite: hasLink(cleaned), strictInvite: hasLineInfo(text) || hasLink(cleaned.replace(benignUrl, " ")), fakeNotice })) return;
+    let inviteExpanded = false;
+    let expandFailed = false;
+    if (config.shortUrlExpand === true) {
+      const susRe = RULES.find((r) => r.name === "疑似短網址")?.pattern;
+      const probe = await probeInviteShortUrl(cleaned, {
+        shortUrlRe: SHORT_URL,
+        suspectRe: susRe,
+        expand: (url) => expandUrlSafe(url),
+      });
+      inviteExpanded = probe.inviteExpanded === true;
+      expandFailed = probe.expandFailed === true;
+      if (probe.shortUrl) record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, path: "impersonation", result: expandFailed ? "unreachable" : inviteExpanded ? "invite" : "normal" });
+    }
+    if (!shouldDeferImpersonationForExpandFail({ expandFailed, text: cleaned, qrContent: message.qrContent, fakeNotice })) {
+      if (await checkImpersonationInvite(ws, message, { invite: hasLink(cleaned) || inviteExpanded, strictInvite: hasLineInfo(text) || hasLink(cleaned.replace(benignUrl, " ")) || inviteExpanded, fakeNotice, inviteExpanded, expandFailed })) return;
+    }
   }
   // 假冒管理員：光暱稱／頭像只記錄；內容有換群、要錢、私聊這類訊號，或訊號很強，才通知（不刪、不踢）。
   if (fakeAdmin.enabled && await checkFakeAdmin(ws, message, text)) return;
