@@ -26,6 +26,7 @@ export const ADVISOR_LURE = "投顧／分析師一對一引流＋外部連結";
 export const SHIP_VERIFY = "賣貨便／實名認證假客服";
 export const SEX_PLATFORM = "色情應召轉假平台收費";
 export const LUXURY_URL = "一頁式精品網址樣式＋名牌／出清";
+export const MODA_VOTE_CODE = "投票／領券騙 LINE 認證碼";
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -104,6 +105,17 @@ export const NOTIFY_RULES = [
       return parts.length >= 2 && LUX_TLD.test(parts.at(-1)) && LUX_KEY.test(parts.at(-2));
     });
   } },
+  // 10/29：數發部 10/16 公告 — 「幫忙投票／送折價券」騙 LINE 認證碼盜帳號。只通知，不進踢人分數、不在 MINER_KICKABLE、不刪不踢。
+  // 命中：同時有（投票／折價券／優惠券／領券）＋（認證碼／驗證碼／簡訊碼／手機驗證／分享畫面）；
+  // 或叫人把認證碼提供／回傳／輸入到連結裡。
+  // 排除：白名單、雙模型 OK；防詐宣導／「這是詐騙嗎」／否定認證碼語氣只在第一層沒判 SCAM 時排除（防「假提醒帶連結」繞過）。
+  { name: MODA_VOTE_CODE, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx)) return false;
+    if (ctx.verdict !== "SCAM" && MODA_CODE_NEG.test(c)) return false;
+    if (MODA_LURE.test(c) && MODA_CODE.test(c)) return true;
+    return MODA_CODE_INTO_LINK.test(c);
+  } },
 ];
 function intelText(t) { return String(t ?? "").normalize("NFKC").replace(SPACES, ""); }
 function intelGate(c, ctx) {
@@ -111,6 +123,10 @@ function intelGate(c, ctx) {
   if (ctx.verdict !== "SCAM" && (ANTI_SCAM_WARNING.test(c) || ASK_IF_SCAM.test(c) || WARN_EXTRA.test(c))) return false;
   return true;
 }
+const MODA_LURE = /投票|折價券|優惠券|領券/;
+const MODA_CODE = /認證碼|驗證碼|簡訊碼|手機驗證|分享畫面/;
+const MODA_CODE_NEG = /(?:不(?:會|要|用|需|必)|勿|別|請勿|千萬別|切勿|禁止).{0,16}(?:認證碼|驗證碼|簡訊碼)|(?:認證碼|驗證碼|簡訊碼).{0,10}(?:不要|別|請勿|勿|不該|不可).{0,6}(?:給|提供|回傳|交出|輸入)/;
+const MODA_CODE_INTO_LINK = /(?:提供|回傳|輸入|填(?:寫|入)?|傳給?).{0,12}(?:認證碼|驗證碼|簡訊碼).{0,16}(?:連結|網址|網站|頁面|http)|(?:認證碼|驗證碼|簡訊碼).{0,12}(?:提供|回傳|輸入|填).{0,12}(?:到|至|進|入)?(?:這個|該|下列|以下)?(?:的)?(?:連結|網址|網站|頁面|http)|(?:到|至|在|於).{0,6}(?:連結|網址|網站|頁面).{0,10}(?:輸入|填|提供|回傳).{0,8}(?:認證碼|驗證碼|簡訊碼)/;
 const SHIP_TERMS = [/賣貨便/, /實名制?認證/, /郵(?:政|局)客服/, /開(?:通|啟|設)?網(?:路)?銀(?:行)?/, /截圖.{0,4}(?:帳戶|帳號|戶頭)|(?:帳戶|帳號|戶頭).{0,6}截圖/];
 const SEX_FEE = /會員費|約會卡|解凍金|認證金|車馬費|解鎖(?:照片|相片|私照|私密照)|遊戲點數/;
 const SEXY = /約砲|約炮|外約|應召|援交|兼職妹|定點服務|魚訊|私密照|裸照|裸聊|一夜情|約妹|全套|半套|色色|成人(?:服務|交友)|18禁|激情|性感(?:妹|美女)|找(?:妹|小姐)|叫小姐|伴遊|包養/;
@@ -155,6 +171,7 @@ export function noticeTips(names = []) {
   if (names.includes(SHIP_VERIFY)) tips.push("賣貨便、郵局不會叫你加客服做實名認證、開網銀或截圖帳戶。");
   if (names.includes(SEX_PLATFORM)) tips.push("交友約會要先繳會員費、認證金、解凍金的都是詐騙，繳了只會被要更多。");
   if (names.includes(LUXURY_URL)) tips.push("名牌超低價出清的一頁式網站多是詐騙，買到假貨或收不到貨。");
+  if (names.includes(MODA_VOTE_CODE)) tips.push("正常投票或領券不會要 LINE 認證碼，請勿提供");
   return tips;
 }
 
