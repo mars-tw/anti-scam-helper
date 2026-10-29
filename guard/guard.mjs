@@ -1981,7 +1981,6 @@ async function handle(ws, message) {
     const extraNames = [];
     let decideText = text;
     let shopWarn = false;
-    let dropShortenerName = false;
     const shortUrl = sanitizeLinks(text).text.match(SHORT_URL)?.[0];
     if (shortUrl && config.shortUrlExpand === true) {
       const expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
@@ -1990,7 +1989,7 @@ async function handle(ws, message) {
       const outcome = shortUrlExpandOutcome({ expanded, stillShortener, shopping });
       for (const n of outcome.extraNames) if (!extraNames.includes(n)) extraNames.push(n);
       shopWarn = outcome.shopWarn;
-      dropShortenerName = outcome.dropShortenerName;
+      // 真正落地才改寫本文再計分；不另外 drop「短網址」分數。
       if (outcome.rewrite && expanded?.url) decideText = text.replace(shortUrl, expanded.url);
       record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: outcome.result });
     }
@@ -2010,12 +2009,7 @@ async function handle(ws, message) {
       else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
       record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: expanded ? (expanded.invite ? "invite" : knowledgeLink ? "knowledge" : shopWarn ? "shopping" : "normal") : "unreachable" });
     }
-    const dropNames = [
-      ...(knowledgeLink && !perChatKickHere ? ["疑似短網址"] : []),
-      // 已知短網址已成功展開到非短網址落地頁：去掉「短網址」分數（三種群通知層一致；踢人條件不變）。
-      ...(dropShortenerName ? ["短網址"] : []),
-    ];
-    const result = await decide(message, decideText, { extraNames, dropNames });
+    const result = await decide(message, decideText, { extraNames, dropNames: knowledgeLink && !perChatKickHere ? ["疑似短網址"] : [] });
     if (knowledgeLink) result.knowledgeLink = true;
     // 16:31 誤判：第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → 只記錄，不通知不標記（不影響刪踢）。
     // 10/22 22:24 誤判：只因「疑似短網址」（不在清單的短網域，是猜的）被強制判詐，但第一層與覆核都沒判 SCAM → 只記錄（不影響踢人群）。

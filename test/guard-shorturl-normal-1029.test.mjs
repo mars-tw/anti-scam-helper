@@ -1,10 +1,10 @@
-// 10/29：Pan 群短網址展開誤標 normal、仍以「短網址」4 分通知。
-// 修正：展開後仍停在短網址服務 → unresolved；真正落地 → rewrite＋去掉「短網址」分數。
+// 10/29：短網址展開結果分類（unresolved≠normal）＋中繼頁跟 og:url。
+// 不 drop「短網址」分數；改寫 decideText 照舊；計分依改寫後（或未改寫）本文。
 // 全部假 ID／假網域；測踢人群、非踢人群、Hao0321 只警告三群。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { shortUrlExpandOutcome, shortUrlNormalShouldQuiet } from "../guard/short-url-outcome.mjs";
+import { shortUrlExpandOutcome } from "../guard/short-url-outcome.mjs";
 import { decideAction } from "../guard/policy.mjs";
 import { makeRuleScorer, SHORTENERS } from "../guard/rules.mjs";
 import { expandUrlSafe } from "../guard/shop.mjs";
@@ -13,6 +13,7 @@ import { kickScopeDecision, KICK_FAKE_GROUP } from "../guard/kick-scope.mjs";
 const score = makeRuleScorer();
 const SHORT = "https://bit.ly/abc12";
 const FINAL = "https://example.test/guide";
+const PHISH = "https://login-phish.example.test/steal";
 const INVITE = "https://line.me/ti/g2/FakeInvite0001";
 
 const resolve = async () => [{ address: "93.184.216.34" }];
@@ -39,66 +40,86 @@ const res = (status, { location, html = "", type = "text/html" } = {}) => ({
   },
 });
 
-test("正例：展開結果仍是短網址服務 → unresolved，不可標 normal、不可 drop", () => {
+test("正例：展開結果仍是短網址服務 → unresolved，不可標 normal、不改寫", () => {
   const out = shortUrlExpandOutcome({ expanded: { url: SHORT, html: "<html>中繼</html>" }, stillShortener: true });
   assert.equal(out.result, "unresolved");
   assert.equal(out.rewrite, false);
-  assert.equal(out.dropShortenerName, false);
   assert.deepEqual(out.extraNames, []);
+  assert.equal("dropShortenerName" in out, false);
 });
 
-test("正例：展開到非短網址落地頁 → normal，rewrite＋drop 短網址", () => {
+test("正例：展開到非短網址落地頁 → normal，rewrite；不帶 dropShortenerName", () => {
   const out = shortUrlExpandOutcome({ expanded: { url: FINAL, html: "<title>文件</title>" }, stillShortener: false });
   assert.equal(out.result, "normal");
   assert.equal(out.rewrite, true);
-  assert.equal(out.dropShortenerName, true);
+  assert.equal("dropShortenerName" in out, false);
 });
 
-test("正例：導向群組邀請 → invite，不加 drop", () => {
+test("正例：導向群組邀請 → invite，不改寫", () => {
   const out = shortUrlExpandOutcome({ expanded: { invite: true, url: INVITE }, stillShortener: false });
   assert.equal(out.result, "invite");
+  assert.equal(out.rewrite, false);
   assert.deepEqual(out.extraNames, ["短網址導向群組邀請"]);
-  assert.equal(out.dropShortenerName, false);
 });
 
-test("正例：購物落地 → shopping＋rewrite＋drop", () => {
+test("正例：購物落地 → shopping＋rewrite", () => {
   const out = shortUrlExpandOutcome({ expanded: { url: "https://shop.example.test/p/1", html: "加入購物車" }, stillShortener: false, shopping: true });
   assert.equal(out.result, "shopping");
   assert.equal(out.shopWarn, true);
-  assert.equal(out.dropShortenerName, true);
+  assert.equal(out.rewrite, true);
 });
 
 test("正例：展開失敗 → unreachable", () => {
   assert.equal(shortUrlExpandOutcome({ expanded: undefined }).result, "unreachable");
 });
 
-test("分數：純短網址 4 分會通知；展開後只剩網址 1 分＋雙 SCAM → 不通知（10/22）", () => {
+test("分數不變：原文含短網址 → 短網址＋網址＝4 可通知；規則本身未改", () => {
   const before = score({}, `請看 ${SHORT}`);
   assert.ok(before.names.includes("短網址"));
+  assert.ok(before.names.includes("網址"));
   assert.equal(before.score, 4);
   assert.equal(decideAction({ score: before.score, verdict: "SCAM", review: "SCAM", names: before.names, notifyScore: 3, link: true }), "notice");
-
-  const after = score({}, `請看 ${FINAL}`);
-  assert.ok(!after.names.includes("短網址"));
-  assert.equal(after.score, 1);
-  assert.equal(decideAction({ score: after.score, verdict: "SCAM", review: "SCAM", names: after.names, notifyScore: 3, link: true }), "none");
-  assert.equal(shortUrlNormalShouldQuiet({ outcome: { result: "normal", dropShortenerName: true }, scoreAfterDrop: 1, notifyScore: 3 }), true);
 });
 
-test("三種群：normal 展開後只剩網址 → 踢人／非踢人／Hao0321 皆不因短網址通知；踢人條件不變", () => {
+test("短網址跳釣魚頁：原文仍保留短網址分；outcome 不 drop；改寫後依落地頁計分（照舊）", () => {
+  const original = `請登入 ${SHORT}`;
+  const orig = score({}, original);
+  assert.ok(orig.names.includes("短網址"), "原文短網址分數必須保留");
+  assert.equal(orig.score, 4);
+
+  const out = shortUrlExpandOutcome({ expanded: { url: PHISH, html: "<title>驗證帳戶</title>" }, stillShortener: false });
+  assert.equal(out.result, "normal");
+  assert.equal(out.rewrite, true);
+  assert.equal("dropShortenerName" in out, false);
+
+  // 改寫 decideText 照舊：換成落地頁後依新本文計分（不再命中短網址規則，也不靠 dropNames）
+  const rewritten = original.replace(SHORT, PHISH);
+  const after = score({}, rewritten);
+  assert.ok(!after.names.includes("短網址"));
+  assert.ok(after.names.includes("網址"));
+  // 原文分數不受 outcome 影響（沒有 dropShortenerName 去改分數）
+  assert.equal(score({}, original).score, 4);
+  assert.ok(score({}, original).names.includes("短網址"));
+});
+
+test("三種群：unresolved 短網址仍可通知；踢人條件不變（踢人／非踢人／Hao0321）", () => {
   const scope = {
     excludeChats: ["cBear"],
     learnOnly: new Set(["cLearn"]),
     warnOnly: new Set(["cWarn1", "cWarn2", "cWarn3"]),
   };
-  const namesAfter = ["網址"];
-  const action = decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: namesAfter, notifyScore: 3, link: true });
-  assert.equal(action, "none");
-  // 三種群：通知層都不該只靠短網址；踢人要另有群邀請等
+  const out = shortUrlExpandOutcome({ expanded: { url: SHORT }, stillShortener: true });
+  assert.equal(out.result, "unresolved");
+  assert.equal(out.rewrite, false);
+  const names = score({}, `看 ${SHORT}`).names;
+  assert.ok(names.includes("短網址"));
+  const action = decideAction({ score: 4, verdict: "SCAM", review: "SCAM", names, notifyScore: 3, link: true });
+  assert.equal(action, "notice");
+  // 純短網址＋雙 SCAM：三種群都不因短網址單獨觸發踢人
   for (const chatId of ["cKick", "cNormal", "cWarn1"]) {
     const r = kickScopeDecision({
       chatId, scope,
-      text: `分享 ${FINAL}`,
+      text: `分享 ${SHORT}`,
       inviteExpanded: false,
       impersonating: undefined,
       verdict: "SCAM", review: "SCAM",
@@ -107,18 +128,10 @@ test("三種群：normal 展開後只剩網址 → 踢人／非踢人／Hao0321 
   }
 });
 
-test("對抗：unresolved 不可放行（仍應保留短網址分數可通知）", () => {
-  const out = shortUrlExpandOutcome({ expanded: { url: SHORT }, stillShortener: true });
-  assert.equal(out.dropShortenerName, false);
-  const before = score({}, `看 ${SHORT}`);
-  assert.equal(decideAction({ score: before.score, verdict: "SCAM", review: "SCAM", names: before.names, notifyScore: 3, link: true }), "notice");
-  assert.equal(shortUrlNormalShouldQuiet({ outcome: out, scoreAfterDrop: before.score, notifyScore: 3 }), false);
-});
-
-test("對抗：invite 不可因 normal 邏輯放行；踢人群＋冒名＋invite 仍可踢", () => {
+test("對抗：invite 不可被 normal 邏輯放行；踢人群＋冒名＋invite 仍可踢；只警告三群不踢", () => {
   const out = shortUrlExpandOutcome({ expanded: { invite: true, url: INVITE } });
   assert.equal(out.result, "invite");
-  assert.equal(out.dropShortenerName, false);
+  assert.equal(out.rewrite, false);
   const scope = { excludeChats: ["cBear"], learnOnly: new Set(["cLearn"]), warnOnly: new Set(["cWarn1", "cWarn2", "cWarn3"]) };
   const kick = kickScopeDecision({
     chatId: "cKick", scope,
@@ -136,7 +149,7 @@ test("對抗：invite 不可因 normal 邏輯放行；踢人群＋冒名＋invit
   }
 });
 
-test("展開：短網址中繼頁用 og:url 指向落地 → 跟到下一跳（修 mislabel normal）", async () => {
+test("展開：短網址中繼頁用 og:url 指向落地 → 跟到下一跳", async () => {
   const html = '<html><head><meta property="og:url" content="https://example.test/guide"><title>跳轉中</title></head></html>';
   const fetchImpl = async (u) => {
     const s = String(u);
@@ -151,6 +164,7 @@ test("展開：短網址中繼頁用 og:url 指向落地 → 跟到下一跳（�
   assert.equal(still, false);
   const outcome = shortUrlExpandOutcome({ expanded: out, stillShortener: still });
   assert.equal(outcome.result, "normal");
+  assert.equal(outcome.rewrite, true);
 });
 
 test("展開對抗：og:url 仍指向同短網址主機 → 不跟、標 unresolved", async () => {
@@ -160,13 +174,19 @@ test("展開對抗：og:url 仍指向同短網址主機 → 不跟、標 unresol
   assert.match(out.url, /bit\.ly/i);
   const outcome = shortUrlExpandOutcome({ expanded: out, stillShortener: true });
   assert.equal(outcome.result, "unresolved");
+  assert.equal(outcome.rewrite, false);
+  // unresolved 本文未改寫 → 短網址分數照舊
+  assert.ok(score({}, `看 ${SHORT}`).names.includes("短網址"));
 });
 
-test("原始碼：guard 使用 shortUrlExpandOutcome，且 dropNames 含短網址", () => {
+test("原始碼：guard 用 shortUrlExpandOutcome；禁止 dropShortenerName／drop「短網址」", () => {
   const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
+  const helper = readFileSync(new URL("../guard/short-url-outcome.mjs", import.meta.url), "utf8");
   assert.match(src, /shortUrlExpandOutcome/);
-  assert.match(src, /dropShortenerName \? \["短網址"\]/);
   assert.match(src, /result: outcome\.result/);
-  // 確認 SHORTENERS 清單仍含常見服務（不印金鑰）
+  assert.doesNotMatch(src, /dropShortenerName/);
+  assert.doesNotMatch(helper, /dropShortenerName/);
+  assert.doesNotMatch(helper, /shortUrlNormalShouldQuiet/);
+  assert.doesNotMatch(src, /dropShortenerName \? \["短網址"\]/);
   assert.ok(SHORTENERS.includes("bit.ly"));
 });
