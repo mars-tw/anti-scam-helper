@@ -32,6 +32,7 @@ import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, n
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
+import { shortUrlExpandOutcome } from "./short-url-outcome.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
@@ -1980,15 +1981,18 @@ async function handle(ws, message) {
     const extraNames = [];
     let decideText = text;
     let shopWarn = false;
+    let dropShortenerName = false;
     const shortUrl = sanitizeLinks(text).text.match(SHORT_URL)?.[0];
     if (shortUrl && config.shortUrlExpand === true) {
       const expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
-      if (expanded?.invite) extraNames.push("短網址導向群組邀請");
-      else if (expanded?.url && !SHORT_LINK.test(expanded.url)) {
-        shopWarn = isShoppingPage(expanded.html);
-        decideText = text.replace(shortUrl, expanded.url);
-      }
-      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: expanded ? (expanded.invite ? "invite" : shopWarn ? "shopping" : "normal") : "unreachable" });
+      const stillShortener = Boolean(expanded?.url && SHORT_LINK.test(expanded.url));
+      const shopping = Boolean(expanded?.url && !stillShortener && isShoppingPage(expanded.html));
+      const outcome = shortUrlExpandOutcome({ expanded, stillShortener, shopping });
+      for (const n of outcome.extraNames) if (!extraNames.includes(n)) extraNames.push(n);
+      shopWarn = outcome.shopWarn;
+      dropShortenerName = outcome.dropShortenerName;
+      if (outcome.rewrite && expanded?.url) decideText = text.replace(shortUrl, expanded.url);
+      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: outcome.result });
     }
     const perChatKickHere = policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick";
     let knowledgeLink = false;
@@ -2006,7 +2010,12 @@ async function handle(ws, message) {
       else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
       record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: expanded ? (expanded.invite ? "invite" : knowledgeLink ? "knowledge" : shopWarn ? "shopping" : "normal") : "unreachable" });
     }
-    const result = await decide(message, decideText, { extraNames, dropNames: knowledgeLink && !perChatKickHere ? ["疑似短網址"] : [] });
+    const dropNames = [
+      ...(knowledgeLink && !perChatKickHere ? ["疑似短網址"] : []),
+      // 已知短網址已成功展開到非短網址落地頁：去掉「短網址」分數（三種群通知層一致；踢人條件不變）。
+      ...(dropShortenerName ? ["短網址"] : []),
+    ];
+    const result = await decide(message, decideText, { extraNames, dropNames });
     if (knowledgeLink) result.knowledgeLink = true;
     // 16:31 誤判：第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → 只記錄，不通知不標記（不影響刪踢）。
     // 10/22 22:24 誤判：只因「疑似短網址」（不在清單的短網域，是猜的）被強制判詐，但第一層與覆核都沒判 SCAM → 只記錄（不影響踢人群）。
@@ -3050,7 +3059,9 @@ async function handleNote(ws, chatId, note) {
   const shortUrl = config.shortUrlExpand === true ? sanitizeLinks(text).text.match(SHORT_URL)?.[0] : undefined;
   if (shortUrl) {
     expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
-    record({ action: "note-short-url-expanded", chatId, notePostId: note.postId, result: expanded ? (expanded.invite ? "invite" : "normal") : "unreachable" });
+    const stillShortener = Boolean(expanded?.url && SHORT_LINK.test(expanded.url));
+    const noteOutcome = shortUrlExpandOutcome({ expanded, stillShortener, shopping: false });
+    record({ action: "note-short-url-expanded", chatId, notePostId: note.postId, result: noteOutcome.result });
   }
   const { extraNames } = noteLinkOutcome({ expanded });
   const result = await decide(message, text, extraNames.length ? { extraNames } : undefined);

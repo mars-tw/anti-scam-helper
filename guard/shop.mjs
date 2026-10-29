@@ -149,7 +149,21 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
     }
     const invite = /line\.me(?:\\?\/)+(?:R(?:\\?\/)+)?ti(?:\\?\/)+g2?(?:\\?\/)/i.test(html);
     // 短網址中繼頁用 meta refresh 或 location 轉址（不是 3xx）：再跟下一跳，免得只停在第一跳。
-    const next = invite ? undefined : html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*\d*\s*;?\s*url\s*=\s*['"]?([^"'>\s]+)/i)?.[1] ?? html.match(/(?:window\.)?location(?:\.href)?\s*(?:=|\.replace\(|\.assign\()\s*["'](https?:\/\/[^"']+)["']/i)?.[1];
+    // 短網址中繼頁：meta refresh、JS location、og:url／canonical（指向不同主機）都跟下一跳，避免停在短網址站卻標成 normal。
+    let next = invite ? undefined : html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*\d*\s*;?\s*url\s*=\s*['"]?([^"'>\s]+)/i)?.[1] ?? html.match(/(?:window\.)?location(?:\.href)?\s*(?:=|\.replace\(|\.assign\()\s*["'](https?:\/\/[^"']+)["']/i)?.[1];
+    if (!next && !invite && html) {
+      const og = html.match(/property=["']og:url["'][^>]*content=["']([^"']+)/i)?.[1]
+        ?? html.match(/content=["']([^"']+)["'][^>]*property=["']og:url["']/i)?.[1]
+        ?? html.match(/rel=["']canonical["'][^>]*href=["']([^"']+)/i)?.[1]
+        ?? html.match(/href=["']([^"']+)["'][^>]*rel=["']canonical["']/i)?.[1];
+      if (og) {
+        try {
+          const n = new URL(og.replace(/&amp;/g, "&"), parsed);
+          const same = n.hostname.replace(/^www\./i, "").toLowerCase() === host.replace(/^www\./i, "").toLowerCase();
+          if (!same && /^https?:$/i.test(n.protocol)) next = n.toString();
+        } catch {}
+      }
+    }
     if (next && hop < 4) { try { target = new URL(next.replace(/&amp;/g, "&"), parsed).toString(); continue; } catch {} }
     const headers = {}; for (const key of ["server", "cf-ray", "cf-mitigated"]) { const v = response.headers.get(key); if (v !== null) headers[key] = v; }
     const kind = classifyFetch({ status: response.status, headers, html });
