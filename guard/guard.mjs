@@ -1971,9 +1971,14 @@ async function handle(ws, message) {
     // 16:31 誤判：第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → 只記錄，不通知不標記（不影響刪踢）。
     // 10/22 22:24 誤判：只因「疑似短網址」（不在清單的短網域，是猜的）被強制判詐，但第一層與覆核都沒判 SCAM → 只記錄（不影響踢人群）。
     const heuristicOnly = result.forced && forcedScamNames(result.names ?? []).every((n) => n === "疑似短網址") && result.verdict !== "SCAM" && result.review !== "SCAM";
-    // 10/28 誤通知：只有無連結、無聯絡方式的「假群組公告」字樣，第一層與覆核都判 OK → 只記錄（不影響踢人群）。
+    // 10/28 誤通知：只有無連結、無聯絡方式的「假群組公告」字樣，第一層與覆核都判 OK → 只記錄。
+    // 10/29：同一個略過條件也套到踢人群的「通知」路徑（礦工群 10/28 11:53）；踢人／刪文判斷完全不動。
     const fakeNoticeOk = fakeNoticeModelsOk(result, text);
-    if (!perChatKickHere && result.action === "notice" && (knowledgeLink || heuristicOnly || fakeNoticeOk || reviewOnlyScam(result))) {
+    const suppressNotice = result.action === "notice" && (
+      fakeNoticeOk ||
+      (!perChatKickHere && (knowledgeLink || heuristicOnly || reviewOnlyScam(result)))
+    );
+    if (suppressNotice) {
       record({ action: "review-only-scam-suppressed", heuristicOnly, fakeNoticeOk, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, verdict: result.verdict, model: result.model, review: result.review, reviewModel: result.reviewModel, names: result.names, knowledgeLink });
       result.action = "none";
       result.suppressed = true;

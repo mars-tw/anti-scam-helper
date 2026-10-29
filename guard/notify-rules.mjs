@@ -389,7 +389,7 @@ export function reviewOnlyScam({ verdict, model, review, names = [] }) {
 }
 
 /** 10/28 誤通知：一般成員的文字只命中「假群組公告」（無任何連結、QR、LINE ID 或私下聯絡方式、也不是自稱管理員），
- * 第一層與覆核都明確判 OK → true＝只記錄不通知（只用在沒開踢人的群；踢人條件、踢人分數不變）。 */
+ * 第一層與覆核都明確判 OK → true＝只記錄不通知（通知路徑適用全部守護群，含踢人群；踢人／刪文條件與分數不變）。 */
 const FAKE_NOTICE_CONTACT = /(?:line|ＬＩＮＥ|賴)\s*(?:id|ＩＤ)?\s*[:：=]|加\s*(?:我|好友|賴|line|ＬＩＮＥ)|私\s*(?:訊|聊|密|我)|qr|ＱＲ|二維碼|掃\s*(?:碼|描|一下)|@[a-z0-9._-]{3,}|\b(?:tg|telegram|wechat|whatsapp|discord|dc)\b|微信|飛機|搜尋.{0,8}(?:群|社群|id|ＩＤ)|https?:|www\.|\.[a-z]{2,6}\//i;
 const IMPERSONATION_NAME = /冒|管理員|群管|版主|群主/;
 export function fakeNoticeModelsOk({ forced, names = [], link, verdict, review } = {}, text = "") {
