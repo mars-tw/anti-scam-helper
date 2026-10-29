@@ -21,7 +21,7 @@
 - `config.yaml` 的 `server.host` 保持 `127.0.0.1`。**絕對不要**把 3789 埠開放到公網：網頁沒有帳號密碼，連得到的人就能操作這個 LINE 帳號。
 - `session.json` 含 LINE 憑證與加密金鑰，權限 600，不可提交到 git、不可貼到任何地方。
 - 機器人 Token、OpenAI／xAI API 金鑰一律用環境變數或平台的 Secret 功能，不寫進程式或 git。
-- `guard/logs/` 不記訊息文字（只有短雜湊與字數），但含成員 ID、暱稱與判定結果，只留在主機上。聊天應答學習資料庫（`chat.training`）預設關閉，開啟會把去識別化後的聊天內容寫進硬碟，開啟前先看 [README.md〈聊天應答學習資料庫〉](README.md#聊天應答學習資料庫chattraining預設關閉)的隱私警告。
+- `guard/logs/` 不記訊息文字（只有短雜湊與字數），但含成員 ID、暱稱與判定結果，只留在主機上。聊天應答學習資料庫（`chat.training`）預設關閉，開啟會把去識別化後的聊天內容寫進硬碟，開啟前先看 [README.md〈聊天應答學習資料庫〉](README.md#聊天應答學習資料庫chattraining預設關閉)的隱私警告。`replyAudit.enabled`（預設 `false`）開啟後會另寫去識別化的自動回覆稽核 `guard/logs/reply-audit-日期.jsonl`（不存暱稱／成員 ID，超過 7 天自動刪；不進 git、不進每日備份、不外傳）。
 - 代理（VPN）帳密檔 `proxy.txt` 不可提交到 git、不可貼到任何地方。
 
 ## 安裝

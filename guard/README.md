@@ -135,6 +135,11 @@
 
 預設不啟用，也不會建立 `data/chat-training/`。啟用時守衛啟動會印出警告。其他欄位：`chat.training.dir`（存放位置，預設 `data/chat-training`）、`chat.training.examples`（每次最多放幾則範例，預設 3）、`chat.training.examplesForLocal`（`true`＝地端模型也放範例，預設不放）。
 
+## 自動回覆去識別化保留（`replyAudit`，預設關閉）
+
+> 預設關閉。設 `replyAudit.enabled: true` 後，守衛每則自動回覆會寫一筆到 `guard/logs/reply-audit-日期.jsonl`：時間、群的雜湊、去識別化後的回覆全文與觸發問題。電話、email、LINE ID（含 u/p/m/c 長 ID）、身分證、信用卡／帳號數字、@暱稱、網址查詢參數都會遮掉；不存暱稱與成員 ID。超過 `maxAgeDays`（預設 7）的檔在啟動時與每日 `purgeHour`（台北，預設 3）刪掉。這些檔在 `.gitignore`、每日備份排除清單內，不要外傳。
+
+
 ## 群組整理指令 `/ai整理`（`aiSummary`，預設關閉）
 
 成員在守護的群組打 `/ai整理`（全形 `／` 也可以；可加範圍：`今天`、`昨天`、`3天`、`12小時`、`2週`），守衛回覆一則（最多兩則）整理：主要話題、重要結論／資源、待回答的問題、提醒。
@@ -242,6 +247,7 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 | `chat.userCooldownSeconds` / `chat.repliesPerMinute` | 防洗版上限 |
 | `chat.allowedLinkDomains` | 回覆中允許保留的網址網域 |
 | `chat.training.enabled` | 預設 `false`。`true` 才會把去識別化後的問答與本人發言寫進 `data/chat-training/`（⚠️ 隱私警告見〈聊天應答學習資料庫〉） |
+| `replyAudit.enabled` | 預設 `false`。`true` 才把去識別化自動回覆寫進 `guard/logs/reply-audit-日期.jsonl`（見〈自動回覆去識別化保留〉） |
 
 ## 紀錄
 

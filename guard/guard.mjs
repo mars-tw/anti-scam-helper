@@ -35,6 +35,7 @@ import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
+import { REPLY_AUDIT_DEFAULTS, writeReplyAuditIfEnabled, purgeReplyAuditFiles, loadOrCreateSalt, msUntilNextPurgeHour } from "./reply-audit.mjs";
 import { IMAGE_LEARN_SYSTEM, DIGEST_SYSTEM, auditText, LEARN_EXT_DEFAULTS, LearnExtStore, buildDigestInput, cleanDescription, replyChains, sectionLabel, cleanNotes, cleanText, digestDue, digestDate, listNotes, localDate, makeHourlyCap, writeNotes } from "./learn-ext.mjs";
 import { DEFAULTS as KNOWLEDGE_DEFAULTS, KnowledgeCache, groundTopic, groundingPrompt, loadTopics, matchTopic } from "./knowledge.mjs";
 
@@ -71,6 +72,9 @@ const kickMode = config.kickMode === "notify" ? "notify" : "kick";
 const chatKickMode = (chatId) => kickModeFor(chatId, { globalMode: kickMode, groupPolicies: config.groupPolicies ?? {} });
 const logDir = resolve(dirname(configPath), config.logDir ?? "logs");
 mkdirSync(logDir, { recursive: true });
+// 自動回覆去識別化稽核：預設關閉。開啟後寫 guard/logs/reply-audit-日期.jsonl（不存暱稱／成員 ID，超過 maxAgeDays 自動刪）。
+const replyAudit = { ...REPLY_AUDIT_DEFAULTS, ...config.replyAudit };
+const replyAuditSalt = replyAudit.enabled ? loadOrCreateSalt(logDir) : null;
 const scamLlm = { backend: "local", ...config.llm };
 // 覆核模型（選用）。省略＝沿用分層巡邏之前的舊流程（見 decide／handle／checkImage 的 !reviewLlm 分支）；
 // 寫了但格式不對就在啟動時明確報錯，免得默默變成「永遠不踢人」。
@@ -376,6 +380,17 @@ function cleanGrokSessionsNow() {
 }
 setTimeout(cleanGrokSessionsNow, 60_000).unref();
 setInterval(cleanGrokSessionsNow, 7 * 86_400_000).unref();
+function purgeReplyAuditNow() {
+  if (!replyAudit.enabled && !existsSync(logDir)) return;
+  const removed = purgeReplyAuditFiles(logDir, { maxAgeDays: replyAudit.maxAgeDays ?? 7 });
+  if (removed) record({ action: "reply-audit-purged", removed });
+}
+// 啟動後約 1 分鐘清一次；之後每天台北 purgeHour 再清（即使功能關閉也清舊檔，避免曾開啟留下的過期資料）。
+setTimeout(purgeReplyAuditNow, 60_000).unref();
+setTimeout(() => {
+  purgeReplyAuditNow();
+  setInterval(purgeReplyAuditNow, 86_400_000).unref();
+}, msUntilNextPurgeHour(replyAudit.purgeHour ?? 3)).unref();
 const notifyTracker = makeNotifyTracker();
 const lookalikes = makeLookalikeTracker();
 const chatAdmins = new Map(); // 聊天室 id → Map(成員 id → { name, role })，從帶管理員身分的社群訊息學到
@@ -925,13 +940,18 @@ async function ownerAlreadyReplied(ws, message) {
   } catch {}
   return ownerAnswered(message, ownerPosts.get(message.channelId) ?? []);
 }
-/** reply() 的所有送出都經過這裡；本人已回就不送，回傳 false。 */
-async function replyOut(ws, message, labeled, text) {
+/** reply() 的所有送出都經過這裡；本人已回就不送，回傳 false。開啟 replyAudit 時寫去識別化稽核（不含暱稱／成員 ID）。 */
+async function replyOut(ws, message, labeled, text, question = "") {
   if (await ownerAlreadyReplied(ws, message)) {
     record({ action: "reply-skipped", reason: "owner-replied", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
     return false;
   }
   if (labeled) sendLabeled(ws, message, text); else send(ws, message, text);
+  try {
+    writeReplyAuditIfEnabled(replyAudit, { logDir, chatId: message.channelId, reply: text, question, salt: replyAuditSalt });
+  } catch (error) {
+    recordError("reply-audit", String(error?.message ?? error).slice(0, 80));
+  }
   return true;
 }
 
@@ -960,11 +980,11 @@ async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   const log = (action, extra) => record({ action, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, ...contentRef(ask, "ask"), ...(byName ? { trigger: "name" } : {}), ...extra });
   if (!withinDailyQuota(senderKey)) return log("quota-exceeded");
   if (ask.length > chat.maxQuestionChars) {
-    await replyOut(ws, message, true, `問題有點長，可以濃縮在 ${chat.maxQuestionChars} 字內再問我嗎？`);
+    await replyOut(ws, message, true, `問題有點長，可以濃縮在 ${chat.maxQuestionChars} 字內再問我嗎？`, ask);
     return log("refused", { reason: "too-long" });
   }
   if (chat.mentionOnly ? SENSITIVE.test(ask) : ABUSE.test(ask) && !SEEKING_HELP.test(ask)) {
-    await replyOut(ws, message, true, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
+    await replyOut(ws, message, true, chat.mentionOnly ? chat.hardRefusal : chat.refusal, ask);
     return log("refused", { reason: "abuse" });
   }
   // 上下文：該群最近對話（最多 chat.contextMessages 則、chat.contextMaxChars 字），加上被回覆的那則。只用於當下這次回答。
@@ -1007,7 +1027,7 @@ async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   if (/OUT_OF_SCOPE|REFUSE_SENSITIVE/i.test(answer)) {
     // 小模型偶爾亂拒答：mentionOnly 模式下乾脆不回，比回錯好。
     if (chat.mentionOnly) return log("model-refused-no-reply", { model: used.model });
-    await replyOut(ws, message, true, chat.mentionOnly ? chat.hardRefusal : chat.refusal);
+    await replyOut(ws, message, true, chat.mentionOnly ? chat.hardRefusal : chat.refusal, ask);
     return log("refused", { reason: "model" });
   }
   // 清掉小模型常見的「自我說明」與模擬別人說話的行，只留要回給對方的話。
@@ -1045,7 +1065,7 @@ async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   // 模型照提示只回了固定句（轉給本人／等本人）：原樣送出，不加簽名。
   for (const fixed of [ESCALATE_REPLY, MODERATION_REPLY]) {
     if (body.replace(/[。.!！\s]/g, "") === fixed) {
-      await replyOut(ws, message, true, fixed);
+      await replyOut(ws, message, true, fixed, ask);
       return log("moderation-deferred", { reason: fixed === ESCALATE_REPLY ? "escalate" : "model", model: used.model });
     }
   }
@@ -1054,21 +1074,21 @@ async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   if (falseClaim) {
     // 踢人現況說錯（說全部暫停卻漏掉例外、暫停中卻說會踢）→ 換成依設定的正確說明；否認處置、權限說反 → 固定句。
     const fix = falseClaim === "kick-status" || falseClaim === "kick-claim" ? kickStatusText(kickFlags(message.channelId)) : MODERATION_REPLY;
-    await replyOut(ws, message, true, fix);
+    await replyOut(ws, message, true, fix, ask);
     return log("moderation-deferred", { reason: `false-claim-${falseClaim}`, model: used.model });
   }
   // 輸出後過濾：替本人承諾未來行動（我會／我再／我來／我幫你／下次我／保證／約／付錢…）→ 固定句。
   if (chat.noCommitment !== false && isPromise(body)) {
-    await replyOut(ws, message, true, MODERATION_REPLY);
+    await replyOut(ws, message, true, MODERATION_REPLY, ask);
     return log("commitment-blocked", { reason: "promise", model: used.model });
   }
   // 輸出後過濾：對方在要求承諾，而且回覆真的在答應（或模型已回固定句）時，整段改成固定句。
   if (commitmentAsk && (COMMITMENT.test(body) || body.includes("親自回覆"))) {
-    await replyOut(ws, message, true, chat.commitmentReply ?? "這個要等本人親自回覆喔。");
+    await replyOut(ws, message, true, chat.commitmentReply ?? "這個要等本人親自回覆喔。", ask);
     return log("commitment-blocked", { model: used.model });
   }
   const text = labelReply(body, replyLabel);
-  if (!(await replyOut(ws, message, false, text))) return;
+  if (!(await replyOut(ws, message, false, text, ask))) return;
   const sentAt = Date.now();
   const latency = camp ? { via, lineToGuardMs: message.createdAt && receivedAt ? receivedAt - message.createdAt : undefined, waitMs: receivedAt ? startedAt - receivedAt : undefined, modelAndSendMs: sentAt - startedAt, totalMs: message.createdAt ? sentAt - message.createdAt : undefined } : {};
   log("replied", { ...latency, model: used.model, replyChars: text.length, examples: examples.length, contextChars: context.length, memoryChars: memoryText.length });

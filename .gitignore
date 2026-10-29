@@ -14,6 +14,9 @@ linejs.pid
 guard/guard.config.json
 guard/token.txt
 guard/logs/
+# 回覆稽核（亦在 guard/logs/ 下；明示以免誤提交）
+guard/logs/reply-audit*.jsonl
+guard/logs/.reply-audit-salt
 guard/node_modules/
 
 # 聊天應答學習資料庫（本機，不進 git）
