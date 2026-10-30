@@ -551,9 +551,9 @@ export function isFlagEntry(entry, flagActions) {
   return true;
 }
 
-// 看圖單一模型判 SCAM 的通知門檻（維護者 10/25）：圖片理由／QR 裡沒有具體連結訊號（網址、短網址、群組邀請、QR、LINE ID／加好友），
-// 又沒有覆核模型確認 SCAM → 只記錄、不在群內通知。按鈕字樣、「連結」這種泛稱不算連結。
-const VISION_LINK = /https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|io|cc|me|tw|xyz|top|vip|app|link|ly|gl|gd|to|co|info|shop|site|online)\b|短網址|縮網址|網址|QR|二維碼|條碼|掃碼|掃描|LINE\s*ID|ID\s*[:：]|加.{0,4}(LINE|line|賴|好友|群)|line\.me|群組?邀請|邀請連結|邀請碼|Telegram|t\.me|WhatsApp/i;
+// 看圖單一模型判 SCAM 的通知門檻（維護者 10/25；10/31 收緊）：圖片理由／QR 裡沒有具體連結訊號（具體網域、https、短網址服務、群組邀請、QR、LINE ID／加好友），
+// 又沒有覆核模型確認 SCAM → 只記錄、不在群內通知。按鈕字樣、「連結」「網址」「縮網址」這種泛稱不算連結（10/30 Pan 群誤通知：理由「附可疑網址」無網域卻被當成有連結）。
+const VISION_LINK = /https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|io|cc|me|tw|xyz|top|vip|app|link|ly|gl|gd|to|co|info|shop|site|online)\b|短網址|QR|二維碼|條碼|掃碼|掃描|LINE\s*ID|ID\s*[:：]|加.{0,4}(LINE|line|賴|好友|群)|line\.me|群組?邀請|邀請連結|邀請碼|Telegram|t\.me|WhatsApp/i;
 export function visionHasLink(reason, { qr = false } = {}) {
   return qr === true || VISION_LINK.test(String(reason ?? ""));
 }
