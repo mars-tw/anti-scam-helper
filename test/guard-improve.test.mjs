@@ -40,6 +40,17 @@ test("回覆規則：長度跟著 maxReplyChars，八項改進都在", () => {
   assert.match(g, /兩到三句，最多 300 字/);
   for (const key of ["是在問我嗎", "自稱前後一致", "閒聊", "先確認對方用的平台", "簡短帶過", "服務條款", "停損與清算", "推廣內容、未經驗證", "回撤、手續費和清算", "時間和來源", "不要說「我幫你"]) assert.match(g, new RegExp(key), key);
 });
+test("回覆規則：道謝不評論別的推廣、主人工具安裝不勸退（10/31 自動反思）", () => {
+  const g = replyGuidelines({ maxChars: 300 });
+  assert.match(g, /道謝、稱讚主人或管理員時，簡短回謝就好/);
+  assert.match(g, /不要把主人或管理員自己分享的工具、課程、作品說成廣告/);
+  assert.match(g, /主人自己做的工具或專案怎麼安裝.*不要勸對方別裝/);
+  assert.match(g, /驗證碼和密碼不要給任何人/);
+  // 推廣提醒只在問到或貼出時才說，原本的提醒字樣仍在（promoNote 後備不變）。
+  assert.match(g, /對方問到或貼出這類內容時，說是推廣內容、未經驗證/);
+  assert.equal(promoNote("感謝群主做出好工具，之前還免費上課教自動化", "謝謝你的肯定！"), undefined);
+  assert.equal(promoNote("這個小幫手要怎麼安裝？", "安裝步驟請看專案公開的說明"), undefined);
+});
 test("槓桿／加倉沒提停損 → 補一句；已經提了或不相關就不補", () => {
   assert.match(riskNote("50倍槓桿套牢了要不要加倉", "可以再看看"), /停損/);
   assert.equal(riskNote("要不要加倉", "記得設停損，清算線先算好"), undefined);
