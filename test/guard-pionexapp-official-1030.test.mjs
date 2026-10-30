@@ -26,6 +26,7 @@ const FAKE_URLS = [
   "https://pi0nex.com/a",
   "https://fakepionexapp.com/a",
   "https://pionexapp.com.scam.net/invite",
+  "http://xn--pionex-k83c.com/a",
   "http://xn--pionex-cka.com/a",
 ];
 const scope = {

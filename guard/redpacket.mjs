@@ -58,7 +58,14 @@ const OFFICIAL = ["pionex.com", "pionexapp.com", "binance.com", "binance.info", 
 export function lookalikeExchange(text) {
   for (const url of String(text ?? "").match(URL_RE) ?? []) {
     let host;
-    try { host = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`).hostname.toLowerCase(); } catch { continue; }
+    try {
+      host = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`).hostname.toLowerCase().replace(/\.$/, "");
+    } catch {
+      // Node 22 對無效 punycode（例如 xn--pionex-cka.com）丟 Invalid URL；改從字串抽主機，避免漏判仿冒。
+      const raw = String(url).match(/^(?:https?:\/\/)?([^/?#\s]+)/i)?.[1] ?? "";
+      host = raw.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "").replace(/:\d+$/, "");
+      if (!host) continue;
+    }
     if (BRAND.test(host) && !OFFICIAL.some((o) => hostMatches(host, o))) return true;
   }
   return false;

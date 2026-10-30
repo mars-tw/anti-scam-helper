@@ -49,6 +49,9 @@ test("規則：假紅包引流、仿冒交易所網域會加分；官方紅包�
   assert.equal(lookalikeExchange("https://www.binance.com/a"), false);
   assert.equal(lookalikeExchange("https://share.pionexapp.com/s/abc"), false);
   assert.equal(lookalikeExchange("https://pionexapp.com.evil.xyz/a"), true);
+  // 有效 ACE／Node 22 會拒的無效 punycode：都要能判成仿冒（後者靠字串抽主機）
+  assert.equal(lookalikeExchange("http://xn--pionex-k83c.com/a"), true);
+  assert.equal(lookalikeExchange("http://xn--pionex-cka.com/a"), true);
 });
 
 test("記事本連結白名單：只認完全相同的連結（短網址代碼分大小寫）、沒有引流字眼", async () => {
