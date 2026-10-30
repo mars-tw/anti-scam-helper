@@ -18,7 +18,7 @@ import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RUL
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
+import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames, darkNickNotifyReasons } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
@@ -1617,8 +1617,8 @@ const fileScan = { enabled: false, ...FILE_SCAN_DEFAULTS, ...config.fileScan };
 async function checkFile(ws, message) {
   if (neverKick(message)) return;
   let got;
-  try { got = await call(ws, { type: "file:fetch", chatId: message.channelId, messageId: message.messageId }); } catch (error) { return recordError("file", error.message); }
-  if (got?.type !== "file") return recordError("file", got?.code);
+  try { got = await call(ws, { type: "file:fetch", chatId: message.channelId, messageId: message.messageId }); } catch (error) { return recordError("file", error.message, { chatId: message.channelId, messageId: message.messageId }); }
+  if (got?.type !== "file") return recordError("file", got?.code, { chatId: message.channelId, messageId: message.messageId });
   let scan;
   try { scan = await scanFile(Buffer.from(String(got.data ?? ""), "base64"), fileScan); } catch { scan = { urls: [], qrs: [], text: "", error: "SCAN_FAILED" }; }
   got.data = undefined;
@@ -2208,7 +2208,7 @@ async function qrOrigin(ws, chatId, content) {
 
 async function checkImage(ws, message) {
   const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
-  if (picture.type !== "media") { recordError("media", picture.code); return console.error(`無法取得圖片（${picture.code}）`); }
+  if (picture.type !== "media") { recordError("media", picture.code, { chatId: message.channelId, messageId: message.messageId }); return console.error(`無法取得圖片（${picture.code}）`); }
   let content;
   try {
     content = readQr(picture.mime, Buffer.from(picture.data, "base64"));
@@ -2304,7 +2304,7 @@ const VISION_SYSTEM = `你是 LINE 社群的反詐騙圖片審查員。判斷成
 軟體或網站畫面、AI 模型的用量／額度／價格頁、官方服務公告、技術文件、程式碼、終端機、主機設定畫面，都算 OK（這是技術社群的日常分享）。
 假搬家公告（「本群混入詐騙、已建立新群重新審核，請原成員轉移到新群」）是詐騙，算 SCAM，理由寫「要成員轉移到新群」。
 只有圖片本身在「引流或要錢」時才算 SCAM：有 QR code、LINE ID、加好友／加群的邀請、網址，或要人投資、匯款、入金、領獎、兼職接案、色情約會。
-第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。第二行用 20 字內寫你在圖中看到的證據。`;
+第一行只能寫一個詞：SCAM（確定是詐騙）、UNSURE（可疑但不確定）或 OK（正常）。不要改口、不要自我修正、不要在後文再寫另一個標籤；若不確定就寫 UNSURE。第二行用 20 字內寫你在圖中看到的證據。`;
 
 const visionQueue = [];
 let visionBusy = false;
@@ -2347,19 +2347,20 @@ async function checkWithVision(ws, message, picture) {
   const started = Date.now();
   const usedVision = {};
   const answer = await complete(vision.llm ?? scamLlm, VISION_SYSTEM, "請判斷這張圖片。", vision.llm?.verdictTokens ?? 80, small, usedVision);
-  const lines = String(answer ?? "").trim().split(/\n+/);
-  let verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
-  const reason = (lines.slice(1).join(" ").trim() || lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60);
+  const parsed = parseVisionLabel(answer);
+  let verdict = parsed.verdict;
+  const reason = parsed.reason.slice(0, 60);
   // 判 SCAM 但理由裡沒有具體的引流／要錢訊號（只是軟體畫面、用量上限、公告…）：不採計，只記成 SCAM_WEAK。
   // 理由自相矛盾（說沒有引流／要錢訊號）→ UNSURE；沒有具體訊號 → SCAM_WEAK（都只記錄）。
+  // 標籤前後矛盾：parseVisionLabel 已取最後改口或降成 UNSURE。
   verdict = visionVerdict(verdict, reason);
   // 本機看圖模型（local-vlm 等）判 SCAM：要雲端（Claude → Grok → Meta）複判也是 SCAM 才算，否則降成 UNSURE（只記錄）。
   let recheck;
   if (verdict === "SCAM" && localVisionModels.has(usedVision.model)) {
     const usedCloud = {};
     const cloud = cloudVisionChain ? await complete(cloudVisionChain, VISION_SYSTEM, "請判斷這張圖片。", vision.llm?.verdictTokens ?? 80, small, usedCloud) : undefined;
-    const cl = String(cloud ?? "").trim().split(/\n+/);
-    const cloudVerdict = visionVerdict(["SCAM", "UNSURE", "OK"].find((word) => cl[0]?.trim().toUpperCase().startsWith(word)), (cl.slice(1).join(" ").trim() || cl[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") || "").slice(0, 60));
+    const cloudParsed = parseVisionLabel(cloud);
+    const cloudVerdict = visionVerdict(cloudParsed.verdict, cloudParsed.reason.slice(0, 60));
     recheck = { model: usedCloud.model ?? "none", verdict: cloudVerdict ?? "UNAVAILABLE" };
     if (cloudVerdict !== "SCAM") verdict = "UNSURE";
   }
@@ -2393,7 +2394,7 @@ async function checkWithVision(ws, message, picture) {
     if (isFakeGroupImage(reason) && policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick") {
       const usedReview = {};
       const reviewAnswer = vision.reviewLlm ? await complete(vision.reviewLlm, VISION_SYSTEM, "請判斷這張圖片。", 80, small, usedReview) : undefined;
-      const rv = ["SCAM", "UNSURE", "OK"].find((word) => String(reviewAnswer ?? "").trim().toUpperCase().startsWith(word));
+      const rv = parseVisionLabel(reviewAnswer).verdict;
       const decision = decideChatKick({ score: strongScore, strongScore, verdict: "SCAM", model: usedVision.model, review: rv });
       const flagged = { ...entry, verdict: "FAKE_GROUP_IMAGE", names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names], review: rv ?? "UNAVAILABLE", reviewModel: usedReview.model };
       record({ action: "fake-group-image", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, model: entry.model, review: flagged.review, decision });
@@ -3355,7 +3356,7 @@ async function syncHistory(ws, channels) {
         break;
       }
       const last = attempt === delays.length;
-      recordError("history", `${page.code ?? "unknown"}${last ? "（放棄，下次重連再補）" : `（${delays[attempt]} 秒後重試）`}`);
+      recordError("history", `${page.code ?? "unknown"}${last ? "（放棄，下次重連再補）" : `（${delays[attempt]} 秒後重試）`}`, { channelId: channel.channelId, attempt: attempt + 1 });
       if (!last) await sleep(delays[attempt] * 1000);
     }
   }

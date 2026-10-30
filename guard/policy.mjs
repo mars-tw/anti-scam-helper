@@ -440,13 +440,53 @@ export function botCampChats(groupPolicies = {}) {
   return out;
 }
 
-/** 解析看圖稽核的回覆：第一行判定、第二行證據、其餘是描述。 */
+/**
+ * 解析看圖模型回覆的標籤。
+ * 模型有時第一行寫 UNSURE，後文又自我修正成 OK／SCAM。
+ * 規則：收集所有明確標籤（行首或「應該是／結論如下／最終」後），取最後一個；
+ * 若前後矛盾且沒有改口句型，改當 UNSURE（只記錄較安全）。
+ */
+export function parseVisionLabel(answer) {
+  const text = String(answer ?? "").trim();
+  if (!text) return { verdict: undefined, reason: "", labels: [], conflict: false };
+  const labels = [];
+  const correctionAt = [];
+  for (const line of text.split(/\n+/)) {
+    const head = line.trim().toUpperCase();
+    const w = ["SCAM", "UNSURE", "OK"].find((word) => head === word || head.startsWith(word + " ") || head.startsWith(word + "：") || head.startsWith(word + ":") || head.startsWith(word + "，") || head.startsWith(word + ","));
+    if (w) labels.push(w);
+  }
+  for (const m of text.matchAll(/(?:應該是|結論如下|正確的?結論(?:如下)?|最終(?:判讀|結論|標籤)?|改判(?:為|成)?)[：:\s]*\b(SCAM|UNSURE|OK)\b/gi)) {
+    labels.push(m[1].toUpperCase());
+    correctionAt.push(labels.length - 1);
+  }
+  if (!labels.length) {
+    return { verdict: undefined, reason: text.slice(0, 200), labels: [], conflict: false };
+  }
+  const unique = [...new Set(labels)];
+  const conflict = unique.length > 1;
+  // 有改口句型 → 取最後標籤；純矛盾無改口 → UNSURE
+  let verdict = labels[labels.length - 1];
+  if (conflict && correctionAt.length === 0) verdict = "UNSURE";
+  const lines = text.split(/\n+/);
+  const first = lines[0]?.trim() ?? "";
+  const startsWithLabel = ["SCAM", "UNSURE", "OK"].some((w) => first.toUpperCase() === w || first.toUpperCase().startsWith(w + " ") || first.toUpperCase().startsWith(w + "：") || first.toUpperCase().startsWith(w + ":"));
+  const reason = (startsWithLabel ? lines.slice(1).join(" ").trim() || first.replace(/^(SCAM|UNSURE|OK)\W*/i, "") : text).slice(0, 200);
+  return { verdict, reason, labels, conflict };
+}
+
+/** 解析看圖稽核的回覆：標籤用 parseVisionLabel（取最後改口／矛盾降 UNSURE）；理由仍取第二行、其餘是描述。 */
 export function parseAuditImage(answer) {
+  const parsed = parseVisionLabel(answer);
   const lines = String(answer ?? "").trim().split(/\n+/);
-  let verdict = ["SCAM", "UNSURE", "OK"].find((word) => lines[0]?.trim().toUpperCase().startsWith(word));
-  const reason = (lines[1] ?? lines[0]?.replace(/^(SCAM|UNSURE|OK)\W*/i, "") ?? "").trim().slice(0, 60);
-  verdict = visionVerdict(verdict, reason);
-  return { verdict, reason, desc: lines.slice(2).join("\n") };
+  const first = lines[0]?.trim() ?? "";
+  const startsWithLabel = ["SCAM", "UNSURE", "OK"].some((w) => {
+    const u = first.toUpperCase();
+    return u === w || u.startsWith(w + " ") || u.startsWith(w + "：") || u.startsWith(w + ":");
+  });
+  const reason = (startsWithLabel ? (lines[1] ?? first.replace(/^(SCAM|UNSURE|OK)\W*/i, "")) : (lines[0] ?? "")).trim().slice(0, 60);
+  let verdict = visionVerdict(parsed.verdict, reason);
+  return { verdict, reason, desc: lines.slice(2).join("\n"), labels: parsed.labels, conflict: parsed.conflict };
 }
 
 // 圖片版假搬家公告：「新群重新審核」「請原成員轉移到新群」。沒有 QR 也要通知（只通知，不刪不踢）。

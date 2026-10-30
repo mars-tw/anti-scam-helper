@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { visionContradicts, visionVerdict, parseAuditImage } from "../guard/policy.mjs";
+import { visionContradicts, visionVerdict, parseAuditImage, parseVisionLabel } from "../guard/policy.mjs";
 
 const contradict = [
   "圖中顯示「Hello」的紅色手寫字樣，未見任何 QR code、LINE ID、網址或要求匯款",
@@ -23,4 +23,11 @@ test("真正有引流訊號的 SCAM 不受影響", () => {
 });
 test("看圖稽核也套用矛盾檢查", () => {
   assert.equal(parseAuditImage(`SCAM\n${contradict[0]}\n描述：手寫字`).verdict, "UNSURE");
+});
+
+test("看圖自相矛盾：先 UNSURE 後改口 OK → 取 OK；兩行標籤無改口 → UNSURE", () => {
+  const a = `UNSURE\n不對，應該是 OK：TradingView 股價走勢圖，無引流內容。正確的結論如下： OK`;
+  assert.equal(parseVisionLabel(a).verdict, "OK");
+  assert.equal(parseAuditImage(a).verdict, "OK");
+  assert.equal(parseVisionLabel("SCAM\nOK").verdict, "UNSURE");
 });

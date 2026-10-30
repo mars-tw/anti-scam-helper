@@ -29,3 +29,13 @@ test("假管理員搬群話術 → 通知且附看皇冠說明", () => {
 test("兩條新規則都不進踢人規則", () => {
   assert.ok(!MINER_KICKABLE.has(VOTE)); assert.ok(!MINER_KICKABLE.has(MOVE));
 });
+
+test("假投票：第一層 OK 且只有外部網址 → 不通知；有認證碼仍通知；雙 OK 不通知", () => {
+  const urlOnly = "幫我女兒投一票 https://vote.scam-example.test/a";
+  assert.ok(notifyScore(urlOnly).names.includes(VOTE));
+  assert.ok(!notifyScore(urlOnly, { verdict: "OK" }).names.includes(VOTE));
+  assert.ok(!notifyScore(urlOnly, { verdict: "OK", review: "OK" }).names.includes(VOTE));
+  const withCode = "票選活動請輸入手機號碼和 LINE 認證碼";
+  assert.ok(notifyScore(withCode, { verdict: "OK" }).names.includes(VOTE));
+  assert.ok(!notifyScore(withCode, { verdict: "OK", review: "OK" }).names.includes(VOTE));
+});

@@ -39,7 +39,16 @@ export const NOTIFY_RULES = [
   { name: "仿 LINE 社群邀請文字但連結不是 LINE", score: 4, direct: true, pattern: /^(?=[\s\S]*(?:已\s*被\s*邀\s*請\s*加\s*入|點\s*選\s*以\s*下\s*連\s*結\s*加\s*入\s*社\s*群))(?=[\s\S]*(?:https?:\/\/|(?:[a-z0-9-]+\.)+[a-z]{2,}\/))(?![\s\S]*line\.me\/)/i },
   // 10/23 晨會：假投票／假活動騙手機號碼與 LINE 認證碼。只通知，不進踢人分數。
   // 要有投票字眼，再加「非主流平台的外部連結」或「叫人輸入認證碼／驗證碼／手機號碼」；正常投票討論、YouTube／b23.tv 等官方網址不單獨觸發。
-  { name: "假投票／活動騙認證碼", score: 4, direct: true, match: (t) => VOTE.test(t) && (ASK_CODE.test(t) || (t.match(URL_RE) ?? []).some((u) => !isMainstreamMediaHost(hostOf(u)) && !OFFICIAL_HOST.test(hostOf(u)))) },
+  // 10/30 日報：第一層模型已判 OK 時，只有「投票＋非主流網址」不夠（常見活動連結誤報）；必須真的有騙認證碼才通知。雙模型都 OK 一律不通知。
+  { name: "假投票／活動騙認證碼", score: 4, direct: true, match: (t, ctx = {}) => {
+    if (!VOTE.test(t)) return false;
+    const hasAsk = ASK_CODE.test(t);
+    const hasOffUrl = (t.match(URL_RE) ?? []).some((u) => !isMainstreamMediaHost(hostOf(u)) && !OFFICIAL_HOST.test(hostOf(u)));
+    if (!hasAsk && !hasOffUrl) return false;
+    if (ctx.verdict === "OK" && ctx.review === "OK") return false;
+    if (ctx.verdict === "OK" && !hasAsk) return false;
+    return true;
+  } },
   // 10/23 晨會：假管理員「群裡有機器人洗版／開新群／搬群」話術。只通知（踢人分數仍只看 rules.mjs 的假群組公告）。
   // 10/24 自動反思：群友的防詐提醒文字（「疑似詐騙提醒…不要加入新群」）被這條觸發、兩個模型都判 OK 仍通知。
   // 沒有任何網址／邀請時，若文字是防詐提醒語氣，或第一層與覆核都判 OK，就不算（只會更少通知）。
@@ -214,7 +223,9 @@ export function urlKind(url, { shorteners = [], shopping = false } = {}) {
 export const firstUrl = (text) => String(text ?? "").match(URL_RE)?.[0];
 export const isKnowledgeUrl = (url) => urlKind(url) === "知識";
 
-/** 圖片通知（a／c／b 的單張判斷、1 的 UNSURE 例外）。回 { notify, names, profitOnly, loss }。 */
+/** 圖片通知（a／c／b 的單張判斷、1 的 UNSURE 例外）。回 { notify, names, profitOnly, loss }。
+ * 10/30 提案（待審）：UNSURE 時「釣魚彈窗連結帳號領額度」「ClickFix 終端貼指令」也只通知、不計踢分。
+ * 不升級：僅「保證獲利／催促安裝」口號、無帳號連結或終端貼指令的圖（例如蝦爆印鈔機類）仍只記錄。 */
 export function imageNotify(verdict, reason) {
   const r = String(reason ?? "");
   const hasUrl = /網址|網站|水印|浮水印|\.com|\.net|\.io|\.cc|連結|URL/i.test(r) && !/無(?:LINE|引流|網址|連結)|沒有(?:網址|連結)/i.test(r.replace(/無QR(?:碼|code)?/gi, ""));
@@ -225,6 +236,15 @@ export function imageNotify(verdict, reason) {
   const apy = Math.max(0, ...[...r.matchAll(/(?:年化|APY|APR)[^0-9+]{0,6}\+?([0-9][0-9,]*)\s*%/gi)].map((m) => Number(m[1].replace(/,/g, ""))));
   if ((apy >= 500 || /秒合約|猜漲跌|賭(?:價格|漲跌)/.test(r)) && (hasQr || hasUrl)) names.push("高年化／秒合約＋QR或網址");
   if (verdict === "UNSURE" && /多個.{0,6}(?:同頭像|同暱稱|帳號).{0,10}(?:冒充|假冒).{0,4}管理|冒充管理/.test(r)) names.push("多帳號冒充管理員");
+  // 10/30 提案：窄規則，只通知不計踢分。反例見 test/guard-daily-review-1030.test.mjs。
+  if (verdict === "UNSURE") {
+    if (/(?:彈窗|視窗|對話框).{0,24}(?:連結|綁定|連接).{0,10}帳號.{0,24}(?:領取|領).{0,10}(?:額度|獎勵|紅包|禮物)|(?:連結|綁定|連接).{0,10}帳號.{0,16}(?:領取|領).{0,10}(?:額度|獎勵)/.test(r)) {
+      names.push("釣魚彈窗連結帳號領額度");
+    }
+    if (/(?:終端機|命令提示字元|PowerShell|CMD|終端|命令列).{0,28}(?:貼上|貼入|複製後執行).{0,16}(?:指令|命令|程式碼|代碼)|(?:要求|叫|讓).{0,10}(?:在|於).{0,8}(?:終端機|終端|命令提示|PowerShell|CMD).{0,20}(?:貼上|貼入|執行).{0,12}(?:指令|命令)/i.test(r)) {
+      names.push("ClickFix 終端貼指令");
+    }
+  }
   const loss = /虧損|賠|負報酬|-\d/.test(r) && !/獲利|盈利|\+\d/.test(r);
   const profitOnly = !names.length && !loss && /獲利|盈利|收益|報酬|\+[0-9]/.test(r);
   return { notify: names.length > 0, names, profitOnly, loss };
