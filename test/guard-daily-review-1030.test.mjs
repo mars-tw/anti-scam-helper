@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import { makeRuleScorer, SHORTENERS } from "../guard/rules.mjs";
 import { lookalikeExchange } from "../guard/redpacket.mjs";
 import { urlKind, imageNotify, notifyScore, MINER_KICKABLE } from "../guard/notify-rules.mjs";
-import { parseVisionLabel, parseAuditImage, visionVerdict } from "../guard/policy.mjs";
+import { parseVisionLabel, parseAuditImage, visionVerdict, looksLike } from "../guard/policy.mjs";
 import { kickScopeDecision, kickCategory } from "../guard/kick-scope.mjs";
+import { hasInvisibleChars, decideImpersonationKick } from "../guard/impersonation-kick.mjs";
+import { analyzeName } from "../guard/fakeadmin.mjs";
 
 const score = makeRuleScorer();
 const NOTIFY = 3;
@@ -124,4 +126,118 @@ test("2) 提案：UNSURE 釣魚彈窗／ClickFix 只通知；反例不通知", (
   // 不計踢分
   assert.ok(!MINER_KICKABLE.has("釣魚彈窗連結帳號領額度"));
   assert.ok(!MINER_KICKABLE.has("ClickFix 終端貼指令"));
+});
+
+// ── 追加：今天新手法案例＋正常反例；punycode 同類；Hao0321 隱形字元冒名（不改踢人條件）──
+const normalizeName = (name) =>
+  String(name ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}\p{C}\p{M}\u115F\u1160\u3164\uFFA0]/gu, "");
+
+test("lookalike punycode 同類：pionex／binance／bybit 有效與無效 ACE 要命中規則；okx 只在 lookalike（規則尚未收）", () => {
+  // rules.mjs「仿冒交易所網域」目前收 pionex／binance／bybit（無 okx）；lookalikeExchange 另含 okx。
+  const ruleFakes = [
+    "http://xn--pionex-k83c.com/a",
+    "http://xn--pionex-cka.com/a",
+    "http://xn--binance-k83c.com/a",
+    "http://xn--binance-cka.com/a",
+    "http://xn--bybit-k83c.com/a",
+    "http://xn--bybit-cka.com/a",
+  ];
+  for (const url of ruleFakes) {
+    assert.equal(lookalikeExchange(url), true, url);
+    const r = score({}, url);
+    assert.ok(r.names.includes("仿冒交易所網域"), url + " → " + r.names.join(","));
+  }
+  for (const url of ["http://xn--okx-k83c.com/a", "http://xn--okx-cka.com/a"]) {
+    assert.equal(lookalikeExchange(url), true, "lookalike-" + url);
+  }
+  for (const url of [
+    "https://www.pionex.com/",
+    "https://share.pionexapp.com/s/x",
+    "https://www.binance.com/",
+    "https://www.bybit.com/",
+    "https://www.okx.com/",
+  ]) {
+    assert.equal(lookalikeExchange(url), false, url);
+    assert.equal(score({}, url).names.includes("仿冒交易所網域"), false, url);
+  }
+});
+
+test("新手法案例：彈窗釣魚／ClickFix 要通知；催促安裝 App 口號單獨不通知（提案範圍，不計踢分）", () => {
+  // 手法正例（提案：只通知）
+  assert.ok(imageNotify("UNSURE", "螢幕彈窗要求連結帳號才能領取額度獎勵").notify);
+  assert.ok(imageNotify("UNSURE", "釣魚視窗叫你綁定帳號領紅包").notify);
+  assert.ok(imageNotify("UNSURE", "畫面要求於 PowerShell 貼上這段指令執行").notify);
+  assert.ok(imageNotify("UNSURE", "叫你在命令提示字元貼入指令驗證").notify);
+  // 正常反例
+  assert.equal(imageNotify("UNSURE", "教學：在終端機執行 node -v 看版本").notify, false);
+  assert.equal(imageNotify("UNSURE", "交易所 K 線與網格機器人畫面").notify, false);
+  assert.equal(imageNotify("UNSURE", "官方 App 下載頁截圖，推薦安裝").notify, false);
+  // 催促安裝／印鈔機口號：無帳號連結、無終端貼指令 → 不升級通知（避免誤傷迷因）
+  assert.equal(imageNotify("UNSURE", "蝦爆印鈔機…催促安裝，保證獲利").notify, false);
+  assert.equal(imageNotify("UNSURE", "快去安裝這個賺錢 App").notify, false);
+  assert.ok(!MINER_KICKABLE.has("釣魚彈窗連結帳號領額度"));
+  assert.ok(!MINER_KICKABLE.has("ClickFix 終端貼指令"));
+});
+
+test("暱稱加隱形字元冒名 Hao0321：可識別；Hao0321 只警告群不踢；無隱形字元不升級", () => {
+  const OWNER = "Hao0321";
+  const ownerKey = normalizeName(OWNER);
+  const looks = (a, b) => looksLike(a, b);
+  const FAKE_INVITE = "本群明天刪除請加新群 https://line.me/ti/g2/AbCdEfGh";
+  const baseKick = {
+    adminNames: [OWNER],
+    normalizeName,
+    looksLike: looks,
+    text: FAKE_INVITE,
+    ruleNames: ["假群組公告"],
+    verdict: "SCAM",
+    model: "local-vlm",
+    review: "SCAM",
+    excluded: false,
+  };
+  // 正例：尾端零寬／點字空白
+  for (const nick of [OWNER + "\u200B", OWNER + "\u2800", OWNER + "\u3164"]) {
+    assert.equal(looksLike(normalizeName(nick), ownerKey), true, nick);
+    assert.equal(hasInvisibleChars(nick), true, nick);
+    assert.ok(analyzeName(nick).signals.some((s) => s.type === "invisible"), nick);
+    assert.equal(decideImpersonationKick({ ...baseKick, senderName: nick }).kick, true, nick);
+  }
+  // 反例：真名、尾端普通空白、純 @（無 invisible）不升級踢
+  assert.equal(decideImpersonationKick({ ...baseKick, senderName: OWNER }).kick, false);
+  assert.equal(decideImpersonationKick({ ...baseKick, senderName: OWNER + " " }).reason, "no-invisible");
+  assert.equal(decideImpersonationKick({ ...baseKick, senderName: "@" + OWNER }).reason, "no-invisible");
+  // 三種群：隱形冒名＋假群邀請 — 踢人群可踢；Hao0321 只警告三群不踢
+  const dark = OWNER + "\u200B";
+  assert.equal(
+    kickScopeDecision({
+      chatId: "cKick",
+      scope,
+      text: FAKE_INVITE,
+      names: ["假群組公告"],
+      verdict: "SCAM",
+      review: "SCAM",
+      senderName: dark,
+      adminNames: [OWNER],
+    }).kick,
+    true,
+  );
+  for (const chatId of ["cWarn1", "cWarn2", "cWarn3", "cBear", "cLearn"]) {
+    assert.equal(
+      kickScopeDecision({
+        chatId,
+        scope,
+        text: FAKE_INVITE,
+        names: ["假群組公告"],
+        verdict: "SCAM",
+        review: "SCAM",
+        senderName: dark,
+        adminNames: [OWNER],
+      }).kick,
+      false,
+      chatId,
+    );
+  }
 });
