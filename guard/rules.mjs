@@ -4,7 +4,7 @@
 import { analyzeName } from "./fakeadmin.mjs";
 
 // 常見短網址服務（貼這些等於看不到真正的目的地）。
-export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "ada.nz", "cutt.us", "tny.im", "u.nu", "n9.cl", "surl.li", "ouo.io", "shrtco.de", "9m.no", "t.cn", "kutt.it", "han.gl", "me2.do", "vo.la", "sor.bz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im", "supr.link"];
+export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "ada.nz", "cutt.us", "tny.im", "u.nu", "n9.cl", "surl.li", "ouo.io", "shrtco.de", "9m.no", "t.cn", "kutt.it", "han.gl", "me2.do", "vo.la", "sor.bz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im", "supr.link", "urlr.me"];
 
 // 平台官方短網址（影音、社群、地圖、主流電商自家的分享連結）：目的地一定在該平台上，不算「看不到目的地的短網址」，
 // 也不算詐騙依據（LINE 的 lin.ee 例外：照 LINE 邀請規則判斷）。

@@ -131,3 +131,26 @@ test("1030：既有暱稱比對／Hao0321 警告規定未改動（kickScope warn
   assert.equal(kickScopeDecision({ chatId: "cWarn1", scope: scopeThree, text: fakeGroup }).kick, false);
   assert.equal(kickScopeDecision({ chatId: "cMain", scope: scopeThree, text: fakeGroup }).kick, true);
 });
+
+test("1030 A：群主暱稱尾端 U+2800＋短網址／記事本 → 冒名通知理由", () => {
+  const braille = `${ADMIN}\u2800`;
+  assert.equal(normalizeNickKey(braille), normalizeNickKey(ADMIN));
+  const r = nick(braille, SHORT);
+  assert.ok(r.includes(INTEL_DARK_NICK_SHORT), "U+2800 dark nick");
+  assert.ok(nick(braille, NOTE).includes(INTEL_DARK_NICK_SHORT), "U+2800 note");
+  // 通知理由字串會帶出「冒名」
+  const reason = `（${r.join("、")}）`;
+  assert.match(reason, /冒名/);
+});
+
+test("1030：記事本掃描路徑套用暗稱辨識（guard.mjs handleNote）", () => {
+  const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
+  const noteFn = src.indexOf("async function handleNote");
+  assert.ok(noteFn > 0);
+  const next = src.indexOf("\nasync function ", noteFn + 10);
+  const body = src.slice(noteFn, next > 0 ? next : noteFn + 4000);
+  assert.match(body, /darkNickNotifyReasons/);
+  assert.match(body, /nickReasons/);
+  assert.match(body, /mergedNames/);
+  assert.match(body, /appendUnresolvedShortReport/);
+});

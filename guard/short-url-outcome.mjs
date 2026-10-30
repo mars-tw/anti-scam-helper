@@ -1,6 +1,7 @@
 // 已知短網址唯讀展開結果分類（維護者 10/22 F／G）。
 // 展開後仍停在短網址服務＝unresolved（不可標成 normal）；真正落地非短網址才 rewrite。
 // 不在這裡去掉「短網址」分數：計分仍依改寫後（或未改寫）的本文，照舊。
+// 10/30：unresolved 列進日報用 jsonl（與 unrecognized-links 同性質，給 22:00 人工辨識）。
 
 /**
  * @param {object} opts
@@ -25,4 +26,23 @@ export function shortUrlExpandOutcome({ expanded, stillShortener = false, shoppi
   }
   // 文章、教學、文件、影片、GitHub 等 → 換成展開後的網址再判斷（計分依改寫後本文）。
   return { result: "normal", rewrite: true, extraNames: [], shopWarn: false };
+}
+
+/**
+ * unresolved 日報列：有結果才回 JSON 字串；其他 result 回 null。
+ * 不含訊息本文；url 由呼叫端自行截短／去識別。
+ */
+export function unresolvedShortReportLine({
+  at, chatId, messageId, notePostId, url, result = "unresolved",
+} = {}) {
+  if (result !== "unresolved") return null;
+  const row = {
+    at: at ?? new Date().toISOString(),
+    kind: "unresolved-short",
+    chatId,
+    ...(messageId != null ? { messageId } : {}),
+    ...(notePostId != null ? { notePostId } : {}),
+    ...(url ? { url: String(url).slice(0, 200) } : {}),
+  };
+  return JSON.stringify(row);
 }

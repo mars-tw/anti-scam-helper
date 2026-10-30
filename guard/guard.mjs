@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { complete, onModelError } from "./llm.mjs";
-import { makeReplySkip } from "./reply-skip.mjs";
+import { makeReplySkip, shouldSkipAutoReply } from "./reply-skip.mjs";
 import { classifyQrOrigin, isLineInvite, qrReviewContext, readQr, shrinkForModel, squareTicket } from "./qr.mjs";
 import { TrainingStore, deidentify } from "./chat-training.mjs";
 import { ScamPatterns } from "./scam-patterns.mjs";
@@ -32,7 +32,7 @@ import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, n
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
-import { shortUrlExpandOutcome } from "./short-url-outcome.mjs";
+import { shortUrlExpandOutcome, unresolvedShortReportLine } from "./short-url-outcome.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
@@ -246,6 +246,24 @@ const botIds = new Set([
 // 發訊者是機器人 ID（protectedIds 裡 note 標機器人／bot，或 chat.community.botIds）時不自動回覆（只依 ID），見 reply-skip.mjs。
 // 保護名單裡的真人（共同管理員等）照常可以問守衛。
 const skipReplyTo = makeReplySkip({ botIds: [...botIds] });
+// 10/30 誤判 B：近 N 分鐘內被通知過的發送者，自動回覆跳過（只影響回覆）。
+const replySkipNotified = new Map(); // 聊天室＋發言者 → 上次通知時間
+const replySkipRecentMs = () => Math.max(1, Number(config.replySkip?.recentNotifyMinutes ?? 30)) * 60_000;
+function markReplySkipNotified(chatId, senderId) {
+  if (!chatId || !senderId) return;
+  const key = `${chatId} ${senderId}`;
+  replySkipNotified.set(key, Date.now());
+  if (replySkipNotified.size > 5000) replySkipNotified.delete(replySkipNotified.keys().next().value);
+}
+function appendUnresolvedShortReport(row) {
+  try {
+    const line = unresolvedShortReportLine(row);
+    if (!line) return;
+    const file = resolve(logDir, config.unresolvedShortUrl?.reportFile ?? "unresolved-short-urls.jsonl");
+    appendFileSync(file, `${line}\n`, { mode: 0o600 });
+    chmodSync(file, 0o600);
+  } catch (error) { recordError("unresolved-short-report", error.message); }
+}
 const memoryAllowDomains = [...new Set([...(chat.allowedLinkDomains ?? []), ...(community.allowDomains ?? [])])];
 // 這些紀錄代表發言者被判詐騙／可疑：他的參考資料整批刪掉、之後不收。
 const FLAG_ACTIONS = /^(removed|flagged|failed|notified|suspect-flag|impersonation-(flag|suspect|invite)|qr-(impersonation|flag)|vision-flag|scam-shop-(suspect|handled)|scam-link-flag|repeat-flag|kick-suppressed|fake-admin-(notify|avatar)|asker-redact|dry-run|notify-dry-run)/;
@@ -963,6 +981,18 @@ async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   if (skipReplyTo(message.senderId)) {
     record({ action: "reply-skip-bot", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, via });
     return;
+  }
+  // 10/30 誤判 B：含連結／邀請且分數>0，或發送者剛被通知 → 跳過自動回覆（叫名字、@、補回、botCamp 都經 reply()）。
+  {
+    const cleanAsk = sanitizeLinks(ask).text;
+    const { score: replyScore } = ruleScore(message, cleanAsk);
+    const nk = `${message.channelId} ${message.senderId}`;
+    const recently = Date.now() - (replySkipNotified.get(nk) ?? 0) < replySkipRecentMs();
+    const gate = shouldSkipAutoReply({ text: ask, score: replyScore, senderRecentlyNotified: recently });
+    if (gate.skip) {
+      record({ action: "reply-skipped", reason: gate.reason, chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, score: replyScore, via });
+      return;
+    }
   }
   const senderKey = `${message.channelId} ${message.senderId}`;
   // 機器人訓練群：已經過群組自己的上限（每人／每群每分鐘），不再套一般群的冷卻（每人 5 分鐘、全帳號每分鐘、每群每小時）。
@@ -2015,6 +2045,7 @@ async function handle(ws, message) {
       // 真正落地才改寫本文再計分；不另外 drop「短網址」分數。
       if (outcome.rewrite && expanded?.url) decideText = text.replace(shortUrl, expanded.url);
       record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: outcome.result });
+      if (outcome.result === "unresolved") appendUnresolvedShortReport({ chatId: message.channelId, messageId: message.messageId, url: shortUrl, result: outcome.result });
     }
     const perChatKickHere = policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick";
     let knowledgeLink = false;
@@ -2659,6 +2690,7 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
   const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId, canMention: canMentionIn(entry.chatId) });
   if (reply.type === "sent" && reply.messageId) { sentByBot.add(reply.messageId); ownMessages.add(reply.messageId); }
+  if (reply.type === "sent") markReplySkipNotified(entry.chatId, entry.senderId);
   record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, mentioned: Boolean(reply.type === "sent" && tried.at(-1)?.mentions), tried: tried.map((t) => t.result), attempts: tried.length, mentions: mentions.map((m) => m.userId) });
   return reply.type === "sent";
 }
@@ -3073,21 +3105,34 @@ async function handleNote(ws, chatId, note) {
   const protectedAuthor = Boolean(note.authorId) && (neverKick(message) || protectedMembers.some((entry) => entry.ids.has(note.authorId)) || botIds.has(note.authorId));
   // 10/27 B：記事本也唯讀展開短網址；結果只用於評分與通知（不刪不踢，踢人條件不變）。
   let expanded;
+  let noteShortResult;
   const shortUrl = config.shortUrlExpand === true ? sanitizeLinks(text).text.match(SHORT_URL)?.[0] : undefined;
   if (shortUrl) {
     expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
     const stillShortener = Boolean(expanded?.url && SHORT_LINK.test(expanded.url));
     const noteOutcome = shortUrlExpandOutcome({ expanded, stillShortener, shopping: false });
+    noteShortResult = noteOutcome.result;
     record({ action: "note-short-url-expanded", chatId, notePostId: note.postId, result: noteOutcome.result });
+    if (noteOutcome.result === "unresolved") appendUnresolvedShortReport({ chatId, notePostId: note.postId, url: shortUrl, result: noteOutcome.result });
   }
   const { extraNames } = noteLinkOutcome({ expanded });
   const result = await decide(message, text, extraNames.length ? { extraNames } : undefined);
+  // 10/30 誤判 A：記事本掃描也套暗稱／＠群管冒名辨識，通知理由標出冒名（只通知，不刪不踢）。
+  const adminNames = [
+    ...(chatAdmins.get(chatId)?.values() ?? []).map((a) => a?.name).filter(Boolean),
+    ...sameCommunityAdminNames(chatId),
+  ];
+  const nickReasons = protectedAuthor || config.notifyLayer?.enabled === false
+    ? []
+    : darkNickNotifyReasons({ senderName: note.authorName, adminNames, text, protectedSender: false, shorteners: SHORTENERS });
   const old = at < notesSeen.baseline || Date.now() - at > notesCfg.maxAgeHours * 3_600_000;
   const canDelete = notifyChats.has(chatId) && !noAction(chatId) && selfIsAdmin(chatId);
   let action = decideNoteAction({ score: result.score, verdict: result.verdict, review: result.review, strongScore, notifyScore: config.notifyScore ?? 3,
     protectedAuthor, deleteOnConfirmed: notesCfg.deleteOnConfirmed === true, canDelete, deleteSupported: NOTE_DELETE_SUPPORTED });
   action = noteLinkOutcome({ expanded, action }).action;
-  const entry = { ...base, score: result.score, names: result.names, verdict: result.verdict, review: result.review, noteAction: action, protectedAuthor };
+  if (nickReasons.length && action === "none") action = "notify";
+  const mergedNames = [...new Set([...(result.names ?? []), ...nickReasons])];
+  const entry = { ...base, score: result.score, names: mergedNames, verdict: result.verdict, review: result.review, noteAction: action, protectedAuthor, ...(noteShortResult ? { shortUrlResult: noteShortResult } : {}) };
   if (action === "none") { if (result.score > 0 || result.verdict === "SCAM") record({ action: "note-checked", ...entry }); return; }
   if (action === "notify" || action === "notice") { if (exchangeTextNoLink(text) && !outOfScopeNames(result.names)) { record({ action: "pionex-nolink-skip", ...entry }); return; } }
   if (old) { record({ action: "note-flag-baseline", ...entry, reason: "建立於啟用前或太舊，只記錄不通知" }); return; }
@@ -3105,6 +3150,7 @@ async function notifyNote(ws, entry, note, deleting) {
   }
   const { answer, tried } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, canMention: canMentionIn(entry.chatId) });
   if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
+  if (answer.type === "sent") markReplySkipNotified(entry.chatId, entry.senderId);
   record({ action: answer.type === "sent" ? "note-notified" : "note-notify-failed", ...entry, code: answer.code, attempts: tried.length, mentions: mentions.map((m) => m.userId) });
   if (deleting) record({ action: "note-delete-unsupported", chatId: entry.chatId, notePostId: entry.notePostId });
 }
