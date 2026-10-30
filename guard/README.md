@@ -251,7 +251,7 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 
 ## 紀錄
 
-每個判斷都寫進 `guard/logs/guard-日期.jsonl`，內容含發言者（成員 ID、暱稱）、規則命中項、模型判定與處置（`removed`／`dry-run`／`failed`／`none`／`replied`／`refused`／`quota-exceeded`）。**日誌不記訊息文字**（沒有 `text`、`preview` 之類欄位，被踢的詐騙訊息也一樣；圖片裡的 QR 內容同樣只留雜湊，一般網址型 QR 另記網域 `qrHost`）：訊息只留 `textHash`（內容的 SHA-256 前 12 碼，用來比對是不是同一則）與 `textChars`（字數）；@ 問題同理，欄位是 `askHash`／`askChars`。雜湊無法還原內容，但很短、很常見的句子仍可能被猜中，所以日誌照樣只留本機。誤踢時用這份紀錄找人（成員 ID、時間、聊天室與訊息 ID），再請對方重新加入。
+每個判斷都寫進 `guard/logs/guard-日期.jsonl`，內容含發言者（成員 ID、暱稱）、規則命中項、模型判定、**決策**（`decision`：`none`／`notice`／`delete`／`kick`，判斷結果）與**實際動作**（`action`：`none`＝尚未／未執行；`notified`／`removed`／`scam-link-deleted`／`dry-run`／`failed`／`replied`／`refused`／`quota-exceeded`…＝真的做了）。每日稽核與健康檢查的刪／踢／群內通知計數以實際動作為準，不以 `decision` 或舊日誌誤寫進 `action` 的 `notice`／`delete` 為準。**日誌不記訊息文字**（沒有 `text`、`preview` 之類欄位，被踢的詐騙訊息也一樣；圖片裡的 QR 內容同樣只留雜湊，一般網址型 QR 另記網域 `qrHost`）：訊息只留 `textHash`（內容的 SHA-256 前 12 碼，用來比對是不是同一則）與 `textChars`（字數）；@ 問題同理，欄位是 `askHash`／`askChars`。雜湊無法還原內容，但很短、很常見的句子仍可能被猜中，所以日誌照樣只留本機。誤踢時用這份紀錄找人（成員 ID、時間、聊天室與訊息 ID），再請對方重新加入。
 
 試跑模式（`dryRun: true`）才會在主控台顯示要回的內容與要發的通知，供檢視，不寫進日誌檔。使用 pm2 時主控台輸出由 pm2 另外保存，試跑完可用 `pm2 flush` 清掉。
 

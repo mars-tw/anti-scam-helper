@@ -18,7 +18,7 @@ import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RUL
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
+import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry, withLogDecision } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames, darkNickNotifyReasons } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
@@ -1758,7 +1758,7 @@ async function scanNotifyMessage(ws, message) {
   }
   const result = await decide(message, text);
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
-  if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record({ action: "none", scanNotify: true, ...entry });
+  if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record(withLogDecision({ scanNotify: true, ...entry }, "none"));
   // 10/26：「直接通知」的文字規則（例如代償借貸＋私下聯絡、收購門號；不含要累積分數的）在這類群也算，只發通知；提到派網沒附連結不算。
   if (!(result.kick || result.action === "delete" || result.action === "notice") && !exchangeTextNoLink(text)) {
     const direct = directNotifyNames(text, { verdict: result.verdict, review: result.review, protectedSender: neverKick(message) });
@@ -1815,12 +1815,12 @@ async function auditImage(ws, message) {
   if (content) {
     const entry = { ...base, contentType: "IMAGE_QR", ...contentRef(content) };
     if (qr.allow.some((prefix) => content.startsWith(prefix)) || sanitizeLinks(content).officialOnly || redPacketAllowed(message.channelId, content)) {
-      record({ action: "none", verdict: "QR_ALLOWED", scanNotify: true, ...entry });
+      record(withLogDecision({ verdict: "QR_ALLOWED", scanNotify: true, ...entry }, "none"));
       learnAudit(message, { kind: "qr", verdict: "QR_ALLOWED", reason: "白名單或官方 QR" });
     } else {
       const origin = squareTicket(content) ? await qrOrigin(ws, message.channelId, content) : { origin: "unknown" };
       if (origin.origin === "own") {
-        record({ action: "none", verdict: "QR_OWN_GROUP", scanNotify: true, ...entry });
+        record(withLogDecision({ verdict: "QR_OWN_GROUP", scanNotify: true, ...entry }, "none"));
         learnAudit(message, { kind: "qr", verdict: "QR_OWN_GROUP", reason: "本群自己的邀請 QR" });
       } else {
         const shop = scamShop.enabled ? await scoreShopLinks(content) : undefined;
@@ -1829,7 +1829,7 @@ async function auditImage(ws, message) {
         const flagged = external || (shop && shop.result.level !== "none") || result.kick || result.action === "delete" || result.action === "notice";
         const why = [external ? "外部 LINE 群組／好友邀請 QR" : "", ...(shop ? shop.result.signals : []), ...(result.names ?? [])].filter(Boolean);
         const qrEntry = { ...entry, verdict: flagged ? "QR_SUSPECT" : `QR_${result.verdict}`, names: why.length ? why : ["圖片 QR 內含連結"], score: result.score, review: result.review, reviewModel: result.reviewModel };
-        record({ action: flagged ? "qr-flag" : "none", scanNotify: true, ...qrEntry });
+        record(withLogDecision({ scanNotify: true, ...qrEntry, decision: flagged ? (result.action ?? "notice") : (result.action ?? "none") }, flagged ? "qr-flag" : "none"));
         learnAudit(message, { kind: "qr", verdict: qrEntry.verdict, reason: why.join("、") });
         if (flagged) await flagScanNotify(ws, qrEntry);
       }
@@ -1868,7 +1868,7 @@ async function auditImage(ws, message) {
     record({ action: "vision-flag", scanNotify: true, notifyRule: true, ...entry });
     await flagScanNotify(ws, { ...entry, names: [...(inl.notify ? inl.names : ["同一人 24 小時內第 2 張獲利截圖"]), ...entry.names] });
   }
-  else record({ action: verdict === "UNSURE" || verdict === "SCAM_WEAK" ? "vision-flag" : "none", scanNotify: true, ...entry, notified: false });
+  else record(withLogDecision({ scanNotify: true, ...entry, notified: false }, verdict === "UNSURE" || verdict === "SCAM_WEAK" ? "vision-flag" : "none"));
 }
 
 async function handle(ws, message) {
@@ -2117,7 +2117,7 @@ async function handle(ws, message) {
         record({ action: "notify-rule", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: extra, urlKind: entry.urlKind });
       }
     } else if (result.verdict === "SCAM" && !exchangeNoLink) notifyTracker.scam(message.senderId);
-    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK" || entry.urlKind)) record({ action: "none", ...entry });
+    if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK" || entry.urlKind)) record(withLogDecision(entry, "none"));
     // 沒到踢人門檻，但 Meta 判 SCAM 且（規則 ≥ notifyScore，或地端也判 SCAM 且含連結）：引用回覆該則、通知群主與管理員確認，不踢。
     // 10/26 23:47：kickScope.allChats=true → 22:59 可踢類別（群組邀請／確認詐騙群／假精品）在全部守護群都送 remove()；
     // 範圍、排除群、只學習／只警告、沒管理員權限（noDeleteChats）都在 remove() 裡再擋。
@@ -2228,7 +2228,7 @@ async function checkImage(ws, message) {
     // 自家群 QR：詢問者遮蔽「刪這段時間所有圖片」時也不刪。
     const item = askerLog.get(`${message.channelId} ${message.senderId}`)?.items.get(message.messageId);
     if (item) item.safe = true;
-    return record({ action: "none", verdict: qrRedPacket ? "QR_RED_PACKET" : "QR_ALLOWED", ...entry });
+    return record(withLogDecision({ verdict: qrRedPacket ? "QR_RED_PACKET" : "QR_ALLOWED", ...entry }, "none"));
   }
   // 截圖規則：只有「真的解碼出 QR」＋「內容是 LINE 邀請／加好友／群組連結」＋「不在自家群清單」才算可疑，送 Meta 覆核。
   if (isLineInvite(content)) {
@@ -2240,7 +2240,7 @@ async function checkImage(ws, message) {
     if (origin.origin === "own") {
       const item = askerLog.get(`${message.channelId} ${message.senderId}`)?.items.get(message.messageId);
       if (item) item.safe = true;
-      return record({ action: "none", verdict: "QR_OWN_GROUP", ...entry });
+      return record(withLogDecision({ verdict: "QR_OWN_GROUP", ...entry }, "none"));
     }
     if (await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_LINE_INVITE" });
     // 23:07：個人加好友 QR（ti/p、lin.ee）不算詐騙：只回溫和備註，不覆核、不刪不踢。
@@ -2290,9 +2290,9 @@ async function checkImage(ws, message) {
       record({ action: "qr-flag", ...flagged, qrHost: host, notifyRule: true });
       return notifyAdmins(ws, flagged, "qr");
     }
-    return record({ action: "none", ...entry, verdict: "QR_OTHER", qrHost: host, qrScore: qs.score, urlKind: qk });
+    return record(withLogDecision({ ...entry, verdict: "QR_OTHER", qrHost: host, qrScore: qs.score, urlKind: qk }, "none"));
   }
-  record({ action: "none", ...entry, verdict: "QR_OTHER", qrHost: host });
+  record(withLogDecision({ ...entry, verdict: "QR_OTHER", qrHost: host }, "none"));
 }
 
 // ── 看圖模型（沒有 QR code 的圖片） ─────────────────────────────
@@ -2431,7 +2431,7 @@ async function checkWithVision(ws, message, picture) {
   const okInl = imageNotify(verdict, reason);
   // OK 的獲利／看盤截圖：只記進 24h 追蹤（之後接著貼網址或叫人私訊才算），本身不通知。
   trackProfitImage(okInl, message);
-  record({ action: "none", ...entry });
+  record(withLogDecision(entry, "none"));
 }
 
 // ── 詢問者遮蔽（questionRedact） ─────────────────────────────────

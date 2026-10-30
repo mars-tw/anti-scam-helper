@@ -587,3 +587,49 @@ export function alertHasLinkSignal(text) {
 export function isPlainAntiScamBotAlert(text) {
   return isAntiScamBotAlert(text) && !alertHasLinkSignal(text);
 }
+
+/** 決策欄（decision）vs 實際動作（action）。
+ * 判斷結果（none／notice／delete／kick）寫進 decision；action 只記實際執行
+ * （none＝尚未／未執行；notified／removed／scam-link-deleted…＝真的做了）。
+ * 用來避免 `record({ action: "none", ...entry })` 被 entry.action 蓋成 notice／delete。 */
+export function withLogDecision(fields = {}, actualAction = "none") {
+  const decision = fields.decision ?? fields.action ?? "none";
+  return { ...fields, decision, action: actualAction };
+}
+
+/** 舊日誌裡誤把決策寫進 action 的值（不是實際執行）。 */
+export const DECISION_ONLY_ACTIONS = new Set(["notice", "delete", "kick"]);
+
+/** 把一筆日誌正規化：決策欄獨立，action 只留實際執行。新寫入的列若已有 decision 則不動 action。 */
+export function normalizeLogDecision(entry) {
+  if (!entry || typeof entry !== "object") return entry;
+  if (entry.decision != null && !DECISION_ONLY_ACTIONS.has(entry.action)) {
+    return entry;
+  }
+  if (DECISION_ONLY_ACTIONS.has(entry.action)) {
+    return { ...entry, decision: entry.decision ?? entry.action, action: "none" };
+  }
+  if (entry.decision == null && entry.action != null) {
+    return { ...entry, decision: entry.action };
+  }
+  return entry;
+}
+
+/**
+ * 每日稽核／健康檢查用：以實際動作計數（刪／踢／群內通知）。
+ * 不把 decision、也不把誤寫成 notice／delete 的判斷列算進去。
+ */
+export function countActualActions(entries) {
+  const out = { deleted: 0, kicked: 0, notified: 0 };
+  for (const raw of entries ?? []) {
+    const e = normalizeLogDecision(raw);
+    const a = e?.action;
+    if (a === "scam-link-deleted" || a === "unrecognized-link-deleted" || a === "followup-deleted") out.deleted += 1;
+    else if (a === "scam-shop-handled" && e.deleted === true) out.deleted += 1;
+    else if (a === "impersonation-invite-handled" && Number(e.deleted) > 0) out.deleted += Number(e.deleted);
+    if (a === "removed") out.kicked += 1;
+    else if ((a === "scam-shop-handled" || a === "impersonation-invite-handled") && e.kickSent) out.kicked += 1;
+    if (a === "notified" || a === "note-notified") out.notified += 1;
+  }
+  return out;
+}
