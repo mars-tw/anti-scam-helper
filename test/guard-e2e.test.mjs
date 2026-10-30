@@ -55,7 +55,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
     dryRun: false, localScreenAll: true, kickPolicy: "strict", strongScore: 6, reviewScore: 3, notifyScore: 3, deleteMessage: true,
     llm: model, review: model, patterns: { enabled: false }, qr: { enabled: false }, logDir: join(dir, "logs"),
     notify: { enabled: true, chats: ["cA", "cB"], cooldownSeconds: 0, beforeActionMs: 10 }, scamLink: { deleteOnConfirmed: true },
-    catchUp: { scanMinutes: 0 }, knowledge: { prefetch: false }, ...extraConfig,
+    catchUp: { scanMinutes: 0 }, knowledge: { enabled: false, prefetch: false }, ...extraConfig,
   };
   if (setup) setup(dir, config);
   writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
@@ -404,7 +404,7 @@ test("fakeAdmin 沒開（公開版預設）→ 假管理員暱稱＋換群不走
 function seedKnowledge(dir, config, { seed = true } = {}) {
   const url = "https://127.0.0.1:1/h3-readme";
   writeFileSync(join(dir, "topics.json"), JSON.stringify({ topics: [{ id: "minimax-h3", title: "MiniMax H3", match: ["(?<![a-z0-9<\\/#._\\-])h3(?![a-z0-9_>])"], exclude: ["<\\s*\\/?\\s*h3"], sources: [{ label: "官方 README", url }] }] }));
-  config.knowledge = { prefetch: false, topicsFile: join(dir, "topics.json"), fetchTimeoutMs: 500 };
+  config.knowledge = { enabled: true, prefetch: false, topicsFile: join(dir, "topics.json"), fetchTimeoutMs: 500 };
   writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
   if (seed) new KnowledgeCache(join(dir, "logs", "knowledge")).write(url, `# MiniMax H3\nMiniMax H3 is an open-weight video model. SEEDFACT output duration 4-15 seconds at 24 FPS.\n${"x ".repeat(120)}`);
 }
@@ -436,7 +436,7 @@ const NAMED = { chat: { enabled: true, mentionOnly: true, systemPrompt: "你是�
 const askName = (text, extra = {}) => ({ messageId: `n${Math.random().toString(36).slice(2, 8)}`, channelId: "cA", senderId: "pAsk", senderName: "成員", text, ...extra });
 
 test("叫名字：「阿華你好」「問一下華哥」「华割」都回，結尾（AI代理）", async () => {
-  for (const text of ["阿華你好，這個連結安全嗎", "問一下華哥 H3 好用嗎", "华割 在吗"]) {
+  for (const text of ["阿華你好，這個連結安全嗎", "問一下華哥 這招好用嗎", "华割 在吗"]) {
     const r = await runGuard({ ...NAMED, protectedIds: ["pAsk"] }, [askName(text)], { chatAnswer: OK_ANSWER });
     assert.deepEqual(r.sends.map((f) => f.text), [`${OK_ANSWER}（AI代理）`], text);
   }
