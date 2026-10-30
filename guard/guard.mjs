@@ -20,7 +20,7 @@ import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
 import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
-import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames } from "./notify-rules.mjs";
+import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames, darkNickNotifyReasons } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, looksLike, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, SpeakerBook, withAgentLabel } from "./notice.mjs";
@@ -1303,6 +1303,7 @@ const avatarFile = resolve(logDir, fakeAdmin.avatarCacheFile ?? "avatar-verdicts
 const avatarCache = pruneAvatarCache((() => { try { return JSON.parse(readFileSync(avatarFile, "utf8")); } catch { return {}; } })());
 const avatarPending = new Map();
 const fakeAdminNotified = new Map(); // 聊天室＋發言者 → 上次通知時間
+const darkNickNotified = new Map(); // 10/30 A／B 暗稱／＠群管：聊天室＋發言者 → 上次通知時間
 const fakeAdminLogged = new Map(); // 聊天室＋發言者 → 上次記錄時間
 const avatarKey = (pictureId) => createHash("sha256").update(String(pictureId)).digest("hex").slice(0, 20);
 function saveAvatarCache() {
@@ -1954,6 +1955,28 @@ async function handle(ws, message) {
       if (await minerKick(ws, message, le, text)) return;
       record({ action: "suspect-flag", ...le, notifyRule: true });
       await notifyAdmins(ws, le, "suspect");
+    }
+  }
+  // 10/30 A／B：暗稱冒名＋短網址／記事本、暱稱＠群管 → 只通知（不刪不踢、不進踢人分數）；真群管／白名單不計。
+  if (!trusted && !neverKick(message) && config.notifyLayer?.enabled !== false) {
+    const adminNames = [
+      ...(chatAdmins.get(message.channelId)?.values() ?? []).map((a) => a?.name).filter(Boolean),
+      ...sameCommunityAdminNames(message.channelId),
+    ];
+    const nickReasons = darkNickNotifyReasons({
+      senderName: message.senderName, adminNames, text, protectedSender: false, shorteners: SHORTENERS,
+    });
+    if (nickReasons.length) {
+      const nk = `${message.channelId} ${message.senderId}`;
+      const now = Date.now();
+      const cd = (fakeAdmin.cooldownHours || 6) * 3_600_000;
+      if (now - (darkNickNotified.get(nk) ?? 0) >= cd) {
+        darkNickNotified.set(nk, now);
+        if (darkNickNotified.size > 2000) darkNickNotified.delete(darkNickNotified.keys().next().value);
+        const ne = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "DARK_NICK", names: nickReasons };
+        record({ action: "suspect-flag", ...ne, notifyRule: true });
+        await notifyAdmins(ws, ne, "suspect");
+      }
     }
   }
   // 維護者 10/26 23:07：加好友（個人：賴、LINE ID、加好友連結）不列入詐騙、不刪不踢；只回一則溫和備註（同人同群冷卻）。

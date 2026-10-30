@@ -1,4 +1,5 @@
-import { isPlainAntiScamBotAlert, containsNameToken } from "./policy.mjs";
+import { isPlainAntiScamBotAlert, containsNameToken, looksLike } from "./policy.mjs";
+import { FRIEND_ADD, GROUP_INVITE } from "./kick-scope.mjs";
 const INVITE_RE = /line\.me\/(?:R\/)?ti\/g2?\/|openchat\.line\.me\/|line\.me\/(?:R\/)?square\//i;
 export const CROSS_INVITE = "同群組邀請跨群出現";
 /** 踢人群（per-chat kickMode:kick，維護者 10/22 15:51）可刪踢的通知層理由；其他群一律只通知。 */
@@ -173,6 +174,9 @@ export function noticeTips(names = []) {
   if (names.includes(SEX_PLATFORM)) tips.push("交友約會要先繳會員費、認證金、解凍金的都是詐騙，繳了只會被要更多。");
   if (names.includes(LUXURY_URL)) tips.push("名牌超低價出清的一頁式網站多是詐騙，買到假貨或收不到貨。");
   if (names.includes(MODA_VOTE_CODE)) tips.push("正常投票或領券不會要 LINE 認證碼，請勿提供");
+  if (names.includes(INTEL_DARK_NICK_SHORT)) tips.push("暱稱看起來像群管卻夾短網址／記事本連結時，先對一下真管理員的 LINE 介面皇冠標示，別點短鏈。");
+  if (names.includes(INTEL_AT_ADMIN_NICK)) tips.push("暱稱寫成＠群管名是常見冒名手法；真管理員名字旁有 LINE 介面標示，請管理員確認。");
+  if (names.includes(INTEL_INVITE_AND_FRIEND)) tips.push("同一則同時貼群組邀請又叫人加好友，多半是引流詐騙，兩邊都不要點。");
   return tips;
 }
 
@@ -281,7 +285,7 @@ export function investSolicit(text) { return INVEST_SOLICIT.test(String(text ?? 
 
 export const REPEAT_SCAM = "同一人 24 小時內第 2 次判詐騙";
 /** 文字訊息的通知層判斷（呼叫端只在原本沒有處置時呼叫）。回 names（空陣列＝不通知）。 */
-export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, protectedSender = false, log }) {
+export function textNotifyReasons({ text, chatId, senderId, result, tracker, shorteners = [], inviteExpanded = false, protectedSender = false, log, senderName, adminNames = [] }) {
   const names = [];
   if (isPlainAntiScamBotAlert(text)) return names; // 其他防詐機器人的提醒且沒有任何連結訊號：不通知（有連結照一般流程）
 
@@ -313,6 +317,8 @@ export function textNotifyReasons({ text, chatId, senderId, result, tracker, sho
   }
   names.push(...intelNotify1025(text, { protectedSender, shorteners }));
   names.push(...intelNotify1026(text, { protectedSender }));
+  names.push(...intelNotify1030(text, { protectedSender }));
+  // A／B（暗稱／＠群管暱稱）由 guard.mjs 早段呼叫 darkNickNotifyReasons 通知，這裡不重複；D 走 intelNotify1030。
   if (tracker.followsProfit(chatId, senderId, text)) names.push("獲利截圖後接著貼網址／叫人私訊");
   // 10/22 20:51 誤判後：0 分只靠模型判詐不通知；要有確定特徵（群組邀請、未知短網址、已知詐騙網域）才通知。
   if (result.zeroScoreScamReviewed && zeroScoreShouldNotify(result.names)) names.push("0 分但第一層與雲端覆核都判詐騙");
@@ -480,4 +486,78 @@ export function intelNotify1026(text, { protectedSender = false } = {}) {
   if (GUARD_STYLE.test(t) && !realWarn && (urls.length || INVITE_RE.test(t) || QR_RE.test(t) || NEW_GROUP_VERIFY.test(t))) names.push(INTEL_FAKE_GUARD);
   if (SEND_GROUP_QR.test(t) && !/小心|當心|謹防|慎防|注意|提醒大家|有人(?:叫|要)|被(?:叫|要求)/.test(t) && !WARN_NEG.test(t) && !ANTI_SCAM_WARNING.test(t) && !ASK_IF_SCAM.test(t) && !WARN_EXTRA.test(t)) names.push(INTEL_SEND_GROUP_QR);
   return names;
+}
+
+// ── 10/30 情資（只通知，絕不進 rules.mjs 踢人計分、不在 MINER_KICKABLE、不刪不踢）─────────
+// A) 暱稱經 NFKC 正規化後 looksLike 同群群管，且同則含短網址或記事本連結（即使沒有 invisible）。
+// B) 暱稱以 @／＠ 開頭，去掉前綴後 looksLike 群管（訊息內「@群管」提問不算，只看發言者暱稱）。
+// D) 同則同時出現群組邀請＋加好友；單邊不加權。
+export const INTEL_DARK_NICK_SHORT = "暗稱冒名＋短網址／記事本";
+export const INTEL_AT_ADMIN_NICK = "暱稱＠群管冒名";
+export const INTEL_INVITE_AND_FRIEND = "同則群組邀請＋加好友";
+
+/** 與 guard.mjs normalizeName 相同：NFKC＋小寫＋剝空白／標點／符號／控制／組合字與韓文填充。 */
+export function normalizeNickKey(name) {
+  return String(name ?? "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}\p{C}\p{M}\u115F\u1160\u3164\uFFA0]/gu, "");
+}
+
+const NOTE_HINT = /記事本|note\s*pad|群組筆記/i;
+const ASK_OR_WARN = /(?:這是|是不是|會不會是|好像是)?詐騙|小心|當心|謹防|慎防|不要點|別點|勿點|請勿點|防詐|反詐|冒名|假的嗎|真的嗎/i;
+
+function hasShortOrNoteLink(text, shorteners = RULE_SHORTENERS) {
+  const raw = String(text ?? "");
+  const urls = urlsOf(raw.normalize("NFKC"));
+  const short = urls.some((u) => isShortHost(hostOf(u).split(":")[0], shorteners));
+  if (short) return true;
+  // 記事本語境＋任一網址（記事本短鏈常見寫法）
+  if (NOTE_HINT.test(raw) && urls.length > 0) return true;
+  return false;
+}
+
+function nickLooksLikeAdmin(senderName, adminNames = []) {
+  const key = normalizeNickKey(senderName);
+  if (key.length < 2) return undefined;
+  for (const admin of adminNames) {
+    const a = normalizeNickKey(admin);
+    if (a && looksLike(key, a)) return admin;
+  }
+  return undefined;
+}
+
+function nickHasAtPrefix(senderName) {
+  const s = String(senderName ?? "").normalize("NFKC").trimStart();
+  return s.startsWith("@") || s.startsWith("＠");
+}
+
+/**
+ * A／B：依發言者暱稱＋同群管理員名單判斷是否只通知。
+ * protectedSender（真群管／白名單）一律不算；訊息內寫「@群管」提問不算 B（只看暱稱前綴）。
+ */
+export function darkNickNotifyReasons({ senderName, adminNames = [], text = "", protectedSender = false, shorteners = RULE_SHORTENERS } = {}) {
+  if (protectedSender) return [];
+  const victim = nickLooksLikeAdmin(senderName, adminNames);
+  if (!victim) return [];
+  const names = [];
+  const body = String(text ?? "");
+  // A：暗稱（含尾端空白等，已由 normalizeNickKey 對上）＋短網址／記事本連結
+  if (hasShortOrNoteLink(body, shorteners)) {
+    const urgeClick = /(?:請|快|立刻|馬上).{0,4}(?:點|加入|打開|進入).{0,8}(?:連結|網址|短網址|記事本)|點(?:此|這|擊).{0,6}(?:連結|網址)/.test(body);
+    const discussOnly = ASK_OR_WARN.test(body) && !urgeClick;
+    if (!discussOnly) names.push(INTEL_DARK_NICK_SHORT);
+  }
+  // B：暱稱以 @／＠ 開頭
+  if (nickHasAtPrefix(senderName)) names.push(INTEL_AT_ADMIN_NICK);
+  return [...new Set(names)];
+}
+
+/** D：同則群組邀請＋加好友才通知；單邊不加這條。 */
+export function intelNotify1030(text, { protectedSender = false } = {}) {
+  if (protectedSender) return [];
+  const raw = String(text ?? "");
+  const t = raw.normalize("NFKC");
+  if (ANTI_SCAM_WARNING.test(t) || ASK_IF_SCAM.test(t) || WARN_EXTRA.test(t)) return [];
+  const hasGroup = GROUP_INVITE.test(t) || INVITE_RE.test(t);
+  const hasFriend = FRIEND_ADD.test(t) || /line\.me\/(?:R\/)?ti\/p\//i.test(t);
+  if (hasGroup && hasFriend) return [INTEL_INVITE_AND_FRIEND];
+  return [];
 }
