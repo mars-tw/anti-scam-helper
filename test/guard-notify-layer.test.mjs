@@ -114,10 +114,12 @@ test("踢人群刪踢條件：Claude SCAM＋覆核 SCAM／空／逾時→踢；O
     assert.equal(minerAction({ perChatKick: false, reasons, verdict: "SCAM", model: "claude-x", review: "SCAM" }), "notice", "其他群不踢");
 });
 
-test("10/30 提案：UNSURE 釣魚彈窗／ClickFix 通知；教學／交易圖／催促安裝口號不通知", () => {
+test("10/30：UNSURE 釣魚彈窗／ClickFix 通知；催促安裝需短網址或QR才通知", () => {
   assert.ok(imageNotify("UNSURE", "彈窗要求連結帳號領取額度").notify);
   assert.ok(imageNotify("UNSURE", "要求在終端機貼上指令執行").notify);
   assert.equal(imageNotify("UNSURE", "教學：在終端機輸入 npm install").notify, false);
   assert.equal(imageNotify("UNSURE", "獲利截圖無QR無網址").notify, false);
   assert.equal(imageNotify("UNSURE", "蝦爆印鈔機催促安裝無連結").notify, false);
+  assert.ok(imageNotify("UNSURE", "催促安裝印鈔機 App，附短網址 pse.is/abc").notify);
+  assert.ok(imageNotify("UNSURE", "快去安裝賺錢 App，有 QR").notify);
 });

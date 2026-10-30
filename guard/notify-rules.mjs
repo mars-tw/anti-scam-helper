@@ -224,19 +224,22 @@ export const firstUrl = (text) => String(text ?? "").match(URL_RE)?.[0];
 export const isKnowledgeUrl = (url) => urlKind(url) === "知識";
 
 /** 圖片通知（a／c／b 的單張判斷、1 的 UNSURE 例外）。回 { notify, names, profitOnly, loss }。
- * 10/30 提案（待審）：UNSURE 時「釣魚彈窗連結帳號領額度」「ClickFix 終端貼指令」也只通知、不計踢分。
- * 不升級：僅「保證獲利／催促安裝」口號、無帳號連結或終端貼指令的圖（例如蝦爆印鈔機類）仍只記錄。 */
+ * 10/30：UNSURE 時「釣魚彈窗連結帳號領額度」「ClickFix 終端貼指令」只通知、不計踢分。
+ * 「催促安裝／印鈔機」口號單獨不通知；同時帶短網址或 QR 才只通知（不計踢分）。 */
 export function imageNotify(verdict, reason) {
   const r = String(reason ?? "");
   const hasUrl = /網址|網站|水印|浮水印|\.com|\.net|\.io|\.cc|連結|URL/i.test(r) && !/無(?:LINE|引流|網址|連結)|沒有(?:網址|連結)/i.test(r.replace(/無QR(?:碼|code)?/gi, ""));
   const hasQr = /QR/i.test(r) && !/無\s*QR|沒有\s*QR/i.test(r);
+  const hasShortHost = /bit\.ly|reurl\.cc|pse\.is|lihi\d?\.(?:cc|com|me)|tinyurl|is\.gd|cutt\.ly|supr\.link|urlr\.me|ppt\.cc|t\.ly|rb\.gy|shorturl\.(?:at|asia|gg)/i.test(r);
+  const hasShortWord = /短網址|縮網址/i.test(r) && !/無\s*(?:短網址|縮網址)|沒有\s*(?:短網址|縮網址)/i.test(r);
+  const hasShort = hasShortHost || hasShortWord;
   const names = [];
   if (verdict === "SCAM") names.push("圖片判詐騙");
   if (/老師|直播|帶單|帶大家|跟單/.test(r) && hasUrl) names.push("老師直播／帶單獲利圖＋網址水印");
   const apy = Math.max(0, ...[...r.matchAll(/(?:年化|APY|APR)[^0-9+]{0,6}\+?([0-9][0-9,]*)\s*%/gi)].map((m) => Number(m[1].replace(/,/g, ""))));
   if ((apy >= 500 || /秒合約|猜漲跌|賭(?:價格|漲跌)/.test(r)) && (hasQr || hasUrl)) names.push("高年化／秒合約＋QR或網址");
   if (verdict === "UNSURE" && /多個.{0,6}(?:同頭像|同暱稱|帳號).{0,10}(?:冒充|假冒).{0,4}管理|冒充管理/.test(r)) names.push("多帳號冒充管理員");
-  // 10/30 提案：窄規則，只通知不計踢分。反例見 test/guard-daily-review-1030.test.mjs。
+  // 10/30：窄規則，只通知不計踢分。反例見 test/guard-daily-review-1030.test.mjs。
   if (verdict === "UNSURE") {
     if (/(?:彈窗|視窗|對話框).{0,24}(?:連結|綁定|連接).{0,10}帳號.{0,24}(?:領取|領).{0,10}(?:額度|獎勵|紅包|禮物)|(?:連結|綁定|連接).{0,10}帳號.{0,16}(?:領取|領).{0,10}(?:額度|獎勵)/.test(r)) {
       names.push("釣魚彈窗連結帳號領額度");
@@ -244,6 +247,9 @@ export function imageNotify(verdict, reason) {
     if (/(?:終端機|命令提示字元|PowerShell|CMD|終端|命令列).{0,28}(?:貼上|貼入|複製後執行).{0,16}(?:指令|命令|程式碼|代碼)|(?:要求|叫|讓).{0,10}(?:在|於).{0,8}(?:終端機|終端|命令提示|PowerShell|CMD).{0,20}(?:貼上|貼入|執行).{0,12}(?:指令|命令)/i.test(r)) {
       names.push("ClickFix 終端貼指令");
     }
+    // 催促安裝／印鈔機：單獨不通知；同時有短網址或 QR 才通知（不計踢分）。
+    const urgeInstall = /催促.{0,8}安裝|快(?:去|點)?.{0,6}安裝|保證獲利.{0,20}安裝|安裝.{0,12}(?:賺錢|獲利|印鈔)|印鈔機|蝦爆/.test(r);
+    if (urgeInstall && (hasQr || hasShort)) names.push("催促安裝＋短網址或QR");
   }
   const loss = /虧損|賠|負報酬|-\d/.test(r) && !/獲利|盈利|\+\d/.test(r);
   const profitOnly = !names.length && !loss && /獲利|盈利|收益|報酬|\+[0-9]/.test(r);

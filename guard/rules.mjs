@@ -68,8 +68,8 @@ export const RULES = [
   // 提醒或詢問詐騙（「這是詐騙嗎」「不要點」「有人冒充管理員」）：扣分，避免把好心提醒的人踢掉。
   // 假紅包：紅包＋引流（加賴／私訊）或要先付錢。
   { name: "假紅包", score: 4, pattern: /(紅包|red\s*packet).{0,30}(加\s*(我\s*)?(賴|line)|私(訊|聊|我)|密我|頭像|先(付|儲值|入金)|手續費|保證金|解凍|驗證碼|授權錢包)|(加\s*(我\s*)?(賴|line)|私(訊|聊|我)|密我).{0,30}(紅包|red\s*packet)/i },
-  // 仿冒交易所網域（pi0nex、binance-gift.xyz…）。官方 pionex.com／pionexapp.com／binance.com｜info／bybit.com 本身與子網域放行（尾端比對，pionexapp 須寫在 pionex 前）。
-  { name: "仿冒交易所網域", score: 5, pattern: /(?:https?:\/\/)?(?:[a-z0-9-]+\.)*(?=[a-z0-9-]*(p[i1l]+[o0]n[e3]x|b[i1l]+n[a@4]nc[e3]|byb[i1l]+t))(?!(?:[a-z0-9-]+\.)*(?:pionexapp|pionex|binance|bybit)\.(?:com|info)(?![a-z0-9.-]))(?:[a-z0-9-]+\.)+[a-z]{2,}/i },
+  // 仿冒交易所網域（pi0nex、binance-gift.xyz、okx-xxx…）。官方 pionex.com／pionexapp.com／binance.com｜info／bybit.com／okx.com 本身與子網域放行（尾端比對，pionexapp 須寫在 pionex 前）。
+  { name: "仿冒交易所網域", score: 5, pattern: /(?:https?:\/\/)?(?:[a-z0-9-]+\.)*(?=[a-z0-9-]*(p[i1l]+[o0]n[e3]x|b[i1l]+n[a@4]nc[e3]|byb[i1l]+t|[o0]kx))(?!(?:[a-z0-9-]+\.)*(?:pionexapp|pionex|binance|bybit|okx)\.(?:com|info)(?![a-z0-9.-]))(?:[a-z0-9-]+\.)+[a-z]{2,}/i },
   { name: "提醒／詢問詐騙", score: -4, pattern: ASK_SCAM },
 ];
 

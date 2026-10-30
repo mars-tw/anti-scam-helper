@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { makeRuleScorer, SHORTENERS } from "../guard/rules.mjs";
 import { lookalikeExchange } from "../guard/redpacket.mjs";
-import { urlKind, imageNotify, notifyScore, MINER_KICKABLE } from "../guard/notify-rules.mjs";
+import { urlKind, imageNotify, notifyScore, MINER_KICKABLE, minerAction } from "../guard/notify-rules.mjs";
 import { parseVisionLabel, parseAuditImage, visionVerdict, looksLike } from "../guard/policy.mjs";
 import { kickScopeDecision, kickCategory } from "../guard/kick-scope.mjs";
 import { hasInvisibleChars, decideImpersonationKick } from "../guard/impersonation-kick.mjs";
@@ -135,8 +135,7 @@ const normalizeName = (name) =>
     .toLowerCase()
     .replace(/[\s\p{P}\p{S}\p{C}\p{M}\u115F\u1160\u3164\uFFA0]/gu, "");
 
-test("lookalike punycode 同類：pionex／binance／bybit 有效與無效 ACE 要命中規則；okx 只在 lookalike（規則尚未收）", () => {
-  // rules.mjs「仿冒交易所網域」目前收 pionex／binance／bybit（無 okx）；lookalikeExchange 另含 okx。
+test("lookalike／仿冒規則：pionex／binance／bybit／okx 有效與無效 ACE 要命中", () => {
   const ruleFakes = [
     "http://xn--pionex-k83c.com/a",
     "http://xn--pionex-cka.com/a",
@@ -144,14 +143,13 @@ test("lookalike punycode 同類：pionex／binance／bybit 有效與無效 ACE �
     "http://xn--binance-cka.com/a",
     "http://xn--bybit-k83c.com/a",
     "http://xn--bybit-cka.com/a",
+    "http://xn--okx-k83c.com/a",
+    "http://xn--okx-cka.com/a",
   ];
   for (const url of ruleFakes) {
     assert.equal(lookalikeExchange(url), true, url);
     const r = score({}, url);
     assert.ok(r.names.includes("仿冒交易所網域"), url + " → " + r.names.join(","));
-  }
-  for (const url of ["http://xn--okx-k83c.com/a", "http://xn--okx-cka.com/a"]) {
-    assert.equal(lookalikeExchange(url), true, "lookalike-" + url);
   }
   for (const url of [
     "https://www.pionex.com/",
@@ -165,21 +163,99 @@ test("lookalike punycode 同類：pionex／binance／bybit 有效與無效 ACE �
   }
 });
 
-test("新手法案例：彈窗釣魚／ClickFix 要通知；催促安裝 App 口號單獨不通知（提案範圍，不計踢分）", () => {
-  // 手法正例（提案：只通知）
+test("新手法案例：彈窗釣魚／ClickFix 要通知；催促安裝 App 口號單獨不通知（不計踢分）", () => {
   assert.ok(imageNotify("UNSURE", "螢幕彈窗要求連結帳號才能領取額度獎勵").notify);
   assert.ok(imageNotify("UNSURE", "釣魚視窗叫你綁定帳號領紅包").notify);
   assert.ok(imageNotify("UNSURE", "畫面要求於 PowerShell 貼上這段指令執行").notify);
   assert.ok(imageNotify("UNSURE", "叫你在命令提示字元貼入指令驗證").notify);
-  // 正常反例
   assert.equal(imageNotify("UNSURE", "教學：在終端機執行 node -v 看版本").notify, false);
   assert.equal(imageNotify("UNSURE", "交易所 K 線與網格機器人畫面").notify, false);
   assert.equal(imageNotify("UNSURE", "官方 App 下載頁截圖，推薦安裝").notify, false);
-  // 催促安裝／印鈔機口號：無帳號連結、無終端貼指令 → 不升級通知（避免誤傷迷因）
+  // 催促安裝／印鈔機口號單獨（無短網址／QR）→ 不通知
   assert.equal(imageNotify("UNSURE", "蝦爆印鈔機…催促安裝，保證獲利").notify, false);
   assert.equal(imageNotify("UNSURE", "快去安裝這個賺錢 App").notify, false);
   assert.ok(!MINER_KICKABLE.has("釣魚彈窗連結帳號領額度"));
   assert.ok(!MINER_KICKABLE.has("ClickFix 終端貼指令"));
+});
+
+test("okx：官方與子網域放行；假尾碼／連字／錯 TLD／punycode／0kx 命中仿冒交易所", () => {
+  const official = [
+    "https://okx.com/",
+    "https://www.okx.com/join/ABC",
+    "https://www.okx.com/zh-hant/trade-spot/btc-usdt",
+    "https://app.okx.com/join/x",
+    "https://www.okx.com",
+  ];
+  for (const url of official) {
+    assert.equal(lookalikeExchange(url), false, url);
+    assert.equal(score({}, url).names.includes("仿冒交易所網域"), false, url);
+  }
+  const fakes = [
+    "https://okx.com.evil/",
+    "https://okx.com.evil.xyz/x",
+    "https://okx-xxx.com/",
+    "https://okx-gift.com/red",
+    "https://okx.co/join",
+    "https://fakeokx.com/",
+    "https://0kx.com/a",
+    "https://www.0kx.com/a",
+    "http://xn--okx-k83c.com/a",
+    "http://xn--okx-cka.com/a",
+  ];
+  for (const url of fakes) {
+    assert.equal(lookalikeExchange(url), true, "lookalike-" + url);
+    const r = score({}, url);
+    assert.ok(r.names.includes("仿冒交易所網域"), url + " → " + r.names.join(","));
+    assert.ok(r.score >= 5, url);
+  }
+  assert.ok(!MINER_KICKABLE.has("仿冒交易所網域"));
+  // 三種群：仿冒 okx 只通知不踢
+  const fakeText = "領空投 https://okx-gift.com/box";
+  const fakeNames = score({}, fakeText).names;
+  assert.ok(fakeNames.includes("仿冒交易所網域"));
+  assert.equal(minerAction({ perChatKick: true, reasons: fakeNames, verdict: "SCAM", model: "claude", review: "SCAM" }), "notice");
+  assert.equal(minerAction({ perChatKick: false, reasons: fakeNames, verdict: "SCAM", model: "claude", review: "SCAM" }), "notice");
+  for (const chatId of ["cKick", "cOther", "cWarn1", "cWarn2", "cWarn3"]) {
+    assert.equal(
+      kickScopeDecision({ chatId, scope, text: fakeText, names: fakeNames, verdict: "SCAM", review: "SCAM" }).kick,
+      false,
+      chatId,
+    );
+  }
+});
+
+test("催促安裝圖：同時帶短網址或 QR 才通知；單獨不通知；三種群只通知不踢", () => {
+  const withShort = imageNotify("UNSURE", "蝦爆印鈔機催促安裝，畫面有短網址 reurl.cc/AbCd");
+  assert.ok(withShort.notify);
+  assert.ok(withShort.names.includes("催促安裝＋短網址或QR"));
+  const withQr = imageNotify("UNSURE", "快去安裝這個賺錢 App，附 QR code");
+  assert.ok(withQr.notify);
+  assert.ok(withQr.names.includes("催促安裝＋短網址或QR"));
+  const withBitly = imageNotify("UNSURE", "印鈔機保證獲利催促安裝，浮水印 bit.ly/xx");
+  assert.ok(withBitly.notify);
+  // 單獨／無短網址無 QR
+  assert.equal(imageNotify("UNSURE", "蝦爆印鈔機催促安裝保證獲利，無QR無短網址").notify, false);
+  assert.equal(imageNotify("UNSURE", "快去安裝這個 App，畫面無連結").notify, false);
+  // 有一般官網網址但無短網址／QR、且口號不算「短網址」→ 不因本規則通知（避免誤傷官方下載頁）
+  assert.equal(imageNotify("UNSURE", "催促安裝官方 Pionex App，頁面 pionex.com，無QR無短網址").notify, false);
+  assert.ok(!MINER_KICKABLE.has("催促安裝＋短網址或QR"));
+  // 三種群：此通知名不在踢人類別 → 踢人／非踢人／Hao0321 只警告皆不踢
+  const names = ["催促安裝＋短網址或QR"];
+  assert.equal(minerAction({ perChatKick: true, reasons: names, verdict: "UNSURE", model: "local-vlm", review: "UNSURE" }), "notice");
+  for (const chatId of ["cKick", "cOther", "cWarn1", "cWarn2", "cWarn3", "cBear", "cLearn"]) {
+    assert.equal(
+      kickScopeDecision({
+        chatId,
+        scope,
+        text: "（圖片）",
+        names,
+        verdict: "UNSURE",
+        review: "UNSURE",
+      }).kick,
+      false,
+      chatId,
+    );
+  }
 });
 
 test("暱稱加隱形字元冒名 Hao0321：可識別；Hao0321 只警告群不踢；無隱形字元不升級", () => {
