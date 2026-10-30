@@ -44,8 +44,11 @@ test("規則：假紅包引流、仿冒交易所網域會加分；官方紅包�
   assert.ok(score({}, "https://bybit.com.evil.io/redpacket").names.includes("仿冒交易所網域"));
   assert.ok(!score({}, "https://www.pionex.com/zh-TW/red-packet/abc").names.includes("仿冒交易所網域"));
   assert.ok(!score({}, "https://academy.binance.com/zh-TC/articles/x").names.includes("仿冒交易所網域"));
+  assert.ok(!score({}, "https://share.pionexapp.com/s/abc").names.includes("仿冒交易所網域"));
   assert.equal(lookalikeExchange("https://binance-gift.xyz/a"), true);
   assert.equal(lookalikeExchange("https://www.binance.com/a"), false);
+  assert.equal(lookalikeExchange("https://share.pionexapp.com/s/abc"), false);
+  assert.equal(lookalikeExchange("https://pionexapp.com.evil.xyz/a"), true);
 });
 
 test("記事本連結白名單：只認完全相同的連結（短網址代碼分大小寫）、沒有引流字眼", async () => {

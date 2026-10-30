@@ -54,7 +54,7 @@ export function isRedPacketOnly(text, { extra = [] } = {}) {
 
 /** 網域看起來像交易所，卻不是官方網域（pi0nex、binance-gift.xyz 這類）。 */
 const BRAND = /(p[i1l]+[o0]n[e3]x|b[i1l]+n[a@4]nc[e3]|[o0]kx|byb[i1l]+t)/i;
-const OFFICIAL = ["pionex.com", "binance.com", "binance.info", "okx.com", "bybit.com"];
+const OFFICIAL = ["pionex.com", "pionexapp.com", "binance.com", "binance.info", "okx.com", "bybit.com"];
 export function lookalikeExchange(text) {
   for (const url of String(text ?? "").match(URL_RE) ?? []) {
     let host;

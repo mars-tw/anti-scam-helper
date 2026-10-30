@@ -411,7 +411,7 @@ export function fakeNoticeModelsOk({ forced, names = [], link, verdict, review }
 // ── 主流影音／社群網址：本身不能當詐騙依據 ─────────────────────────────
 export const MAINSTREAM_MEDIA_DOMAINS = ["youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com", "vimeo.com", "bilibili.com", "b23.tv", "twitch.tv", "tiktok.com", "instagram.com", "facebook.com", "fb.watch", "threads.net", "threads.com", "x.com", "twitter.com", "reddit.com", "podcasts.apple.com", "open.spotify.com",
   // 主流交易所與看盤工具：網址本身不是詐騙依據（邀請碼、帶單、私訊等仍由規則計分）。
-  "tradingview.com", "pionex.com", "binance.com", "okx.com", "bybit.com", "bitget.com", "coinmarketcap.com", "coingecko.com", "max.maicoin.com", "bitopro.com", "investing.com", "cnyes.com"];
+  "tradingview.com", "pionex.com", "pionexapp.com", "binance.com", "okx.com", "bybit.com", "bitget.com", "coinmarketcap.com", "coingecko.com", "max.maicoin.com", "bitopro.com", "investing.com", "cnyes.com"];
 // 加上平台官方短網址與主流內容網站（新聞、論壇、電商、交易所）。帶路徑的項目（goo.gl/maps）只比主機。
 const ALL_MEDIA = [...new Set([...MAINSTREAM_MEDIA_DOMAINS, ...MAINSTREAM_CONTENT_DOMAINS, ...PLATFORM_SHORTENERS.filter((d) => !d.includes("/"))])];
 const MEDIA_HOST = (host) => ALL_MEDIA.some((d) => host === d || host.endsWith(`.${d}`));
