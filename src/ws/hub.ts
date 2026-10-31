@@ -12,10 +12,11 @@ import type { Channel, ChannelKind, Message, Reactions, ReadPosition } from "../
 import type { UpdateInfo } from "../update/checker.js";
 import { withMyReaction, type ChatStore } from "../model/store.js";
 import { PROTOCOL_VERSION, type ClientFrame, type ListenState, type ServerFrame } from "./protocol.js";
-import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseRemove, parseSend, requestIdOf } from "./requests.js";
+import { parseChatRead, parseHistory, parseMessageRequest, parseReact, parseRemove, parseSend, parseThreadFetch, requestIdOf } from "./requests.js";
 
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const HISTORY_PER_SECOND = 10;
+const INVITE_LOOKUPS_PER_MINUTE = 6;
 const NEW_CHANNEL_REFRESH_MS = 1000;
 const MAX_BOT_CONNECTIONS = 4;
 const READ_RANGE_FRESH_MS = 10_000;
@@ -23,9 +24,12 @@ const READ_RANGE_FRESH_MS = 10_000;
 const SCAM_CHECKS_PER_MINUTE = 10;
 // All bots together: removing people is the riskiest thing an account can automate, keep LINE's view of it calm.
 const REMOVALS_PER_MINUTE = 10;
+/** All bots together: OpenChat message deletions (moderation) per minute. */
+const DELETIONS_PER_MINUTE = 20;
 // Pictures for moderation bots (QR checks): bounded so a bot cannot turn this server into a bulk downloader.
 const BOT_MEDIA_PER_MINUTE = 30;
 const BOT_MEDIA_MAX_BYTES = 5 * 1024 * 1024;
+const BOT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 // A connection that has not answered a ping by the next round is gone (a sleeping laptop, a dropped
 // network): it is closed so broadcasts stop piling up behind it and the page can reconnect.
 const HEARTBEAT_MS = 30_000;
@@ -60,6 +64,8 @@ export interface Hub {
   handleChecked(chatId: string): void;
   /** A message's reactions changed on LINE (undefined: nobody reacts now). */
   handleReactions(chatId: string, messageId: string, reactions: Reactions | undefined): void;
+  /** An OpenChat's notes changed: bots that may see one of its chats are told (they list notes themselves). */
+  handleNoteStatus(chatIds: string[], noteCount: number | undefined, latestCreatedAt: number | undefined): void;
   /** Names, pictures or members changed somewhere: the list is fetched again (settled and rate limited). */
   handleChatsChanged(): void;
   /** Announces (or clears) the newest known release to everyone connected and to later connections. */
@@ -90,6 +96,15 @@ const GENERIC = {
   MODERATION_UNAVAILABLE: "未啟用成員移除。",
   REMOVE_FAILED: "無法移除這位成員，請確認帳號有管理權限。",
   MEDIA_FAILED: "無法取得這張圖片。",
+  DELETE_UNSUPPORTED: "只有社群可以刪除他人訊息。",
+  MESSAGE_DELETE_FAILED: "無法刪除這則訊息，請確認帳號有管理權限。",
+  NOTES_UNSUPPORTED: "這個聊天沒有記事本可讀。",
+  NOTES_FAILED: "無法讀取記事本。",
+  INVITE_UNSUPPORTED: "這個聊天室不支援讀取邀請連結。",
+  INVITE_OWN_FAILED: "無法讀取本群邀請連結。",
+  INVITE_LOOKUP_FAILED: "無法查詢邀請碼所屬社群。",
+  THREADS_UNSUPPORTED: "這個聊天室沒有討論串。",
+  THREAD_FAILED: "無法讀取討論串。",
 } as const;
 
 function updateFrame(info: UpdateInfo): ServerFrame {
@@ -104,7 +119,10 @@ export function createHub(options: HubOptions): Hub {
   const botSendLimiter = new SlidingWindowLimiter(config.api.sendsPerMinute, 60_000);
   // Shared by every bot connection: several connections must not multiply the paid TypeSafe calls.
   const botScamLimiter = new SlidingWindowLimiter(SCAM_CHECKS_PER_MINUTE, 60_000);
+  // Ticket lookups hit LINE once per unseen QR; keep them few across all bots.
+  const botInviteLimiter = new SlidingWindowLimiter(INVITE_LOOKUPS_PER_MINUTE, 60_000);
   const botRemoveLimiter = new SlidingWindowLimiter(REMOVALS_PER_MINUTE, 60_000);
+  const botDeleteLimiter = new SlidingWindowLimiter(DELETIONS_PER_MINUTE, 60_000);
   const botMediaLimiter = new SlidingWindowLimiter(BOT_MEDIA_PER_MINUTE, 60_000);
   // "chat member" pairs already removed for this account: a second scam message from them must not ask LINE again.
   const removedMembers = new Set<string>();
@@ -465,9 +483,125 @@ export function createHub(options: HubOptions): Hub {
   }
 
   /**
+   * Deletes, for everyone, one message this server has shown in an OpenChat the bot may reach (this account must be a
+   * manager there). The sender stays. Never this account's own messages or an OpenChat manager's.
+   */
+  async function handleBotDelete(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseMessageRequest(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, messageId } = parsed.value;
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square") return fail(socket, "DELETE_UNSUPPORTED", requestId);
+    const message = store.get(messageId, chatId);
+    const mine = message !== undefined && (message.senderId === provider.getProfile().userId || message.senderId === ownSquareSenders.get(chatId));
+    if (!message || mine || message.contentType === "CHATEVENT" || message.senderRole !== undefined) return fail(socket, "INVALID_REQUEST", requestId);
+    if (message.unsent) return send(socket, { type: "message:deleted", requestId, chatId, messageId });
+    if (!botDeleteLimiter.allow()) return fail(socket, "RATE_LIMITED", requestId);
+    const account = generation;
+    try {
+      await provider.deleteMessage({ channelId: chatId, kind: channel.kind }, messageId);
+      if (account !== generation) return;
+      takeBack(chatId, messageId);
+      console.info(`MESSAGE_DELETED chat=${chatId} message=${messageId}`);
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("MESSAGE_DELETE_FAILED", error);
+      return fail(socket, "MESSAGE_DELETE_FAILED", requestId);
+    }
+    if (login.state === "ready") send(socket, { type: "message:deleted", requestId, chatId, messageId });
+  }
+
+  /** Read-only: an OpenChat's own invitation links (existing ones only), for telling its own QR codes from others'. */
+  async function handleOwnInvite(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const requestId = requestIdOf(frame);
+    const chatId = typeof frame.chatId === "string" ? frame.chatId : undefined;
+    if (!requestId || !chatId) return fail(socket, "INVALID_REQUEST", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square" || typeof provider.ownInvite !== "function") return fail(socket, "INVITE_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const { squareMid, links } = await provider.ownInvite(chatId);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "invite:own", requestId, chatId, squareMid, links });
+    } catch (error) {
+      if (account !== generation) return;
+      const code = String((error as Error)?.message ?? "").replace(/[^\w-]/g, "").slice(0, 40) || "UNKNOWN";
+      console.warn(`INVITE_OWN_FAILED chat=${chatId} code=${code}`);
+      return fail(socket, "INVITE_OWN_FAILED", requestId);
+    }
+  }
+
+  /** Read-only: which OpenChat a ticket belongs to. Never joins; the caller must name a chat it may reach. */
+  async function handleInviteLookup(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const requestId = requestIdOf(frame);
+    const chatId = typeof frame.chatId === "string" ? frame.chatId : undefined;
+    const ticket = typeof frame.ticket === "string" ? frame.ticket : undefined;
+    if (!requestId || !chatId || !ticket || !/^[\w-]{4,100}$/.test(ticket)) return fail(socket, "INVALID_REQUEST", requestId);
+    if (login.state !== "ready" || !store.channelOf(chatId) || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (typeof provider.lookupInvite !== "function") return fail(socket, "INVITE_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const found = await provider.lookupInvite(ticket);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "invite:lookup", requestId, chatId, found: found !== undefined, ...(found ? { squareMid: found.squareMid } : {}) });
+    } catch (error) {
+      if (account !== generation) return;
+      const code = String((error as Error)?.message ?? "").replace(/[^\w-]/g, "").slice(0, 40) || "UNKNOWN";
+      console.warn(`INVITE_LOOKUP_FAILED code=${code}`);
+      return fail(socket, "INVITE_LOOKUP_FAILED", requestId);
+    }
+  }
+
+  /** Read-only: an OpenChat's recent notes (記事本) for a moderation bot, in a chat the bot may reach. */
+  async function handleNotes(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const requestId = requestIdOf(frame);
+    const chatId = typeof frame.chatId === "string" ? frame.chatId : undefined;
+    if (!requestId || !chatId) return fail(socket, "INVALID_REQUEST", requestId);
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square" || typeof provider.listNotes !== "function") return fail(socket, "NOTES_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const limit = Number.isInteger(frame.limit) && (frame.limit as number) > 0 ? Math.min(frame.limit as number, 50) : 20;
+      const notes = await provider.listNotes(chatId, limit);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "notes", requestId, chatId, notes });
+    } catch (error) {
+      if (account !== generation) return;
+      const code = String((error as Error)?.message ?? "").replace(/[^\w-]/g, "").slice(0, 40) || "UNKNOWN";
+      console.warn(`NOTES_FAILED chat=${chatId} code=${code}`);
+      return fail(socket, "NOTES_FAILED", requestId);
+    }
+  }
+
+  /**
    * Hands a moderation bot the picture of an image message this server has shown (PNG, JPEG or GIF by
    * content, at most 5 MB), so it can look for scam QR codes. Nothing else: no videos, files or stickers.
    */
+  /** Read-only: one OpenChat thread's messages for a bot (in its scope). Never joins or marks read. */
+  async function handleBotThread(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseThreadFetch(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, threadId, limit } = parsed.value;
+    const channel = store.channelOf(chatId);
+    if (login.state !== "ready" || !channel || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    if (channel.kind !== "square" || !provider.fetchSquareThread) return fail(socket, "THREADS_UNSUPPORTED", requestId);
+    const account = generation;
+    try {
+      const messages = await provider.fetchSquareThread(chatId, threadId, limit);
+      if (account !== generation || login.state !== "ready") return;
+      send(socket, { type: "thread", requestId, chatId, threadId, messages });
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("THREAD_FAILED", error);
+      fail(socket, "THREAD_FAILED", requestId);
+    }
+  }
+
   async function handleBotMedia(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
     const parsed = parseMessageRequest(frame);
     if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
@@ -484,6 +618,34 @@ export function createHub(options: HubOptions): Hub {
       const mime = picture ? sniffImage(picture.bytes) : undefined;
       if (!picture || !mime || picture.bytes.length > BOT_MEDIA_MAX_BYTES) return fail(socket, "MEDIA_FAILED", requestId);
       send(socket, { type: "media", requestId, chatId, messageId, mime, data: picture.bytes.toString("base64") });
+    } catch (error) {
+      if (account !== generation) return;
+      logFailure("MEDIA_FAILED", error);
+      fail(socket, "MEDIA_FAILED", requestId);
+    }
+  }
+
+  /**
+   * Bot-only: the bytes of a received FILE message (e.g. a PDF), so the guard can look for group links / QR codes inside.
+   * Same scope, moderation switch and rate limit as media:fetch; capped at BOT_FILE_MAX_BYTES. The hub keeps nothing extra.
+   */
+  async function handleBotFile(socket: WebSocket, frame: Record<string, unknown>, scope: ReadonlySet<string>): Promise<void> {
+    const parsed = parseMessageRequest(frame);
+    if (!parsed.ok) return fail(socket, "INVALID_REQUEST", parsed.requestId);
+    const { requestId, chatId, messageId } = parsed.value;
+    if (!config.api.moderation) return fail(socket, "MODERATION_UNAVAILABLE", requestId);
+    if (login.state !== "ready" || !store.channelOf(chatId) || !scope.has(chatId)) return fail(socket, "UNKNOWN_CHAT", requestId);
+    const message = store.get(messageId, chatId);
+    const card = message?.card;
+    if (!message || message.unsent || card?.kind !== "file" || card.fileId !== `file-${messageId}`) return fail(socket, "INVALID_REQUEST", requestId);
+    if (typeof card.size === "number" && card.size > BOT_FILE_MAX_BYTES) return fail(socket, "MEDIA_FAILED", requestId);
+    if (!botMediaLimiter.allow()) return fail(socket, "RATE_LIMITED", requestId);
+    const account = generation;
+    try {
+      const file = await media.get(card.fileId);
+      if (account !== generation || login.state !== "ready") return;
+      if (!file || file.bytes.length > BOT_FILE_MAX_BYTES) return fail(socket, "MEDIA_FAILED", requestId);
+      send(socket, { type: "file", requestId, chatId, messageId, name: card.name, data: file.bytes.toString("base64") });
     } catch (error) {
       if (account !== generation) return;
       logFailure("MEDIA_FAILED", error);
@@ -706,6 +868,28 @@ export function createHub(options: HubOptions): Hub {
         case "media:fetch":
           void handleBotMedia(socket, frame as Record<string, unknown>, botScope);
           return;
+        case "file:fetch":
+          void handleBotFile(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "thread:fetch":
+          if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleBotThread(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "message:delete":
+          void handleBotDelete(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "notes:list":
+          if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleNotes(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "invite:own":
+          if (!historyLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleOwnInvite(socket, frame as Record<string, unknown>, botScope);
+          return;
+        case "invite:lookup":
+          if (!botInviteLimiter.allow()) fail(socket, "RATE_LIMITED", requestIdOf(frame as Record<string, unknown>));
+          else void handleInviteLookup(socket, frame as Record<string, unknown>, botScope);
+          return;
         default:
           fail(socket, "UNKNOWN_TYPE");
       }
@@ -811,6 +995,11 @@ export function createHub(options: HubOptions): Hub {
     },
     handleMessage: ingest,
     handleUnsend: takeBack,
+    handleNoteStatus(chatIds, noteCount, latestCreatedAt) {
+      if (login.state !== "ready") return;
+      const visible = chatIds.filter((chatId) => botScope.has(chatId));
+      if (visible.length) broadcastBots({ type: "note:status", chatIds: visible, ...(noteCount !== undefined ? { noteCount } : {}), ...(latestCreatedAt !== undefined ? { latestCreatedAt } : {}) });
+    },
     handleReactions(chatId, messageId, reactions) {
       if (login.state === "ready") updateReactions(chatId, messageId, reactions);
     },

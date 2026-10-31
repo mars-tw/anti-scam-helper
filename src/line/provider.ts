@@ -1,9 +1,10 @@
+import { threadMessagesFromEvents, type ThreadEvent, type ThreadEventRaw } from "./threads.js";
 import { Client } from "@evex/linejs";
 import { BaseClient, type Device, type FetchLike } from "@evex/linejs/base";
 import { LINEStruct } from "@evex/linejs/thrift";
 import type { Message as LineMessage, SquareMessage as LineSquareMessage } from "@evex/linejs-types";
 import { avatarMediaId, mp4DurationMs, sniffImage, sniffMedia, type AvatarHost, type MediaBytes } from "../media/service.js";
-import type { Channel, ChannelRef, HistoryPage, MemberRole, Mention, Message, Profile, ReactionKind, Reactions, ReadPosition, StickerPackage } from "../model/dto.js";
+import type { Note, Channel, ChannelRef, HistoryPage, MemberRole, Mention, Message, Profile, ReactionKind, Reactions, ReadPosition, StickerPackage } from "../model/dto.js";
 import { withMyReaction } from "../model/store.js";
 import { memberRole, mentionMetadata, parseMentions, replyTarget } from "./members.js";
 import { parseEmojis } from "./emoji.js";
@@ -13,6 +14,7 @@ import { chatEventMids, chatEventText, isChatEvent } from "./chatEvent.js";
 import { contentTypeName, messageCard } from "./cards.js";
 import { isEmptySquareStatus, squareReactions, talkReactions } from "./reactions.js";
 import { SessionStorage } from "./session.js";
+import { LivenessMonitor, type LivenessOptions, type StaleReason } from "./liveness.js";
 
 export interface QRCallbacks {
   onQRUrl: (url: string) => void;
@@ -33,8 +35,15 @@ export interface ProviderEvents {
    * Talk chats have no parsed live event: their reactions come with the message and with history.
    */
   onReactions: (chatId: string, messageId: string, reactions: Reactions | undefined) => void;
+  /** An OpenChat's note count changed (NOTIFIED_UPDATE_SQUARE_NOTE_STATUS); `chatIds` are its chats this account is in. */
+  onNoteStatus?: (chatIds: string[], noteCount: number | undefined, latestCreatedAt: number | undefined) => void;
   onStatus: (state: "listening" | "reconnecting") => void;
   onError: (code: "SESSION_WRITE_FAILED" | "LINE_LISTEN_FAILED" | "MESSAGE_PARSE_FAILED") => void;
+  /**
+   * The LINE connection is dead although nothing errored (typically after the host was suspended).
+   * The provider does not recover by itself: the owner restarts the process (see main.ts).
+   */
+  onStale?: (reason: StaleReason, detail: { silentMs: number; jumpMs?: number }) => void;
 }
 
 export interface LogoutResult {
@@ -82,6 +91,14 @@ export interface LineProvider {
   removeMember(channel: ChannelRef, memberId: string): Promise<void>;
   /** Deletes someone else's message for everyone; OpenChat only (as a manager). */
   deleteMessage(channel: ChannelRef, messageId: string): Promise<void>;
+  /** Recent OpenChat notes (記事本), read-only, newest first. Optional: providers without notes leave it out. */
+  listNotes?(chatId: string, limit?: number): Promise<Note[]>;
+  /** Read-only: this OpenChat's own invitation links (community + chat) and its square mid. Never creates or resets a link. */
+  ownInvite?(chatId: string): Promise<{ squareMid: string; links: string[] }>;
+  /** Read-only: which OpenChat an invitation ticket belongs to (does not join). Undefined when LINE does not know it. */
+  lookupInvite?(ticket: string): Promise<{ squareMid: string } | undefined>;
+  /** Read-only: messages of one OpenChat thread (討論串), oldest first. Never joins the thread. */
+  fetchSquareThread?(chatId: string, threadId: string, limit: number): Promise<Message[]>;
   close(): Promise<void>;
 }
 
@@ -168,6 +185,7 @@ export class EvexLineProvider implements LineProvider {
   // messages seen here, so the browser cannot use this session to probe arbitrary LINE objects.
   private mediaOrigins = new Map<string, { raw: LineMessage; square: boolean }>();
   private previewDecrypts = new Map<string, { raw: LineMessage; undecryptable: boolean }>();
+  private liveness?: LivenessMonitor;
 
   constructor(
     private readonly storage: SessionStorage,
@@ -175,6 +193,7 @@ export class EvexLineProvider implements LineProvider {
     private readonly events: ProviderEvents,
     private readonly fetch?: FetchLike,
     private readonly downloadMaxBytes = DEFAULT_DOWNLOAD_BYTES,
+    private readonly livenessOptions: Omit<LivenessOptions, "onStale"> = {},
   ) {}
 
   private createBase(): BaseClient {
@@ -189,6 +208,14 @@ export class EvexLineProvider implements LineProvider {
       });
     });
     base.on("log", ({ type }) => {
+      // Any inbound bytes on the PUSH stream (LINE pings it every ~30 s) prove the connection is alive.
+      if (typeof type === "string" && type.startsWith("[LEGY/PUSH] readByte")) {
+        if (this.base === base && this.liveness) {
+          this.liveness.touch();
+          if (this.liveness.activityCount === 1) console.info("LINE_PUSH_ALIVE（PUSH 連線有心跳）");
+        }
+        return;
+      }
       // Never forward upstream log data: it can contain authentication material.
       if (type !== "LegyPusherError" && type !== "LegyPusherError_cannot_init") return;
       setImmediate(() => {
@@ -294,6 +321,12 @@ export class EvexLineProvider implements LineProvider {
         if (typeof destroyed?.squareChatMid === "string" && typeof destroyed.messageId === "string" && /^\d{1,24}$/.test(destroyed.messageId)) {
           this.unsent(destroyed.squareChatMid, destroyed.messageId);
         }
+      } else if (type === "NOTIFIED_UPDATE_SQUARE_NOTE_STATUS" || type === "36") {
+        const update = event.payload?.notifiedUpdateSquareNoteStatus;
+        if (typeof update?.squareMid !== "string") return;
+        const count = Number(update.noteStatus?.noteCount);
+        const latest = Number(update.noteStatus?.latestCreatedAt);
+        this.events.onNoteStatus?.(this.chatsOfSquare(update.squareMid), Number.isFinite(count) ? count : undefined, Number.isFinite(latest) && latest > 0 ? latest : undefined);
       } else if (type === "NOTIFIED_UPDATE_MESSAGE_STATUS" || type === "46") {
         const update = event.payload?.notifiedUpdateMessageStatus;
         const status = update?.messageStatus?.contents?.messageReactionStatus;
@@ -306,7 +339,113 @@ export class EvexLineProvider implements LineProvider {
         }
       }
     });
+    this.startLiveness();
     this.listen();
+  }
+
+  private startLiveness(): void {
+    if (!this.events.onStale) return;
+    this.liveness?.stop();
+    this.liveness = new LivenessMonitor({
+      ...this.livenessOptions,
+      onStale: (reason, detail) => { if (!this.stopped) this.events.onStale?.(reason, detail); },
+    });
+    this.liveness.start();
+  }
+
+  /** OpenChat chat → its OpenChat (square) mid, learned from the chat list. */
+  private readonly squareOfChat = new Map<string, string>();
+
+  private chatsOfSquare(squareMid: string): string[] {
+    return [...this.squareOfChat].filter(([, square]) => square === squareMid).map(([chat]) => chat);
+  }
+
+  private readonly ownInviteCache = new Map<string, { at: number; value: { squareMid: string; links: string[] } }>();
+  private readonly inviteLookupCache = new Map<string, { at: number; value: { squareMid: string } | undefined }>();
+
+  /**
+   * Read-only: the invitation links LINE already shows for this OpenChat (getSquareChat + getSquare), cached 30 minutes.
+   * Only reads existing fields; never calls anything that issues, reissues or resets a ticket.
+   */
+  async ownInvite(chatId: string): Promise<{ squareMid: string; links: string[] }> {
+    const cached = this.ownInviteCache.get(chatId);
+    if (cached && Date.now() - cached.at < 30 * 60_000) return cached.value;
+    const client = this.client;
+    if (!client) throw new Error("NOT_READY");
+    const chat = await client.base.square.getSquareChat({ squareChatMid: chatId }) as { squareChat?: { squareMid?: unknown; invitationUrl?: unknown } } | undefined;
+    const squareMid = chat?.squareChat?.squareMid;
+    if (typeof squareMid !== "string") throw new Error("NO_SQUARE");
+    this.squareOfChat.set(chatId, squareMid);
+    const links: string[] = [];
+    if (typeof chat?.squareChat?.invitationUrl === "string" && chat.squareChat.invitationUrl) links.push(chat.squareChat.invitationUrl.slice(0, 300));
+    const square = await client.base.square.getSquare({ squareMid }) as { square?: { invitationURL?: unknown } } | undefined;
+    if (typeof square?.square?.invitationURL === "string" && square.square.invitationURL) links.push(square.square.invitationURL.slice(0, 300));
+    const value = { squareMid, links: [...new Set(links)] };
+    this.ownInviteCache.set(chatId, { at: Date.now(), value });
+    return value;
+  }
+
+  /** Read-only: the OpenChat an invitation ticket points to (findSquareByInvitationTicketV2; does not join). Cached 6 hours. */
+  async lookupInvite(ticket: string): Promise<{ squareMid: string } | undefined> {
+    if (!/^[\w-]{4,100}$/.test(ticket)) throw new Error("BAD_TICKET");
+    const cached = this.inviteLookupCache.get(ticket);
+    if (cached && Date.now() - cached.at < 6 * 3_600_000) return cached.value;
+    const client = this.client;
+    if (!client) throw new Error("NOT_READY");
+    let value: { squareMid: string } | undefined;
+    try {
+      const reply = await client.base.square.findSquareByInvitationTicketV2({ request: { invitationTicket: ticket } }) as { square?: { mid?: unknown } } | undefined;
+      value = typeof reply?.square?.mid === "string" ? { squareMid: reply.square.mid } : undefined;
+    } catch (error) {
+      // LINE answers an unknown or expired ticket with an error: remember "unknown" too, so a flood of one QR costs one call.
+      const code = String((error as { code?: unknown; message?: unknown })?.code ?? (error as Error)?.message ?? "");
+      if (!/NOT_FOUND|not.?found|INVALID|5\b/i.test(code)) throw error;
+      value = undefined;
+    }
+    if (this.inviteLookupCache.size >= 500) this.inviteLookupCache.delete(this.inviteLookupCache.keys().next().value as string);
+    this.inviteLookupCache.set(ticket, { at: Date.now(), value });
+    return value;
+  }
+
+  /**
+   * Recent notes (記事本) of the OpenChat a chat belongs to, read-only, newest first. LINE serves OpenChat notes
+   * from the note gateway (`/sn`, homeId = the square mid); the reply shape is not a documented contract, so every
+   * field is read defensively and anything unparsable is dropped. Throws with LINE's code when the call fails.
+   */
+  async listNotes(chatId: string, limit = 20): Promise<Note[]> {
+    const client = this.client;
+    if (!client) throw new Error("NOT_READY");
+    let squareMid = this.squareOfChat.get(chatId);
+    if (!squareMid) {
+      const chat = await client.base.square.getSquareChat({ squareChatMid: chatId });
+      const mid = (chat as { squareChat?: { squareMid?: unknown } } | undefined)?.squareChat?.squareMid;
+      if (typeof mid !== "string") throw new Error("NO_SQUARE");
+      squareMid = mid;
+      this.squareOfChat.set(chatId, mid);
+    }
+    const reply = await client.base.timeline.listPost({ homeId: squareMid, sourceType: "TALKROOM" }) as { code?: unknown; message?: unknown; result?: { feeds?: unknown[] } };
+    if (reply?.code !== 0) throw new Error(`NOTES_${String(reply?.code ?? "NO_CODE").slice(0, 20)}`);
+    const notes: Note[] = [];
+    for (const feed of reply.result?.feeds ?? []) {
+      const post = (feed as { post?: Record<string, any> } | undefined)?.post;
+      const info = post?.postInfo ?? {};
+      const postId = typeof info.postId === "string" ? info.postId : undefined;
+      const text = typeof post?.contents?.text === "string" ? post.contents.text : "";
+      const createdAt = Number(info.createdTime);
+      if (!postId || !Number.isFinite(createdAt)) continue;
+      const updatedAt = Number(info.updatedTime);
+      const writer = post?.userInfo ?? {};
+      notes.push({
+        postId: postId.slice(0, 64),
+        ...(typeof writer.writerMid === "string" ? { authorId: writer.writerMid } : {}),
+        ...(typeof writer.nickname === "string" ? { authorName: writer.nickname.slice(0, 100) } : {}),
+        text: text.slice(0, 4000),
+        createdAt,
+        ...(Number.isFinite(updatedAt) ? { updatedAt } : {}),
+      });
+      if (notes.length >= limit) break;
+    }
+    return notes.sort((a, b) => b.createdAt - a.createdAt);
   }
 
   /** The message's media is no longer fetchable through us, and the hub replaces what it shows. */
@@ -345,12 +484,40 @@ export class EvexLineProvider implements LineProvider {
     const message = raw.message;
     // History events carry the sender's display name; live events only carry a member mid.
     if (senderName) this.rememberName(message.from, senderName);
-    return this.toMessage({
+    return this.withThread(this.toMessage({
       id: message.id, channelId: message.to, channelKind: "square", senderId: message.from, text: message.text, contentType: String(message.contentType),
       createdTime: message.createdTime, encrypted: (message.chunks?.length ?? 0) > 0, metadata: message.contentMetadata,
       mediaId: preview ? undefined : this.rememberMedia(message, true), replyTo: replyTarget(message.messageRelationType, message.relatedMessageId), location: message.location,
       reactions: squareReactions(reactionStatus),
-    });
+    }), raw);
+  }
+
+  private withThread(message: Message, raw: LineSquareMessage): Message {
+    const info = (raw as { threadInfo?: { chatThreadMid?: string; threadRoot?: boolean } }).threadInfo;
+    if (info?.chatThreadMid) { message.threadId = info.chatThreadMid; if (info.threadRoot) message.threadRoot = true; }
+    return message;
+  }
+
+  async fetchSquareThread(chatId: string, threadId: string, limit: number): Promise<Message[]> {
+    const client = this.requireClient();
+    const found: Array<{ raw: LineSquareMessage; name?: string }> = [];
+    let token: { syncToken?: string; continuationToken?: string } = {};
+    for (let page = 0; page < 3 && found.length < limit; page += 1) {
+      const response = await client.base.square.fetchSquareChatEvents({
+        squareChatMid: chatId, threadMid: threadId, limit: Math.min(100, limit), ...token,
+      } as Parameters<Client["base"]["square"]["fetchSquareChatEvents"]>[0]);
+      if (this.client !== client) throw new Error("HISTORY_INVALIDATED");
+      found.push(...threadMessagesFromEvents<LineSquareMessage & ThreadEventRaw>(response.events as unknown as ThreadEvent[], chatId));
+      if (response.events.length === 0 || !response.continuationToken) break;
+      token = { syncToken: response.syncToken, continuationToken: response.continuationToken };
+    }
+    const byId = new Map<string, Message>();
+    for (const { raw, name } of found) {
+      const message = this.squareToMessage(raw, name, true);
+      if (!message.threadId) message.threadId = threadId;
+      byId.set(message.messageId, message);
+    }
+    return [...byId.values()].sort((a, b) => this.compareSquareMessages(a, b)).slice(-limit);
   }
 
   /** Fail closed: an E2EE message that cannot be decrypted stays a "cannot decrypt" placeholder, never a guess. */
@@ -1064,6 +1231,7 @@ export class EvexLineProvider implements LineProvider {
       if (squares.status === "fulfilled") for (const square of squares.value) squareNames[square.mid] = square.name;
       for (const chat of squareChats.value) {
         const squareName = squareNames[chat.raw.squareMid];
+        if (typeof chat.raw.squareMid === "string") this.squareOfChat.set(chat.raw.squareChatMid, chat.raw.squareMid);
         const chatName = chat.raw.name || "未命名聊天";
         const pictureId = avatarMediaId("obs", chat.raw.chatImageObsHash);
         channels.push({
@@ -1203,6 +1371,8 @@ export class EvexLineProvider implements LineProvider {
   }
 
   private async teardown(): Promise<void> {
+    this.liveness?.stop();
+    this.liveness = undefined;
     clearTimeout(this.retry);
     this.retry = undefined;
     this.signal?.abort();

@@ -109,6 +109,9 @@ export interface Message {
   mediaId?: string;
   /** Id of the message this one answers (LINE "reply"). */
   replyTo?: string;
+  /** OpenChat only: the thread (討論串) this message belongs to, or starts when `threadRoot`. */
+  threadId?: string;
+  threadRoot?: boolean;
   /** People tagged in `text`, sorted and non-overlapping. */
   mentions?: TextMention[];
   /** LINE emoji in `text`, sorted and non-overlapping. */
@@ -128,3 +131,14 @@ export interface Profile {
 }
 
 export type AuthState = "restoring" | "idle" | "authenticating" | "ready" | "error";
+
+/** An OpenChat note (記事本 post), as read for moderation bots. Text is LINE's own; ids are LINE's. */
+export interface Note {
+  postId: string;
+  authorId?: string;
+  authorName?: string;
+  text: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+

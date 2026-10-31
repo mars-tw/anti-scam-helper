@@ -4,7 +4,7 @@
   "dryRun": true,
   "deleteMessage": true,
   "strongScore": 6,
-  "checkEveryMessage": false,
+  "localScreenAll": false,
   "whitelist": [],
   "protectedMembers": [
     {
@@ -18,9 +18,19 @@
     "capability": "text_fast",
     "timeoutMs": 120000
   },
+  "review": {
+    "backend": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "請填入覆核模型名稱",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxTokens": 2000,
+    "timeoutMs": 60000
+  },
+  "reviewScore": 3,
   "chat": {
     "enabled": true,
     "name": "小助手",
+    "ownerNames": [],
     "triggers": [
       "小助手"
     ],
@@ -48,6 +58,7 @@
     "enabled": true,
     "allow": []
   },
+  "linkAllow": [],
   "vision": {
     "enabled": false,
     "action": "report",
@@ -55,5 +66,40 @@
     "maxQueue": 20,
     "maxSide": 768
   },
-  "logDir": "logs"
+  "logDir": "logs",
+  "replyAudit": {
+    "_說明": "自動回覆去識別化保留。預設關閉。開啟後每則自動回覆寫入 logs/reply-audit-日期.jsonl（時間、群雜湊、去識別化回覆與問題；不存暱稱／成員 ID）。超過 maxAgeDays 天的檔在啟動時與每日 purgeHour（台北）刪掉。這些檔不進 git、不進每日備份、不外傳。",
+    "enabled": false,
+    "maxAgeDays": 7,
+    "purgeHour": 3
+  },
+  "scamLink": {
+    "deleteOnConfirmed": false
+  },
+  "scamShop": {
+    "enabled": false,
+    "fetchPage": false,
+    "kickRepeat": false
+  },
+  "impersonation": {
+    "kick": false,
+    "kickWithInvite": false
+  },
+  "fakeAdmin": {
+    "enabled": false,
+    "avatar": true,
+    "cooldownHours": 12
+  },
+  "aiSummary": {
+    "enabled": false,
+    "cooldownMinutes": 10,
+    "budgetTokens": 4000000,
+    "chunkTokens": 180000,
+    "llm": {
+      "backend": "openai",
+      "baseUrl": "https://api.x.ai/v1",
+      "model": "grok-4.20-0309-non-reasoning",
+      "apiKeyEnv": "XAI_API_KEY"
+    }
+  }
 }
