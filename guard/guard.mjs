@@ -979,15 +979,18 @@ async function ownerAlreadyReplied(ws, message) {
   } catch {}
   return ownerAnswered(message, ownerPosts.get(message.channelId) ?? []);
 }
-/** reply() 的所有送出都經過這裡；本人已回就不送，回傳 false。開啟 replyAudit 時寫去識別化稽核（不含暱稱／成員 ID）。 */
+/** reply() 的所有送出都經過這裡；本人已回就不送，回傳 false。開啟 replyAudit 時寫去識別化稽核（不含暱稱／成員 ID）。
+ * 10/31：不論哪條回覆路徑，出口一律強制（AI代理），稽核也記已標記文字（與實際送出一致）。 */
 async function replyOut(ws, message, labeled, text, question = "") {
   if (await ownerAlreadyReplied(ws, message)) {
     record({ action: "reply-skipped", reason: "owner-replied", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
     return false;
   }
-  if (labeled) sendLabeled(ws, message, text); else send(ws, message, text);
+  // labeled 路徑先過 labelReply（可加自訂簽名）；再一律 withAgentLabel，避免稽核／送出漏標。
+  const out = withAgentLabel(labeled ? labelReply(text, replyLabel) : String(text ?? ""));
+  send(ws, message, out);
   try {
-    writeReplyAuditIfEnabled(replyAudit, { logDir, chatId: message.channelId, reply: text, question, salt: replyAuditSalt });
+    writeReplyAuditIfEnabled(replyAudit, { logDir, chatId: message.channelId, reply: out, question, salt: replyAuditSalt });
   } catch (error) {
     recordError("reply-audit", String(error?.message ?? error).slice(0, 80));
   }
@@ -1113,7 +1116,7 @@ async function reply(ws, message, ask, { camp = false, via, receivedAt } = {}) {
   // 輸出後補充（備援）：問槓桿／加倉沒提停損與清算、提到收益截圖／邀請碼沒標推廣 → 補一句。
   if (chat.mentionOnly) for (const note of [riskNote(ask, body), promoNote(ask, body)]) if (note) body = `${body}\n${note}`;
   // 輸出後過濾（備援）：回覆在談踢人、移出、權限之類的事 → 換成固定句。
-  // 模型照提示只回了固定句（轉給本人／等本人）：原樣送出，不加簽名。
+  // 模型照提示只回了固定句（轉給本人／等本人）：仍走 replyOut，出口強制（AI代理）。
   for (const fixed of [ESCALATE_REPLY, MODERATION_REPLY]) {
     if (body.replace(/[。.!！\s]/g, "") === fixed) {
       await replyOut(ws, message, true, fixed, ask);

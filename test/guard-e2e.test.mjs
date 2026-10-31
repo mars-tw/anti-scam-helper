@@ -187,6 +187,33 @@ test("小助手：一般建議照常回答", async () => {
 const ADMIN_HISTORY = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
 const INVITE = "新群在這 https://line.me/ti/g2/ExtGroup999";
 
+test("小助手：保護名單 note 標機器人 → 不回（含承諾過濾路徑）", async () => {
+  const r = await runGuard({
+    ...CHAT,
+    protectedIds: [{ note: "假群內機器人 AI寶", ids: ["pAiBao"] }],
+  }, [{ messageId: "q1", channelId: "cA", senderId: "pAiBao", senderName: "AI寶", text: "小助手 為保護隱私我先不說細節" }], {
+    chatAnswer: "我再幫你改規則，這要等本人回覆",
+  });
+  assert.equal(r.sends.length, 0, JSON.stringify(r.sends));
+});
+
+test("小助手：chat.community.botIds 內的機器人 → 不回", async () => {
+  const r = await runGuard({
+    ...CHAT,
+    protectedIds: ["pAsk"],
+    chat: { ...CHAT.chat, community: { botIds: ["pOtherBot"] } },
+  }, [{ messageId: "q1", channelId: "cA", senderId: "pOtherBot", senderName: "別的機器人", text: "小助手 今天天氣如何" }], {
+    chatAnswer: OK_ANSWER,
+  });
+  assert.equal(r.sends.length, 0, JSON.stringify(r.sends));
+});
+
+test("小助手：承諾過濾固定句仍帶（AI代理）", async () => {
+  const r = await runGuard({ ...CHAT, protectedIds: ["pAsk"] }, [{ messageId: "q1", channelId: "cA", senderId: "pAsk", senderName: "成員", text: "小助手 剛剛怎麼了" }], { chatAnswer: "我再把規則調鬆一點" });
+  assert.equal(r.sends.length, 1);
+  assert.ok(r.sends[0].text.includes("（AI代理）"), r.sends[0].text);
+});
+
 test("冒名＋群組邀請連結（同社群的管理員名）：通知＋刪除，開關關閉不踢", async () => {
   const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: false } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
   assert.equal(r.removes.length, 0);

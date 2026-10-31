@@ -98,10 +98,12 @@ test("scanNotifyDecision：delete／kick／notice 一律記 notify", () => {
   assert.match(src, /scanNotifyDecision/);
 });
 
-test("看圖理由提具體短網址 → visionMentionsConcreteShort；guard 必跑覆核", () => {
+test("看圖理由提具體短網址 → visionMentionsConcreteShort；泛稱不算；guard 必跑覆核", () => {
   assert.equal(visionMentionsConcreteShort("偽造幣安公告加短網址 bit.ly/abc12"), true);
   assert.equal(visionMentionsConcreteShort("有短網址 https://reurl.cc/xxxx"), true);
   assert.equal(visionMentionsConcreteShort("畫面有網址字樣但沒具體短鏈"), false);
+  assert.equal(visionMentionsConcreteShort("附外部短網址引流"), false);
+  assert.equal(visionMentionsConcreteShort("非官方「Codex Reset」通知，附外部短網址引流"), false);
   assert.equal(visionMentionsConcreteShort("OK 技術訂閱帳單"), false);
   const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
   assert.match(src, /visionMentionsConcreteShort\(reason\)/);

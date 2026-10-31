@@ -42,3 +42,20 @@ test("只有標成機器人的保護 ID 才不回；保護名單裡的真人照�
   for (const id of ["u-bot-a-1", "u-bot-a-2", "u-bot-extra-7"]) assert.equal(skip(id), true, id);
   for (const id of ["u-plain-0001", "u-member-9", "u-impostor-a"]) assert.equal(skip(id), false, id);
 });
+
+test("guard.mjs replyOut 出口強制（AI代理），稽核記已標記文字", () => {
+  const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
+  const block = src.slice(src.indexOf("async function replyOut"), src.indexOf("async function reply("));
+  assert.match(block, /withAgentLabel/);
+  assert.match(block, /reply:\s*out/);
+  assert.doesNotMatch(block, /不加簽名/);
+  // 固定句路徑註解改成仍走 replyOut 強制標記
+  assert.match(src, /仍走 replyOut，出口強制（AI代理）/);
+});
+
+test("假機器人 ID（community.botIds／保護名單 note 標機器人）不回；真人照常", () => {
+  const bots = makeReplySkip({ botIds: ["u-aibot-fake-1", "u-other-bot-2"] });
+  assert.equal(bots("u-aibot-fake-1"), true);
+  assert.equal(bots("u-other-bot-2"), true);
+  assert.equal(bots("u-human-friend"), false);
+});

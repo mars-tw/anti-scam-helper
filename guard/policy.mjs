@@ -553,8 +553,8 @@ export function isFlagEntry(entry, flagActions) {
 }
 
 // 看圖單一模型判 SCAM 的通知門檻（維護者 10/25；10/31 收緊）：圖片理由／QR 裡沒有具體連結訊號（具體網域、https、短網址服務、群組邀請、QR、LINE ID／加好友），
-// 又沒有覆核模型確認 SCAM → 只記錄、不在群內通知。按鈕字樣、「連結」「網址」「縮網址」這種泛稱不算連結（10/30 Pan 群誤通知：理由「附可疑網址」無網域卻被當成有連結）。
-const VISION_LINK = /https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|io|cc|me|tw|xyz|top|vip|app|link|ly|gl|gd|to|co|info|shop|site|online)\b|短網址|QR|二維碼|條碼|掃碼|掃描|LINE\s*ID|ID\s*[:：]|加.{0,4}(LINE|line|賴|好友|群)|line\.me|群組?邀請|邀請連結|邀請碼|Telegram|t\.me|WhatsApp/i;
+// 又沒有覆核模型確認 SCAM → 只記錄、不在群內通知。按鈕字樣、「連結」「網址」「縮網址」「短網址」這種泛稱不算連結（10/30 Pan：附可疑網址；10/31 Codex：附外部短網址引流，皆無具體網域卻被略過覆核）。
+const VISION_LINK = /https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|io|cc|me|tw|xyz|top|vip|app|link|ly|gl|gd|to|co|info|shop|site|online)\b|QR|二維碼|條碼|掃碼|掃描|LINE\s*ID|ID\s*[:：]|加.{0,4}(LINE|line|賴|好友|群)|line\.me|群組?邀請|邀請連結|邀請碼|Telegram|t\.me|WhatsApp/i;
 export function visionHasLink(reason, { qr = false } = {}) {
   return qr === true || VISION_LINK.test(String(reason ?? ""));
 }
@@ -563,14 +563,14 @@ export function visionSoloMayNotify({ reason, qr = false, review } = {}) {
   return visionHasLink(reason, { qr }) || review === "SCAM";
 }
 
-/** 看圖理由是否提到「具體短網址」（已知短網址服務、https 鏈，或非否定的「短網址／縮網址」字樣）。
+/** 看圖理由是否提到「具體短網址」（已知短網址服務主機或 https 鏈）。
+ * 泛稱「短網址／縮網址／網址」不算（10/31 Codex：附外部短網址引流）。
  * 10/31：SCAM_WEAK 若命中此項，一定跑覆核；覆核也 SCAM 才通知。 */
 const VISION_SHORT_HOST = /(?:bit\.ly|reurl\.cc|pse\.is|tinyurl\.com|tiny\.cc|ppt\.cc|is\.gd|v\.gd|t\.ly|cutt\.ly|rb\.gy|ow\.ly|buff\.ly|supr\.link|lihi\d?\.(?:cc|com|me)|1url\.cz|shorturl\.(?:at|asia|gg)|me2\.do|s\.id|gg\.gg)/i;
 export function visionMentionsConcreteShort(reason) {
   const r = String(reason ?? "");
   if (VISION_SHORT_HOST.test(r)) return true;
   if (/https?:\/\/\S{4,}/i.test(r)) return true;
-  if (/(?:短網址|縮網址)/i.test(r) && !/(?:無|沒有|未見|未發現)\s*(?:短網址|縮網址)/i.test(r)) return true;
   return false;
 }
 
