@@ -69,9 +69,13 @@ test("countActualActions：只計實際刪／踢／群內通知，不算 decisio
   ];
   assert.deepEqual(countActualActions(rows), {
     deleted: 3 + 1 + 2, // scam-link + unrecognized + followup + shop deleted + invite deleted(2)
-    kicked: 1 + 1 + 1, // removed + shop kick + invite kick
+    kicked: 1, // 只計 removed；kickSent 只是送出請求，不可當已踢（10/31 m1a5：kickSent+removed 以前會雙計）
     notified: 2, // notified + note-notified
   });
+  // kickSent 單獨不算踢；失敗列也不算
+  assert.equal(countActualActions([{ action: "impersonation-invite-handled", kickSent: true, deleted: 1 }]).kicked, 0);
+  assert.equal(countActualActions([{ action: "kickFailed", code: "FORBIDDEN" }, { action: "failed" }]).kicked, 0);
+  assert.equal(countActualActions([{ action: "removed" }, { action: "impersonation-invite-handled", kickSent: true, deleted: 1 }]).kicked, 1);
 });
 
 test("guard：判斷紀錄用 withLogDecision，動作欄不再被 entry.action 蓋成 notice／delete", () => {
@@ -84,4 +88,15 @@ test("guard：判斷紀錄用 withLogDecision，動作欄不再被 entry.action 
   // 不該再出現會被 spread 蓋掉的寫法
   assert.equal((src.match(/record\(\{\s*action:\s*"none",\s*\.\.\.entry/g) ?? []).length, 0);
   assert.equal((src.match(/record\(\{\s*action:\s*"none",[^)]*\.\.\.entry\s*\}\)/g) ?? []).length, 0);
+});
+
+test("guard：踢人／刪文依 API 結果記；成功才推斷本帳可踢；scanNotify 一般連結記 link-score-only", () => {
+  const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
+  assert.match(src, /function markSelfCanKick/);
+  assert.match(src, /self-admin-inferred/);
+  assert.match(src, /action: "kickFailed"/);
+  assert.match(src, /markSelfCanKick\(entry\.chatId, "member-removed"\)/);
+  assert.match(src, /kind === "link-score" \? "link-score-only" : "suspect-flag"/);
+  // kickSent 註解必須表明「尚未等 API」
+  assert.match(src, /kickSent＝已送出請求/);
 });

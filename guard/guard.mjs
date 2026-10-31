@@ -1510,14 +1510,15 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets, 
     for (const messageId of targets) {
       if (kick && messageId === replyTo) continue;
       const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId });
-      if (answer.type === "message:deleted") deleted++;
-      else { failed++; recordError("delete", answer.code); }
+      if (answer.type === "message:deleted") { deleted++; markSelfCanKick(message.channelId, "message-deleted"); }
+      else { failed++; recordError("delete", answer.code); record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: message.channelId, messageId, senderId: message.senderId }); }
     }
     if (kick) {
       kicked.add(`${message.channelId} ${message.senderId}`);
       markRemoved(message);
       const requestId = `kick${++requestSeq}`;
       pending.set(requestId, { ...entry, preNotified: true });
+      // kickSent＝已送出請求（尚未等 API）；真正踢成記 removed，失敗記 kickFailed／failed。
       sendKick(ws, { type: "member:remove", requestId, chatId: message.channelId, messageId: replyTo, deleteMessage: true });
       kickSent = true;
     }
@@ -1614,6 +1615,13 @@ async function checkScamShop(ws, message, rawText) {
     }
   }, notify.beforeActionMs ?? 2000, sleep);
   const deleted = answer.type === "message:deleted";
+  if (kick) {
+    // kickSent＝已送出；真正踢成看 removed，失敗看 kickFailed／failed
+  } else if (deleted) {
+    markSelfCanKick(entry.chatId, "scam-shop-deleted");
+  } else {
+    record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+  }
   record({ action: "scam-shop-handled", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, deleted: kick ? undefined : deleted, kickSent: kick });
   if (!deleted) { recordError("delete", answer.code); await notifyAdmins(ws, entry, "link-delete-failed", { force: true }); }
   return true;
@@ -1701,6 +1709,8 @@ async function checkUnrecognizedLink(ws, message, text) {
   const deleted = answer.type === "message:deleted";
   const report = unrecognizedReport({ reportChat: unrecognized.reportChat, url, chatId: message.channelId });
   if (report) await call(ws, { ...report, text: withAgentLabel(report.text) }).catch(() => undefined);
+  if (deleted) markSelfCanKick(message.channelId, "unrecognized-link-deleted");
+  else record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
   record({ action: deleted ? "unrecognized-link-deleted" : "unrecognized-link-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, reported: Boolean(report) });
   return true;
 }
@@ -1727,9 +1737,11 @@ async function deleteScamLink(ws, message, entry) {
     answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
   }, notify.beforeActionMs ?? 2000, sleep);
   const deleted = answer.type === "message:deleted";
+  if (deleted) markSelfCanKick(entry.chatId, "scam-link-deleted");
   record({ action: deleted ? "scam-link-deleted" : "scam-link-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code });
   if (!deleted) {
     recordError("delete", answer.code);
+    record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
     await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
   }
 }
@@ -1741,6 +1753,8 @@ async function deleteFollowup(ws, message, key) {
   if (Math.abs((message.createdAt ?? Date.now()) - at) > 30 * 60_000) return;
   if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId) || nameGuard.protects(message)) return;
   const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
+  if (answer.type === "message:deleted") markSelfCanKick(message.channelId, "followup-deleted");
+  else record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
   record({ action: answer.type === "message:deleted" ? "followup-deleted" : "followup-delete-failed", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, code: answer.type === "message:deleted" ? undefined : answer.code });
 }
 
@@ -1756,9 +1770,10 @@ function learnAudit(message, audit) {
   record({ action: "learn-ext-audit", chatId: message.channelId, messageId: message.messageId, kind: audit.kind, verdict: audit.verdict, learned });
   return learned;
 }
-/** scanNotify 判出可疑：一律只記 suspect-flag 並發通知（沿用冷卻）；不刪、不收回、不踢、不在群內發圖片警告。 */
+/** scanNotify 判出可疑：只發通知（沿用冷卻）；不刪、不收回、不踢、不在群內發圖片警告。一般連結用 link-score-only（與主路徑一致）。 */
 function flagScanNotify(ws, entry, kind = "suspect") {
-  record({ action: "suspect-flag", scanNotify: true, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review, reviewModel: entry.reviewModel, contentType: entry.contentType });
+  const action = kind === "link-score" ? "link-score-only" : "suspect-flag";
+  record({ action, scanNotify: true, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review, reviewModel: entry.reviewModel, contentType: entry.contentType });
   return notifyAdmins(ws, entry, kind);
 }
 /** 只學習群（scanNotify）的詐騙判斷：文字＋連結（含一頁式購物、短網址規則）；圖片交給 auditImage。不跑冒名／假管理員處置。 */
@@ -2654,6 +2669,23 @@ const lastNotified = new Map(); // 聊天室 id → 上次通知時間
  */
 function selfCanKick(chatId) {
   return selfIsChatAdmin(chatAdmins.get(chatId), (id) => isSelf(chatId, id));
+}
+/**
+ * 刪文／踢人 API 成功＝本帳號在這群實際有管理權。
+ * self-admin-status 只靠「看到自己帶身分的訊息」學習，常常過時（例如 10/31 m1a5：已踢成功卻仍列 notAdmin）。
+ * 成功處置後立刻補記，之後通知不必再 @ 管理員、狀態列才準。
+ */
+function markSelfCanKick(chatId, via = "moderation-success") {
+  if (!chatId) return;
+  const known = selfIds.get(chatId);
+  const selfId = (known && [...known][0]) || me;
+  if (!selfId) return;
+  if (!chatAdmins.has(chatId)) chatAdmins.set(chatId, new Map());
+  const admins = chatAdmins.get(chatId);
+  const prev = admins.get(selfId);
+  if (prev?.role) return;
+  admins.set(selfId, { name: prev?.name ?? "self", role: "coAdmin", pictureId: prev?.pictureId });
+  record({ action: "self-admin-inferred", chatId, via, senderId: selfId });
 }
 /** 通知要 @ 的人：本帳號能踢人的群不 @。 */
 function noticeAdmins(chatId, excludeIds = []) {
@@ -3587,6 +3619,8 @@ function connect() {
         const entry = pending.get(frame.requestId);
         pending.delete(frame.requestId);
         console.log(`已移除 ${entry?.senderName ?? frame.memberId}${frame.messageDeleted ? "，並刪除訊息" : ""}${refLabel(entry) ? `（${refLabel(entry)}）` : ""}`);
+        if (entry?.chatId) markSelfCanKick(entry.chatId, "member-removed");
+        else if (frame.chatId) markSelfCanKick(frame.chatId, "member-removed");
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
         // 通知已在處置前發過；沒發成（冷卻、權限、失敗）才補發。
         if (entry && !entry.preNotified) notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
@@ -3605,6 +3639,7 @@ function connect() {
         kicked.delete(`${entry.chatId} ${entry.senderId}`);
         console.error(`移除 ${entry.senderName} 失敗：${frame.message}（${frame.code}）`);
         recordError("kick", `${entry.senderName}：${frame.code}`);
+        record({ action: "kickFailed", code: frame.code, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName });
         record({ action: "failed", code: frame.code, ...entry });
         // 已先發過「移出」通知：補一則「無法移除」（不受冷卻限制），讓管理員知道要手動處理。
         notifyAdmins(ws, entry, entry.noticeKind ? `${entry.noticeKind}-failed` : "failed", { force: entry.preNotified });

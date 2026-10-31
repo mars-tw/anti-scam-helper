@@ -646,8 +646,8 @@ export function countActualActions(entries) {
     if (a === "scam-link-deleted" || a === "unrecognized-link-deleted" || a === "followup-deleted") out.deleted += 1;
     else if (a === "scam-shop-handled" && e.deleted === true) out.deleted += 1;
     else if (a === "impersonation-invite-handled" && Number(e.deleted) > 0) out.deleted += Number(e.deleted);
+    // 踢人只計 API 確認的 removed。kickSent 只代表「已送出踢人請求」，失敗時另有 failed／kickFailed，不可當已踢。
     if (a === "removed") out.kicked += 1;
-    else if ((a === "scam-shop-handled" || a === "impersonation-invite-handled") && e.kickSent) out.kicked += 1;
     if (a === "notified" || a === "note-notified") out.notified += 1;
   }
   return out;
