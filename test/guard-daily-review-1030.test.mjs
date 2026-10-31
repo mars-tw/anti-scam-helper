@@ -196,7 +196,6 @@ test("okx：官方與子網域放行；假尾碼／連字／錯 TLD／punycode�
     "https://okx-xxx.com/",
     "https://okx-gift.com/red",
     "https://okx.co/join",
-    "https://fakeokx.com/",
     "https://0kx.com/a",
     "https://www.0kx.com/a",
     "http://xn--okx-k83c.com/a",
@@ -207,6 +206,18 @@ test("okx：官方與子網域放行；假尾碼／連字／錯 TLD／punycode�
     const r = score({}, url);
     assert.ok(r.names.includes("仿冒交易所網域"), url + " → " + r.names.join(","));
     assert.ok(r.score >= 5, url);
+  }
+  // 10/31：官方國別網域放行；字中間含 okx 不誤中；查無者不放行
+  for (const url of ["https://binance.us/", "https://www.binance.us/en", "https://pionex.us/", "https://www.bybit.eu/"]) {
+    assert.equal(lookalikeExchange(url), false, url);
+    assert.equal(score({}, url).names.includes("仿冒交易所網域"), false, url);
+  }
+  for (const url of ["https://cookx.com/", "https://tokx.ai/", "https://rokx.com/", "https://stockx.com/", "https://blockx.io/"]) {
+    assert.equal(lookalikeExchange(url), false, "no-mid-" + url);
+    assert.equal(score({}, url).names.includes("仿冒交易所網域"), false, "no-mid-" + url);
+  }
+  for (const url of ["https://pionex.sg/", "https://bybit.nl/", "https://bybitglobal.com/", "https://okx.ac/", "https://okx.cab/"]) {
+    assert.equal(lookalikeExchange(url), true, "unverified-" + url);
   }
   assert.ok(!MINER_KICKABLE.has("仿冒交易所網域"));
   // 三種群：仿冒 okx 只通知不踢

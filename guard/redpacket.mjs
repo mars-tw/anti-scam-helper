@@ -52,9 +52,27 @@ export function isRedPacketOnly(text, { extra = [] } = {}) {
   return { ok: true, rules: [...new Set(ids)] };
 }
 
-/** 網域看起來像交易所，卻不是官方網域（pi0nex、binance-gift.xyz 這類）。 */
-const BRAND = /(p[i1l]+[o0]n[e3]x|b[i1l]+n[a@4]nc[e3]|[o0]kx|byb[i1l]+t)/i;
-const OFFICIAL = ["pionex.com", "pionexapp.com", "binance.com", "binance.info", "okx.com", "bybit.com"];
+/** 官方交易所網域（尾端精確比對本身或子網域）。查證後才放行；查不到的不放。
+ * 已放行：pionex.com／pionexapp.com／pionex.us、binance.com｜info｜us、okx.com、bybit.com｜eu。
+ * 不放行（查無／非現行官方主站）：pionex.sg、bybit.nl、bybitglobal.com、okx.ac、okx.cab。 */
+export const OFFICIAL_EXCHANGE_HOSTS = [
+  "pionex.com", "pionexapp.com", "pionex.us",
+  "binance.com", "binance.info", "binance.us",
+  "okx.com",
+  "bybit.com", "bybit.eu",
+];
+// pionex／binance／bybit：標籤內出現品牌字就算（fakepionexapp 這類前綴仿冒）。
+// [o0]kx：只在標籤開頭或以 - 分隔才算（避免 cookx.com、tokx.ai、fakeokx.com 誤中）。
+const BRAND_LABEL_SUB = /(?:p[i1l]+[o0]n[e3]x|b[i1l]+n[a@4]nc[e3]|byb[i1l]+t)/i;
+const BRAND_LABEL_OKX = /(?:^|-)[o0]kx/i;
+export function hostHasExchangeBrand(host) {
+  return String(host ?? "").toLowerCase().split(".").some((label) => BRAND_LABEL_SUB.test(label) || BRAND_LABEL_OKX.test(label));
+}
+export function isOfficialExchangeHost(host) {
+  const h = String(host ?? "").toLowerCase().replace(/\.$/, "");
+  return OFFICIAL_EXCHANGE_HOSTS.some((o) => hostMatches(h, o));
+}
+/** 網域看起來像交易所，卻不是官方網域（pi0nex、binance-gift.xyz、okx-xxx 這類）。 */
 export function lookalikeExchange(text) {
   for (const url of String(text ?? "").match(URL_RE) ?? []) {
     let host;
@@ -66,7 +84,7 @@ export function lookalikeExchange(text) {
       host = raw.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "").replace(/:\d+$/, "");
       if (!host) continue;
     }
-    if (BRAND.test(host) && !OFFICIAL.some((o) => hostMatches(host, o))) return true;
+    if (hostHasExchangeBrand(host) && !isOfficialExchangeHost(host)) return true;
   }
   return false;
 }

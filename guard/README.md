@@ -164,7 +164,7 @@
   - YouTube 的 `v`、Drive 的 `id` 參數會留在比對鍵裡（只放行同一支影片／同一個檔案）。
   - 作者認不出時，可用唯讀匯出人工審核：在 `logs/` 放 `note-links-export.json`（`{"chatId": "..."}`）並送 `SIGUSR2`，守衛把最近記事本裡的連結、規則分數與仿冒網域判斷寫到 `logs/note-links-export-*.json`（600），審過再加進 `linkAllow`。
 - Grok CLI 備援的工作階段（`~/.grok/sessions/%2Ftmp%2Fgrok-guard`）：守衛啟動後與每 7 天清掉超過 7 天的；其他目錄的工作階段不動。
-- 另有規則「假紅包」（紅包＋引流／付費）與「仿冒交易所網域」（pi0nex、binance-gift.xyz、bybit.com.evil.io 這類）。派網官方網域含 `pionex.com`、`pionexapp.com`（本身與子網域；尾端比對，`pionexapp.com.evil.xyz`／`pionex-app.com` 仍算仿冒）。
+- 另有規則「假紅包」（紅包＋引流／付費）與「仿冒交易所網域」（pi0nex、binance-gift.xyz、bybit.com.evil.io、okx-xxx 這類）。官方放行清單（尾端精確比對）：`pionex.com`／`pionexapp.com`／`pionex.us`、`binance.com`｜`info`｜`us`、`okx.com`、`bybit.com`｜`eu`；`pionex.sg`／`bybit.nl`／`bybitglobal.com`／`okx.ac`／`okx.cab` 查無現行官方主站、不放行。品牌字（含 `[o0]kx`）只在網域標籤開頭或以 `-` 分隔才算，避免 `cookx.com`／`tokx.ai` 誤中。
 
 覆核鏈可以接任意層 `fallback`，例如 Meta 之後接 xAI Grok（`"baseUrl": "https://api.x.ai/v1"`, `"apiKeyEnv": "XAI_API_KEY"`）；哪一層回答就記在日誌的 `reviewModel`，判定效力相同；沒金鑰的層直接跳過、不送請求。
 
@@ -251,7 +251,7 @@ npm run guard:all       # 同上，並一起看顧 LINE.js 服務
 
 ## 紀錄
 
-每個判斷都寫進 `guard/logs/guard-日期.jsonl`，內容含發言者（成員 ID、暱稱）、規則命中項、模型判定、**決策**（`decision`：`none`／`notice`／`delete`／`kick`，判斷結果）與**實際動作**（`action`：`none`＝尚未／未執行；`notified`／`removed`／`scam-link-deleted`／`dry-run`／`failed`／`replied`／`refused`／`quota-exceeded`…＝真的做了）。每日稽核與健康檢查的刪／踢／群內通知計數以實際動作為準，不以 `decision` 或舊日誌誤寫進 `action` 的 `notice`／`delete` 為準。**日誌不記訊息文字**（沒有 `text`、`preview` 之類欄位，被踢的詐騙訊息也一樣；圖片裡的 QR 內容同樣只留雜湊，一般網址型 QR 另記網域 `qrHost`）：訊息只留 `textHash`（內容的 SHA-256 前 12 碼，用來比對是不是同一則）與 `textChars`（字數）；@ 問題同理，欄位是 `askHash`／`askChars`。雜湊無法還原內容，但很短、很常見的句子仍可能被猜中，所以日誌照樣只留本機。誤踢時用這份紀錄找人（成員 ID、時間、聊天室與訊息 ID），再請對方重新加入。
+每個判斷都寫進 `guard/logs/guard-日期.jsonl`，內容含發言者（成員 ID、暱稱）、規則命中項、模型判定、**決策**（`decision`：`none`／`notice`／`delete`／`kick`，判斷結果）與**實際動作**（`action`：`none`＝尚未／未執行；`notified`／`removed`／`scam-link-deleted`／`dry-run`／`failed`／`replied`／`refused`／`quota-exceeded`…＝真的做了）。每日稽核與健康檢查的刪／踢／群內通知計數以實際動作為準，不以 `decision` 或舊日誌誤寫進 `action` 的 `notice`／`delete` 為準。 scanNotify（只學習＋判斷通知）群的決策欄不會寫 `delete`／`kick`，改記 `notify`／`none`。UNSUPPORTED 檔案會記副檔名到 `unsupported-files.jsonl` 供日報人工看。**日誌不記訊息文字**（沒有 `text`、`preview` 之類欄位，被踢的詐騙訊息也一樣；圖片裡的 QR 內容同樣只留雜湊，一般網址型 QR 另記網域 `qrHost`）：訊息只留 `textHash`（內容的 SHA-256 前 12 碼，用來比對是不是同一則）與 `textChars`（字數）；@ 問題同理，欄位是 `askHash`／`askChars`。雜湊無法還原內容，但很短、很常見的句子仍可能被猜中，所以日誌照樣只留本機。誤踢時用這份紀錄找人（成員 ID、時間、聊天室與訊息 ID），再請對方重新加入。
 
 試跑模式（`dryRun: true`）才會在主控台顯示要回的內容與要發的通知，供檢視，不寫進日誌檔。使用 pm2 時主控台輸出由 pm2 另外保存，試跑完可用 `pm2 flush` 清掉。
 

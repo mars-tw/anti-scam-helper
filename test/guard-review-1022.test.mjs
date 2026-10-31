@@ -4,10 +4,13 @@ import { decideAction, errorCode, redPacketExceptionBlocked, visionVerdict } fro
 import { makeRuleScorer, SHORTENERS } from "../guard/rules.mjs";
 
 // 10/20–10/22 日誌：6 筆只有「網址」、分數 1、地端＋覆核都判 SCAM 的訊息曾被通知（字數 78、156、40、66、40、96）。
-test("純網址、分數 1：只記錄不通知；分數 ≥2 或兩個特徵才通知", () => {
-  for (let i = 0; i < 6; i++) assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true }), "none");
-  assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["網址", "私下聯繫"].slice(0, 1), link: true }), "notice");
+test("純網址、分數 1：雙模型 SCAM 改貼可能詐騙（notice）；踢人門檻不變", () => {
+  // 10/26 23:01＋10/31：一般連結分數 > 0 且雙模型 SCAM → notice（主路徑改 link-score）
+  for (let i = 0; i < 6; i++) assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true }), "notice");
+  assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["網址"], link: true }), "notice");
   assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["網址", "暱稱自稱管理員"], link: true }), "notice");
+  // 沒有連結訊號：仍不因雙模型 SCAM 就通知
+  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["私下聯繫"], link: false }), "none");
   assert.equal(decideAction({ score: 7, verdict: "SCAM", review: "SCAM", names: ["網址", "假群組連結"], link: true }), "kick", "踢人門檻不變");
 });
 

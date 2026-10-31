@@ -78,7 +78,7 @@ export function keepMentions(text, mentions = [], keep = () => true) {
  * 逾時（可能已送出）或限流就停，不補送，避免重複發。
  * @param send (frame) => Promise<reply>，reply.type 為 "sent" 或 "error"（含 code）
  */
-export async function sendNotice(send, { chatId, text, mentions = [], replyTo, canMention }) {
+export async function sendNotice(send, { chatId, text, mentions = [], replyTo, canMention, aboutName }) {
   text = withAgentLabel(text);
   const plain = mentions.length ? stripMentions(text, mentions) : text;
   const first = canMention ? keepMentions(text, mentions, canMention) : { text, mentions };
@@ -93,7 +93,16 @@ export async function sendNotice(send, { chatId, text, mentions = [], replyTo, c
   let answer = await attempt(firstFrame);
   if (answer.type !== "sent" && answer.code !== "TIMEOUT" && answer.code !== "RATE_LIMITED") {
     const keepReply = Boolean(firstFrame.mentions) && answer.code === "INVALID_REQUEST" ? replyTo : undefined;
-    const retry = frameOf(plain, [], keepReply);
+    // 10/31：回覆送失敗改一般訊息時，文字帶上對方暱稱（無法引用原訊息時仍看得出指誰）。
+    let retryText = plain;
+    if (!keepReply && aboutName) {
+      const who = safeName(aboutName);
+      const tag = `（對象：「${who}」）`;
+      if (who && who !== "某位成員" && !retryText.includes(who)) {
+        retryText = withAgentLabel(retryText.replace(/（AI代理）\s*$/, "").trimEnd() + tag);
+      }
+    }
+    const retry = frameOf(retryText, [], keepReply);
     if (JSON.stringify(retry) !== JSON.stringify(firstFrame)) answer = await attempt(retry);
   }
   const last = tried.at(-1);

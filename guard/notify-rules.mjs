@@ -28,6 +28,10 @@ export const SHIP_VERIFY = "賣貨便／實名認證假客服";
 export const SEX_PLATFORM = "色情應召轉假平台收費";
 export const LUXURY_URL = "一頁式精品網址樣式＋名牌／出清";
 export const MODA_VOTE_CODE = "投票／領券騙 LINE 認證碼";
+// 10/31 情資：只通知，不進踢人分數、不在 MINER_KICKABLE、不刪不踢。
+export const VOTE_APK = "幫忙投票／票選＋APK／非商店安裝";
+export const CAMPAIGN_GIFT = "競選小物贈送＋驗證話術";
+export const FAKE_BILLING_CS = "假消費異常／冒名客服";
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -127,6 +131,35 @@ export const NOTIFY_RULES = [
     if (MODA_LURE.test(c) && MODA_CODE.test(c)) return true;
     return MODA_CODE_INTO_LINK.test(c);
   } },
+  // 10/31 情資 1：幫忙投票／模特兒票選 → 連結或 APK（木馬攔截 OTP）。只通知。
+  // 命中：投票／票選／模特兒投票／網美投票＋（APK／.apk／非商店安裝／未知來源／下載投票 App）或短網址／外部下載。
+  // 反例：防詐轉貼、商店內官方投票、善意詢問、「這是詐騙嗎」。
+  { name: VOTE_APK, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx)) return false;
+    if (!VOTE_APK_LURE.test(c)) return false;
+    if (VOTE_APK_PAYLOAD.test(c)) return true;
+    // 短網址／外部下載；商店內官方投票頁不算
+    if (VOTE_STORE.test(c)) return false;
+    return VOTE_APK_SHORT.test(c);
+  } },
+  // 10/31 情資 2：假贈送競選小物 → 加 LINE → 實名／金流／物流驗證。只通知。純加好友不計。
+  // 反例：真競選團隊公告、一般選情討論、防詐轉貼。
+  { name: CAMPAIGN_GIFT, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx)) return false;
+    if (!CAMPAIGN_GIFT_LURE.test(c)) return false;
+    if (!CAMPAIGN_VERIFY.test(c)) return false;
+    return hasLinkOrInvite(c) || ADD_LINE.test(c);
+  } },
+  // 10/31 情資 3：假消費異常／冒名業者客服 → 操作 ATM／網銀／買點數。只通知。
+  // 反例：防詐宣導、自述接到這種電話、沒有連結的善意提醒。
+  { name: FAKE_BILLING_CS, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx)) return false;
+    if (!BILLING_HOOK.test(c)) return false;
+    return BILLING_ACT.test(c) || hasLinkOrInvite(c);
+  } },
 ];
 function intelText(t) { return String(t ?? "").normalize("NFKC").replace(SPACES, ""); }
 function intelGate(c, ctx) {
@@ -138,6 +171,14 @@ const MODA_LURE = /投票|折價券|優惠券|領券/;
 const MODA_CODE = /認證碼|驗證碼|簡訊碼|手機驗證|分享畫面/;
 const MODA_CODE_NEG = /(?:不(?:會|要|用|需|必)|勿|別|請勿|千萬別|切勿|禁止).{0,16}(?:認證碼|驗證碼|簡訊碼)|(?:認證碼|驗證碼|簡訊碼).{0,10}(?:不要|別|請勿|勿|不該|不可).{0,6}(?:給|提供|回傳|交出|輸入)/;
 const MODA_CODE_INTO_LINK = /(?:提供|回傳|輸入|填(?:寫|入)?|傳給?).{0,12}(?:認證碼|驗證碼|簡訊碼).{0,16}(?:連結|網址|網站|頁面|http)|(?:認證碼|驗證碼|簡訊碼).{0,12}(?:提供|回傳|輸入|填).{0,12}(?:到|至|進|入)?(?:這個|該|下列|以下)?(?:的)?(?:連結|網址|網站|頁面|http)|(?:到|至|在|於).{0,6}(?:連結|網址|網站|頁面).{0,10}(?:輸入|填|提供|回傳).{0,8}(?:認證碼|驗證碼|簡訊碼)/;
+const VOTE_APK_LURE = /幫忙投票|票選|模特兒投票|網美投票|幫.{0,4}投(?:票|一票)|投票活動|投票App|投票軟體/;
+const VOTE_APK_PAYLOAD = /\.apk\b|\bAPK\b|PHOTO\s*APK|非商店(?:安裝|下載)|未知來源|開未知來源|安裝未知|下載(?:投票)?App|下載安裝包|側載|sideload/i;
+const VOTE_APK_SHORT = /(?:bit\.ly|reurl\.cc|pse\.is|lihi\d?\.(?:cc|com|me)|tinyurl|shorturl|supr\.link)|下載(?:連結|網址|投票)|https?:\/\/\S{6,}/i;
+const VOTE_STORE = /(?:play\.google\.com|apps\.apple\.com|App\s*Store|Google\s*Play)/i;
+const CAMPAIGN_GIFT_LURE = /競選小物|選戰周邊|免費贈送小物|同溫層小物|選舉小物|贈送.{0,6}(?:小物|周邊)|免費.{0,4}(?:小物|競選)/;
+const CAMPAIGN_VERIFY = /實名(?:制)?認證|金流驗證|物流驗證|無卡提款|操作網銀|網銀驗證|帳戶驗證|身份驗證/;
+const BILLING_HOOK = /解除分期|重複扣款|金流驗證|升級\s*VIP|消費異常|誤設分期|連續扣款|誠信簽署|誤刷|多扣款/;
+const BILLING_ACT = /操作\s*ATM|操作網銀|買點數|虛擬貨幣|解除設定|客服(?:請|叫|要)|撥打客服|點數卡/;
 const SHIP_TERMS = [/賣貨便/, /實名制?認證/, /郵(?:政|局)客服/, /開(?:通|啟|設)?網(?:路)?銀(?:行)?/, /截圖.{0,4}(?:帳戶|帳號|戶頭)|(?:帳戶|帳號|戶頭).{0,6}截圖/];
 const SEX_FEE = /會員費|約會卡|解凍金|認證金|車馬費|解鎖(?:照片|相片|私照|私密照)|遊戲點數/;
 const SEXY = /約砲|約炮|外約|應召|援交|兼職妹|定點服務|魚訊|私密照|裸照|裸聊|一夜情|約妹|全套|半套|色色|成人(?:服務|交友)|18禁|激情|性感(?:妹|美女)|找(?:妹|小姐)|叫小姐|伴遊|包養/;
@@ -183,6 +224,9 @@ export function noticeTips(names = []) {
   if (names.includes(SEX_PLATFORM)) tips.push("交友約會要先繳會員費、認證金、解凍金的都是詐騙，繳了只會被要更多。");
   if (names.includes(LUXURY_URL)) tips.push("名牌超低價出清的一頁式網站多是詐騙，買到假貨或收不到貨。");
   if (names.includes(MODA_VOTE_CODE)) tips.push("正常投票或領券不會要 LINE 認證碼，請勿提供");
+  if (names.includes(VOTE_APK)) tips.push("幫忙投票不會要你裝 APK 或開未知來源，裝了可能被盜簡訊驗證碼。");
+  if (names.includes(CAMPAIGN_GIFT)) tips.push("競選小物不會要你做實名／金流／物流驗證或操作網銀，那是詐騙。");
+  if (names.includes(FAKE_BILLING_CS)) tips.push("商家不會用私人訊息叫你解除分期或操作 ATM／網銀；接到請掛電話打官方客服查證。");
   if (names.includes(INTEL_DARK_NICK_SHORT)) tips.push("暱稱看起來像群管卻夾短網址／記事本連結時，先對一下真管理員的 LINE 介面皇冠標示，別點短鏈。");
   if (names.includes(INTEL_AT_ADMIN_NICK)) tips.push("暱稱寫成＠群管名是常見冒名手法；真管理員名字旁有 LINE 介面標示，請管理員確認。");
   if (names.includes(INTEL_INVITE_AND_FRIEND)) tips.push("同一則同時貼群組邀請又叫人加好友，多半是引流詐騙，兩邊都不要點。");

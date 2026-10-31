@@ -5,16 +5,17 @@ import { makeRuleScorer } from "../guard/rules.mjs";
 
 const score = makeRuleScorer();
 
-test("兩個模型都判 SCAM＋只有網址 1 分：只記錄、不在群內通知（10/22 調整）", () => {
+test("兩個模型都判 SCAM＋只有網址 1 分：貼可能詐騙（10/26 23:01＋10/31 統一）", () => {
   const { score: s, names } = score({ senderName: "某人" }, "最新優惠在這裡 https://example-shop.xyz/abc 快來看");
   assert.equal(s, 1);
   assert.deepEqual(names, ["網址"]);
-  assert.equal(decideAction({ score: s, verdict: "SCAM", review: "SCAM", names }), "none");
-  assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["網址", "加LINE"] }), "notice");
+  // 10/22 曾改成只記錄；10/26 23:01 起改貼「可能詐騙」；10/31 統一主路徑／scanNotify。
+  assert.equal(decideAction({ score: s, verdict: "SCAM", review: "SCAM", names, link: true }), "notice");
+  assert.equal(decideAction({ score: 2, verdict: "SCAM", review: "SCAM", names: ["網址", "加LINE"], link: true }), "notice");
   // 只有 Meta 判 SCAM、地端沒判：維持原規則（不到 notifyScore 就不動作）。
-  assert.equal(decideAction({ score: s, verdict: "UNSURE", review: "SCAM", names }), "none");
+  assert.equal(decideAction({ score: s, verdict: "UNSURE", review: "SCAM", names, link: true }), "none");
   // 沒有連結：不因為兩個模型都判 SCAM 就通知。
-  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["私下聯繫"] }), "none");
+  assert.equal(decideAction({ score: 1, verdict: "SCAM", review: "SCAM", names: ["私下聯繫"], link: false }), "none");
 });
 
 test("原本的處置門檻不變：≥3 分＋Meta SCAM 通知；踢人要 ≥6＋地端 SCAM＋Meta SCAM", () => {

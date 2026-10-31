@@ -78,7 +78,8 @@ test("guard：判斷紀錄用 withLogDecision，動作欄不再被 entry.action 
   const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
   assert.match(src, /withLogDecision/);
   // 主路徑與 scanNotify 判斷列必須用 helper
-  assert.match(src, /record\(withLogDecision\(\{ scanNotify: true, \.\.\.entry \}, "none"\)\)/);
+  assert.match(src, /scanNotifyDecision/);
+  assert.match(src, /withLogDecision\(\{ scanNotify: true, \.\.\.entry, decision: scanNotifyDecision/);
   assert.match(src, /record\(withLogDecision\(entry, "none"\)\)/);
   // 不該再出現會被 spread 蓋掉的寫法
   assert.equal((src.match(/record\(\{\s*action:\s*"none",\s*\.\.\.entry/g) ?? []).length, 0);

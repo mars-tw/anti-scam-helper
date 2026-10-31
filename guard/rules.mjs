@@ -2,6 +2,7 @@
 // 比對前先做正規化：全形轉半形（NFKC），並另外準備一份「去掉所有空白」的版本（含全形空白、零寬字元），
 // 「本 群 明 天 要 刪 除」「換　群」這類用空格拆字躲關鍵字的寫法也會命中。原文或去空白版任一命中就算。
 import { analyzeName } from "./fakeadmin.mjs";
+import { lookalikeExchange } from "./redpacket.mjs";
 
 // 常見短網址服務（貼這些等於看不到真正的目的地）。
 export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "ada.nz", "cutt.us", "tny.im", "u.nu", "n9.cl", "surl.li", "ouo.io", "shrtco.de", "9m.no", "t.cn", "kutt.it", "han.gl", "me2.do", "vo.la", "sor.bz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im", "supr.link", "urlr.me"];
@@ -68,8 +69,8 @@ export const RULES = [
   // 提醒或詢問詐騙（「這是詐騙嗎」「不要點」「有人冒充管理員」）：扣分，避免把好心提醒的人踢掉。
   // 假紅包：紅包＋引流（加賴／私訊）或要先付錢。
   { name: "假紅包", score: 4, pattern: /(紅包|red\s*packet).{0,30}(加\s*(我\s*)?(賴|line)|私(訊|聊|我)|密我|頭像|先(付|儲值|入金)|手續費|保證金|解凍|驗證碼|授權錢包)|(加\s*(我\s*)?(賴|line)|私(訊|聊|我)|密我).{0,30}(紅包|red\s*packet)/i },
-  // 仿冒交易所網域（pi0nex、binance-gift.xyz、okx-xxx…）。官方 pionex.com／pionexapp.com／binance.com｜info／bybit.com／okx.com 本身與子網域放行（尾端比對，pionexapp 須寫在 pionex 前）。
-  { name: "仿冒交易所網域", score: 5, pattern: /(?:https?:\/\/)?(?:[a-z0-9-]+\.)*(?=[a-z0-9-]*(p[i1l]+[o0]n[e3]x|b[i1l]+n[a@4]nc[e3]|byb[i1l]+t|[o0]kx))(?!(?:[a-z0-9-]+\.)*(?:pionexapp|pionex|binance|bybit|okx)\.(?:com|info)(?![a-z0-9.-]))(?:[a-z0-9-]+\.)+[a-z]{2,}/i },
+  // 仿冒交易所網域：走 lookalikeExchange（官方清單尾端精確比對；[o0]kx 只在標籤開頭或以 - 分隔）。
+  { name: "仿冒交易所網域", score: 5, lookalike: true },
   { name: "提醒／詢問詐騙", score: -4, pattern: ASK_SCAM },
 ];
 
@@ -104,11 +105,12 @@ export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
     const { normal, compact } = normalizeForRules(text);
     const strippedNormal = normal.replace(benignUrl, "［一般網站］");
     const strippedCompact = compact.replace(benignUrl, "［一般網站］");
-    const hits = RULES.filter((rule) => rule.normalOnly
-      ? rule.pattern.test(rule.onBenignStripped ? strippedNormal : normal)
-      : rule.onBenignStripped
-      ? rule.pattern.test(strippedNormal) || rule.pattern.test(strippedCompact)
-      : rule.pattern.test(normal) || rule.pattern.test(compact));
+    const hits = RULES.filter((rule) => {
+      if (rule.lookalike) return lookalikeExchange(rule.onBenignStripped ? strippedNormal : normal) || lookalikeExchange(compact);
+      if (rule.normalOnly) return rule.pattern.test(rule.onBenignStripped ? strippedNormal : normal);
+      if (rule.onBenignStripped) return rule.pattern.test(strippedNormal) || rule.pattern.test(strippedCompact);
+      return rule.pattern.test(normal) || rule.pattern.test(compact);
+    });
     const warnNoLink = message?.card?.kind !== "contact" && !hits.some((rule) => LINK_RULES.has(rule.name)) && !ANY_LINK.test(normal) && !ANY_LINK.test(compact) && (ANTI_SCAM_WARNING.test(normal) || ANTI_SCAM_WARNING.test(compact));
     const ruleScoreOf = (rule) => (warnNoLink && WARNING_ZERO_RULES.has(rule.name) && rule.score > 0 ? 0 : rule.score);
     let score = Math.max(0, hits.reduce((sum, rule) => sum + ruleScoreOf(rule), 0));

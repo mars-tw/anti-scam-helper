@@ -9,6 +9,27 @@ import { join } from "node:path";
 import { readQr } from "./qr.mjs";
 
 export const FILE_SCAN_DEFAULTS = { maxBytes: 10 * 1024 * 1024, maxPages: 10, timeoutMs: 15_000, dpi: 110, maxTextChars: 20_000 };
+
+/** 從檔名抽出副檔名（小寫、不含點；沒有就空字串）。日報／UNSUPPORTED 紀錄用。 */
+export function fileExtension(name) {
+  const base = String(name ?? "").split(/[\\/]/).pop() ?? "";
+  const i = base.lastIndexOf(".");
+  if (i <= 0 || i === base.length - 1) return "";
+  return base.slice(i + 1).toLowerCase().slice(0, 16);
+}
+
+/** UNSUPPORTED 檔案日報列（給 22:00 人工看）；不含檔案內容。 */
+export function unsupportedFileReportLine({ at, chatId, messageId, fileExt, fileName } = {}) {
+  const row = {
+    at: at ?? new Date().toISOString(),
+    kind: "unsupported-file",
+    chatId,
+    ...(messageId != null ? { messageId } : {}),
+    ...(fileExt ? { fileExt: String(fileExt).slice(0, 16) } : {}),
+    ...(fileName ? { fileName: String(fileName).slice(0, 40) } : {}),
+  };
+  return JSON.stringify(row);
+}
 const URL_RE = /(?:https?:\/\/|www\.)[^\s<>"'）)」』]+|(?:line\.me|lin\.ee|openchat\.line\.me)\/[^\s<>"'）)」』]+/gi;
 
 export function sniffFile(bytes) {

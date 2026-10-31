@@ -18,7 +18,7 @@ import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RUL
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
-import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry, withLogDecision } from "./policy.mjs";
+import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry, withLogDecision, scanNotifyDecision, visionMentionsConcreteShort, LINK_RULES } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames, darkNickNotifyReasons } from "./notify-rules.mjs";
 import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAnswer, pruneAvatarCache } from "./fakeadmin.mjs";
@@ -33,7 +33,7 @@ import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, unresolvedShortReportLine } from "./short-url-outcome.mjs";
-import { FILE_SCAN_DEFAULTS, scanFile } from "./file-scan.mjs";
+import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
 import { CommunityMemory, MEMORY_DEFAULTS, MEMORY_RULE } from "./community-memory.mjs";
@@ -263,6 +263,25 @@ function appendUnresolvedShortReport(row) {
     appendFileSync(file, `${line}\n`, { mode: 0o600 });
     chmodSync(file, 0o600);
   } catch (error) { recordError("unresolved-short-report", error.message); }
+}
+function appendUnsupportedFileReport(row) {
+  try {
+    const line = unsupportedFileReportLine(row);
+    if (!line) return;
+    const file = resolve(logDir, config.fileScan?.unsupportedReportFile ?? "unsupported-files.jsonl");
+    appendFileSync(file, `${line}\n`, { mode: 0o600 });
+    chmodSync(file, 0o600);
+  } catch (error) { recordError("unsupported-file-report", error.message); }
+}
+/** 一般連結（非群組邀請／QR）且分數 > 0：貼「可能詐騙」評分，不用疑似詐騙模板。 */
+function ordinaryLinkScoreKind(message, entry, text) {
+  if (config.kickScope?.ordinaryLinkScoreOnly === false) return false;
+  if (GROUP_INVITE.test(textOf(message) || message.noteText || text || "")) return false;
+  if (message.qrContent) return false;
+  if ((entry.names ?? []).includes("短網址導向群組邀請")) return false;
+  if (entry.fromNotifyRule) return false;
+  const names = entry.names ?? [];
+  return entry.link === true || names.some((n) => LINK_RULES.has(n));
 }
 const memoryAllowDomains = [...new Set([...(chat.allowedLinkDomains ?? []), ...(community.allowDomains ?? [])])];
 // 這些紀錄代表發言者被判詐騙／可疑：他的參考資料整批刪掉、之後不收。
@@ -1623,7 +1642,13 @@ async function checkFile(ws, message) {
   try { scan = await scanFile(Buffer.from(String(got.data ?? ""), "base64"), fileScan); } catch { scan = { urls: [], qrs: [], text: "", error: "SCAN_FAILED" }; }
   got.data = undefined;
   message.fileName = String(got.name ?? message.card?.name ?? "").slice(0, 120);
-  record({ action: "file-scan", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, kind: scan.kind, pages: scan.pages, urls: scan.urls.length, qrs: scan.qrs.length, error: scan.error });
+  const fileExt = fileExtension(message.fileName);
+  record({ action: "file-scan", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, kind: scan.kind, pages: scan.pages, urls: scan.urls.length, qrs: scan.qrs.length, error: scan.error, fileExt: fileExt || undefined, fileName: message.fileName ? message.fileName.slice(0, 40) : undefined });
+  // 10/31：UNSUPPORTED 記副檔名並列進日報 jsonl（給 22:00 人工看）。
+  if (scan.error === "UNSUPPORTED") {
+    appendUnsupportedFileReport({ at: new Date().toISOString(), chatId: message.channelId, messageId: message.messageId, fileExt, fileName: message.fileName });
+    return;
+  }
   const found = [...scan.urls, ...scan.qrs];
   let external = false;
   for (const link of found.filter((u) => GROUP_INVITE.test(u)).slice(0, 5)) {
@@ -1758,17 +1783,23 @@ async function scanNotifyMessage(ws, message) {
   }
   const result = await decide(message, text);
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(text), ...result };
-  if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) record(withLogDecision({ scanNotify: true, ...entry }, "none"));
+  // 10/31：scanNotify 不會真刪踢，decision 記 notify／none（勿寫 delete／kick）。
+  if (result.verdict !== "SKIP" && (result.score > 0 || result.verdict !== "OK")) {
+    record(withLogDecision({ scanNotify: true, ...entry, decision: scanNotifyDecision(result.action) }, "none"));
+  }
   // 10/26：「直接通知」的文字規則（例如代償借貸＋私下聯絡、收購門號；不含要累積分數的）在這類群也算，只發通知；提到派網沒附連結不算。
   if (!(result.kick || result.action === "delete" || result.action === "notice") && !exchangeTextNoLink(text)) {
     const direct = directNotifyNames(text, { verdict: result.verdict, review: result.review, protectedSender: neverKick(message) });
-    if (direct.length) { result.action = "notice"; entry.action = "notice"; entry.names = [...(result.names ?? []), ...direct]; result.names = entry.names; record({ action: "notify-rule", scanNotify: true, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: direct }); }
+    if (direct.length) { result.action = "notice"; entry.action = "notice"; entry.fromNotifyRule = true; entry.names = [...(result.names ?? []), ...direct]; result.names = entry.names; record({ action: "notify-rule", scanNotify: true, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: direct }); }
   }
   const flagged = result.kick || result.action === "delete" || result.action === "notice";
   if (flagged || link || result.score > 0 || (result.verdict !== "SKIP" && result.verdict !== "OK")) {
     learnAudit(message, { kind: link ? "link" : "text", verdict: flagged ? `SUSPECT_${result.review ?? result.verdict}` : result.verdict, reason: (result.names ?? []).join("、"), desc });
   }
-  if (flagged) await flagScanNotify(ws, entry);
+  if (flagged) {
+    const kind = ordinaryLinkScoreKind(message, entry, text) ? "link-score" : "suspect";
+    await flagScanNotify(ws, entry, kind);
+  }
 }
 
 // 看圖稽核（scanNotify 群）：一次抓圖、一次模型呼叫同時給判定與去識別化描述（和延伸學習共用結果與每小時上限）。
@@ -1853,6 +1884,18 @@ async function auditImage(ws, message) {
   // 維護者：交易所／獲利截圖沒附連結 → 只記錄。
   if (exchangeImageNoLink(reason) && !isFakeGroupImage(reason)) { record({ action: "pionex-nolink-skip", scanNotify: true, ...entry, notified: false }); return; }
   // 只有確定的 SCAM（理由有具體引流／要錢訊號）才通知；UNSURE／SCAM_WEAK 只記錄。
+  // 10/31：SCAM_WEAK 但理由提到具體短網址 → 必跑覆核；覆核也 SCAM 才通知。
+  if (verdict === "SCAM_WEAK" && visionMentionsConcreteShort(reason)) {
+    const review = await reviewVisionSolo(small);
+    entry.review = review.verdict; entry.reviewModel = review.model;
+    if (review.verdict === "SCAM") {
+      record({ action: "vision-flag", scanNotify: true, ...entry });
+      await flagScanNotify(ws, entry);
+    } else {
+      record({ action: "vision-weak-short-skip", scanNotify: true, ...entry, notified: false });
+    }
+    return;
+  }
   if (verdict === "SCAM") {
     // 維護者 10/25：沒有連結訊號（含 QR）又沒有覆核確認 SCAM → 只記錄、不在群內通知。
     if (!visionHasLink(reason, { qr: Boolean(content) })) {
@@ -2112,6 +2155,7 @@ async function handle(ws, message) {
       else if (extra.length) {
         result.action = "notice";
         entry.action = "notice";
+        entry.fromNotifyRule = true;
         entry.names = [...(result.names ?? []), ...extra];
         result.names = entry.names;
         record({ action: "notify-rule", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, rules: extra, urlKind: entry.urlKind });
@@ -2131,8 +2175,10 @@ async function handle(ws, message) {
         record({ action: "suspect-cooldown", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, reason: "fake-admin-notified" });
         return;
       }
-      record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
-      notifyAdmins(ws, entry, "suspect");
+      // 10/26 23:01＋10/31：一般連結分數 > 0 且雙模型 SCAM → 貼「可能詐騙」評分（link-score），不用疑似詐騙模板。
+      const kind = ordinaryLinkScoreKind(message, entry, text) ? "link-score" : "suspect";
+      record({ action: kind === "link-score" ? "link-score-only" : "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: result.score, names: result.names, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel });
+      notifyAdmins(ws, entry, kind);
       return;
     }
     if (shopWarn && !result.kick && result.action !== "delete") await shopReminder(ws, message);
@@ -2377,6 +2423,18 @@ async function checkWithVision(ws, message, picture) {
     const flagged = { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] };
     record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE" });
     await notifyAdmins(ws, flagged, "suspect");
+    return;
+  }
+  // 10/31：SCAM_WEAK 但理由提到具體短網址 → 必跑覆核；覆核也 SCAM 才通知（只通知，不刪不踢）。
+  if (verdict === "SCAM_WEAK" && visionMentionsConcreteShort(reason)) {
+    const review = await reviewVisionSolo(small);
+    entry.review = review.verdict; entry.reviewModel = review.model;
+    if (review.verdict === "SCAM") {
+      record({ action: "vision-flag", ...entry });
+      await notifyAdmins(ws, entry, "suspect");
+    } else {
+      record({ action: "vision-weak-short-skip", ...entry, notified: false });
+    }
     return;
   }
   // 維護者 10/25：單一看圖模型判 SCAM、圖裡沒有連結訊號，又沒有覆核模型確認 SCAM → 只記錄、不在群內通知（不計標記）。
@@ -2690,7 +2748,7 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   }
   // 回覆（引用）那則詐騙訊息，大家看得出是哪一則；訊息已刪除或伺服器不認得就退成不引用。
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
-  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId, canMention: canMentionIn(entry.chatId) });
+  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId, canMention: canMentionIn(entry.chatId), aboutName: entry.senderName });
   if (reply.type === "sent" && reply.messageId) { sentByBot.add(reply.messageId); ownMessages.add(reply.messageId); }
   if (reply.type === "sent") markReplySkipNotified(entry.chatId, entry.senderId);
   record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, mentioned: Boolean(reply.type === "sent" && tried.at(-1)?.mentions), tried: tried.map((t) => t.result), attempts: tried.length, mentions: mentions.map((m) => m.userId) });

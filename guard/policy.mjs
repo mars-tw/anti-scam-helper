@@ -37,8 +37,9 @@ export function decideAction({ score, verdict, review, names = [], strongScore =
   // 地端＋Meta 都判 SCAM，而且真的含外部連結（白名單連結已先被換掉）：本帳號能刪的群 → 先通知再刪訊息（不踢）。
   if (bothScam && link === true && deleteOnLink && canDelete) return "delete";
   if (score >= notifyScore) return "notice";
-  // 只有「網址」一個特徵、分數 1 的訊息：只記錄不通知（至少要分數 ≥ 2 或兩個特徵）。
-  if (bothScam && (link === true || names.some((name) => LINK_RULES.has(name))) && (score >= 2 || names.length >= 2)) return "notice";
+  // 10/26 23:01＋10/31 誤判：一般連結分數 > 0 且雙模型 SCAM → 貼「可能詐騙」評分（notice；主路徑／scanNotify 會改成 link-score）。
+  // 沒有連結訊號（例如只有「私下聯繫」）仍不因雙模型 SCAM 就通知。
+  if (bothScam && score > 0 && (link === true || names.some((name) => LINK_RULES.has(name)))) return "notice";
   return "none";
 }
 
@@ -560,6 +561,24 @@ export function visionHasLink(reason, { qr = false } = {}) {
 /** 單一看圖模型判 SCAM 是否可以在群內通知：有連結訊號，或覆核模型也判 SCAM。 */
 export function visionSoloMayNotify({ reason, qr = false, review } = {}) {
   return visionHasLink(reason, { qr }) || review === "SCAM";
+}
+
+/** 看圖理由是否提到「具體短網址」（已知短網址服務、https 鏈，或非否定的「短網址／縮網址」字樣）。
+ * 10/31：SCAM_WEAK 若命中此項，一定跑覆核；覆核也 SCAM 才通知。 */
+const VISION_SHORT_HOST = /(?:bit\.ly|reurl\.cc|pse\.is|tinyurl\.com|tiny\.cc|ppt\.cc|is\.gd|v\.gd|t\.ly|cutt\.ly|rb\.gy|ow\.ly|buff\.ly|supr\.link|lihi\d?\.(?:cc|com|me)|1url\.cz|shorturl\.(?:at|asia|gg)|me2\.do|s\.id|gg\.gg)/i;
+export function visionMentionsConcreteShort(reason) {
+  const r = String(reason ?? "");
+  if (VISION_SHORT_HOST.test(r)) return true;
+  if (/https?:\/\/\S{4,}/i.test(r)) return true;
+  if (/(?:短網址|縮網址)/i.test(r) && !/(?:無|沒有|未見|未發現)\s*(?:短網址|縮網址)/i.test(r)) return true;
+  return false;
+}
+
+/** scanNotify 路徑：決策欄不寫 delete／kick（這類群不會真刪踢），改記 notify／none。 */
+export function scanNotifyDecision(action) {
+  if (action === "delete" || action === "kick" || action === "notice" || action === "notify") return "notify";
+  if (typeof action !== "string" || !action) return "none";
+  return action;
 }
 
 /**
