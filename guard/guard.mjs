@@ -1734,8 +1734,8 @@ async function checkUnrecognizedLink(ws, message, text) {
   return true;
 }
 
-// 士軒 11/4 20:26：帶單老師 LINE@／官方帳號引流。永不踢；刪文超出現行「一般連結只評分」，獨立開關預設開。
-const bandanLineOaCfg = { enabled: true, deleteMessage: true, probePage: true, ...(config.bandanLineOa ?? {}) };
+// 士軒 11/4 20:26：帶單老師 LINE@／官方帳號引流。永不踢；刪文超出現行「一般連結只評分」，獨立開關預設關（只通知）。excludeChats（熊群）比照其他刪文路徑不刪。
+const bandanLineOaCfg = { enabled: true, deleteMessage: false, probePage: true, ...(config.bandanLineOa ?? {}) };
 async function handleBandanLineOa(ws, message, text, { qrContent } = {}) {
   if (bandanLineOaCfg.enabled === false || neverKick(message) || isStaff(message) || message.senderId === me) return false;
   const contextText = recentBandanContext(message);
@@ -1754,11 +1754,14 @@ ${contextText}`);
       if (probe) entry.oaProbe = { verified: probe.verified, friends: probe.friends, lowFriends: probe.lowFriends };
     }
   }
+  // 熊群等 kickScope.excludeChats：比照 unrecognized 刪文路徑，不刪（仍可通知；learnOnly 另擋）。
+  const excludeChat = (config.kickScope?.excludeChats ?? []).includes(message.channelId);
   const act = bandanLineOaAction({
     warnOnly: warnOnly.has(message.channelId),
     learnOnly: learnOnly.has(message.channelId),
-    deleteMessage: bandanLineOaCfg.deleteMessage !== false,
-    canDelete: !noAction(message.channelId) && notifyChats.has(message.channelId),
+    excludeChat,
+    deleteMessage: bandanLineOaCfg.deleteMessage === true,
+    canDelete: !noAction(message.channelId) && notifyChats.has(message.channelId) && !excludeChat,
   });
   // 永不踢；kickMode 維持 notify 也不會因本規則升級。
   if (act.delete) {
@@ -2141,7 +2144,7 @@ async function handle(ws, message) {
       }
     }
   }
-  // 士軒 11/4：帶單老師 LINE@／官方帳號（文字同則或接續）→ 刪文＋警告＋通知；永不踢。先於 friendNote，避免 OA 連結被溫和備註軟放行。
+  // 士軒 11/4：帶單老師 LINE@／官方帳號（文字同則或接續）→ 警告＋通知（刪文看 bandanLineOa.deleteMessage，預設關）；永不踢。先於 friendNote，避免 OA 連結被溫和備註軟放行。
   if (!trusted && text) {
     noteBandanLure(message, text);
     if (await handleBandanLineOa(ws, message, text)) { remember(message, text); return; }
