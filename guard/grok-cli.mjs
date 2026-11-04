@@ -18,6 +18,7 @@ export const GROK_CLI_DEFAULTS = {
   effort: "low",
   maxImageBase64: 100_000,
   disableMinutesOnAuthError: 30,
+  quotaDisableMinutes: 60,
 };
 
 const NO_TOOLS = "run_terminal_cmd,read_file,grep,list_dir,write,search_replace,web_search,web_fetch,task,Agent,image_gen,Shell,Delete,StrReplace,EditNotebook,GenerateImage,GenerateVideo,XSearch,CallMcpTool";
@@ -27,7 +28,7 @@ let running = 0;
 const queue = [];
 const state = { disabledUntil: 0, logged: false };
 export function grokCliState() { return { ...state, running, queued: queue.length }; }
-export function resetGrokCliState() { state.disabledUntil = 0; state.logged = false; }
+export function resetGrokCliState() { state.disabledUntil = 0; state.logged = false; state.exitStreak = 0; }
 
 async function slot(limit) {
   if (running < limit) { running++; return; }
@@ -114,13 +115,22 @@ export async function grokCli(llm, system, user, { image, schema, spawnImpl = sp
         if (!state.logged) { state.logged = true; onAuthError(); }
         throw new Error("AUTH");
       }
+      // 11/4：訂閱額度用完時 CLI 回 402（Payment Required），每次都 EXIT_1、白等一輪。→ 標 QUOTA，停用 quotaDisableMinutes 分鐘直接跳下一個模型。
+      if (/\b402\b|payment\s*required|quota|credits?\s*(?:exhausted|exceeded|insufficient)|usage\s*limit|out of credits/i.test(`${out.stderr}\n${out.stdout.slice(0, 4000)}`)) {
+        state.disabledUntil = now() + (cfg.quotaDisableMinutes ?? 60) * 60_000;
+        throw new Error("QUOTA");
+      }
       // 錯誤碼只帶分類，不帶內容（stderr 可能有提示詞或路徑）。
       if (/bwrap|sandbox/i.test(out.stderr)) throw new Error(`SANDBOX_EXIT_${out.code}`);
+      // 402 不一定寫進 stderr（11/4 只在 CLI 自己的日誌看到）：連續 3 次 EXIT 就暫停 exitBackoffMinutes 分鐘，成功一次歸零。
+      state.exitStreak = (state.exitStreak ?? 0) + 1;
+      if (state.exitStreak >= (cfg.exitStreakLimit ?? 3)) { state.disabledUntil = now() + (cfg.exitBackoffMinutes ?? 15) * 60_000; state.exitStreak = 0; }
       throw new Error(`EXIT_${out.code}`);
     }
     let data;
     try { data = JSON.parse(out.stdout); } catch { throw new Error("BAD_JSON"); }
     state.logged = false;
+    state.exitStreak = 0;
     const text = typeof data.text === "string" ? data.text.trim() : "";
     let structured = data.structuredOutput;
     if (schema && !structured) { try { structured = JSON.parse(text); } catch {} }

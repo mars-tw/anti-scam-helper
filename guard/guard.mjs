@@ -31,7 +31,7 @@ import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
-import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, probeLineOaPage } from "./line-oa-bandan.mjs";
+import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, isLineOaUrl, probeLineOaPage } from "./line-oa-bandan.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, unresolvedShortReportLine } from "./short-url-outcome.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
@@ -1292,7 +1292,11 @@ const bandanLureLog = new Map(); // 聊天室＋發言者 → { at, text }
 function noteBandanLure(message, text) {
   if (!hasBandanLure(text)) return;
   const key = `${message.channelId} ${message.senderId}`;
-  bandanLureLog.set(key, { at: Date.now(), text: String(text ?? "").slice(0, 240) });
+  const prev = bandanLureLog.get(key);
+  // 同一則重記（併案時）不要蓋掉前一則的 messageId。
+  if (prev && prev.messageId === message.messageId) { prev.at = Date.now(); return; }
+  const prior = prev && Date.now() - prev.at <= COMBO_WINDOW_MS ? { at: prev.at, messageId: prev.messageId, contentType: prev.contentType } : undefined;
+  bandanLureLog.set(key, { at: Date.now(), text: String(text ?? "").slice(0, 240), messageId: message.messageId, contentType: message.contentType, prior });
   if (bandanLureLog.size > 2000) bandanLureLog.delete(bandanLureLog.keys().next().value);
 }
 function recentBandanContext(message) {
@@ -1300,6 +1304,15 @@ function recentBandanContext(message) {
   const e = bandanLureLog.get(key);
   if (!e || Date.now() - e.at > COMBO_WINDOW_MS) return "";
   return e.text;
+}
+/** 11/4 17:16：前一則帶單圖（同人 2 分鐘內）＋這則 LINE@ QR 併案：回前一則的 messageId 供一起刪。 */
+function recentBandanLure(message) {
+  const e = bandanLureLog.get(`${message.channelId} ${message.senderId}`);
+  if (!e) return undefined;
+  // 這則自己剛被記成帶單語意（先記再判）→ 改看它蓋掉的前一則。
+  const hit = e.messageId === message.messageId ? e.prior : e;
+  if (!hit || Date.now() - hit.at > COMBO_WINDOW_MS || hit.messageId === message.messageId) return undefined;
+  return hit;
 }
 function impersonatedAnyCommunity(message) {
   const id = message.senderId;
@@ -1736,10 +1749,14 @@ async function checkUnrecognizedLink(ws, message, text) {
 
 // 士軒 11/4 20:26：帶單老師 LINE@／官方帳號引流。永不踢；刪文超出現行「一般連結只評分」，獨立開關預設關（只通知）。excludeChats（熊群）比照其他刪文路徑不刪。
 const bandanLineOaCfg = { enabled: true, deleteMessage: false, probePage: true, ...(config.bandanLineOa ?? {}) };
-async function handleBandanLineOa(ws, message, text, { qrContent } = {}) {
+async function handleBandanLineOa(ws, message, text, { qrContent, vision = false, expandedUrl } = {}) {
   if (bandanLineOaCfg.enabled === false || neverKick(message) || isStaff(message) || message.senderId === me) return false;
   const contextText = recentBandanContext(message);
-  if (!isBandanLineOa(text, { qrContent: qrContent ?? message.qrContent, contextText, protectedSender: neverKick(message) })) return false;
+  const priorLure = recentBandanLure(message);
+  // expandedUrl：短網址展開後的 LINE@ 網址（11/4 18:20 url.kr → line.me/R/ti/p/@…）。
+  const judged = expandedUrl ? `${text}\n${expandedUrl}` : text;
+  if (!isBandanLineOa(judged, { qrContent: qrContent ?? message.qrContent, contextText, protectedSender: neverKick(message), vision })) return false;
+  text = judged;
   noteBandanLure(message, `${text}
 ${contextText}`);
   const entry = {
@@ -1777,6 +1794,11 @@ ${contextText}`);
     }, notify.beforeActionMs ?? 2000, sleep);
     const deleted = answer.type === "message:deleted";
     if (deleted) markSelfCanKick(entry.chatId, "bandan-line-oa-deleted");
+    // 併案：同人 2 分鐘內前一則帶單語意（圖／文）一起刪（只刪不踢；前一則已單獨處置過也只是刪不到）。
+    if (priorLure?.messageId) {
+      const prior = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: priorLure.messageId });
+      record({ action: prior.type === "message:deleted" ? "bandan-line-oa-prior-deleted" : "bandan-line-oa-prior-delete-failed", chatId: entry.chatId, messageId: priorLure.messageId, pairedWith: entry.messageId, senderId: entry.senderId, contentType: priorLure.contentType, code: prior.type === "message:deleted" ? undefined : prior.code, kick: false });
+    }
     else record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
     record({ action: deleted ? "bandan-line-oa-deleted" : "bandan-line-oa-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code, kick: false });
     if (!deleted) await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
@@ -2184,7 +2206,9 @@ async function handle(ws, message) {
       shopWarn = outcome.shopWarn;
       // 真正落地才改寫本文再計分；不另外 drop「短網址」分數。
       if (outcome.rewrite && expanded?.url) decideText = text.replace(shortUrl, expanded.url);
-      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: outcome.result });
+      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, result: expanded?.lineOa ? "line-oa" : outcome.result });
+      // 11/4 18:20：短網址落地是 LINE 官方帳號 → 帶單老師 LINE@ 判斷（要有帶單語意；不加分數、不踢）。
+      if (expanded?.lineOa && isLineOaUrl(expanded.url) && await handleBandanLineOa(ws, message, text, { expandedUrl: expanded.url })) { remember(message, text); return; }
       if (outcome.result === "unresolved") appendUnresolvedShortReport({ chatId: message.channelId, messageId: message.messageId, url: shortUrl, result: outcome.result });
     }
     const perChatKickHere = policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick";
@@ -2198,6 +2222,11 @@ async function handle(ws, message) {
     const susUrl = !shortUrl && config.shortUrlExpand === true ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
     if (susUrl) {
       const expanded = await expandUrlSafe(/^https?:/i.test(susUrl.trim()) ? susUrl.trim() : `https://${susUrl.trim()}`).catch(() => undefined);
+      // 11/4 18:20：疑似短網址（url.kr 等）落地 LINE 官方帳號 → 帶單老師 LINE@ 判斷（要有帶單語意；不加分數、不踢）。
+      if (expanded?.lineOa && isLineOaUrl(expanded.url)) {
+        record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: "line-oa" });
+        if (await handleBandanLineOa(ws, message, text, { expandedUrl: expanded.url })) { remember(message, text); return; }
+      }
       if (expanded?.invite) extraNames.push("短網址導向群組邀請");
       else if (expanded?.url && (isKnowledgePage(expanded.url, expanded.html) || isMainstreamMediaHost((() => { try { return new URL(expanded.url).hostname; } catch { return ""; } })()))) knowledgeLink = true;
       else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
@@ -2513,7 +2542,7 @@ async function checkWithVision(ws, message, picture) {
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", ...(recheck ? { cloudRecheck: recheck } : {}), seconds: Math.round((Date.now() - started) / 1000) };
   // 士軒 11/4：看圖理由有帶單語意 → 記進 combo，接續 OA QR 可併案；理由本身已含 LINE@ 則直接處置。
   if (reason) noteBandanLure(message, reason);
-  if (reason && await handleBandanLineOa(ws, message, reason)) return;
+  if (reason && await handleBandanLineOa(ws, message, reason, { vision: true })) return;
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   // 維護者：交易所／獲利截圖沒附連結 → 只記錄（不通知、不標記、不計 24h 獲利圖次數）。
   if ((verdict === "SCAM" || verdict === "UNSURE") && !isFakeGroupImage(reason) && exchangeImageNoLink(reason)) {
@@ -2855,7 +2884,7 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   // 10/27 F：一般連結的「可能詐騙」評分只在 > 0 分時貼（0 分、一般分享、一般投資訊息不貼）。
   if (!shouldPostLinkScore({ kind, score: entry.score })) { record({ action: "link-score-zero-skip", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId }); return false; }
   const now = Date.now();
-  if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", chatId: entry.chatId, senderName: entry.senderName }); return false; }
+  if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", kind, chatId: entry.chatId, messageId: entry.messageId, senderName: entry.senderName }); return false; }
   lastNotified.set(entry.chatId, now);
   const admins = noticeAdmins(entry.chatId, [entry.senderId]);
   const { text, mentions } = buildNotice(entry, kind, admins);
@@ -3478,8 +3507,14 @@ async function runLearnExt(ws, { force = false } = {}) {
   const names = new Set();
   try {
     for (const chatId of learnExt) {
-      const page = await call(ws, { type: "history:fetch", chatId, limit: 100 }, 180_000);
-      if (page.type !== "history") { record({ action: "learn-ext-history-failed", chatId, code: page.code }); continue; }
+      // 11/4 15:07：伺服器偶發 HISTORY_FAILED（同輪兩群）→ 最多重試 2 次、間隔 3 秒，仍失敗才記錄。
+      let page;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        page = await call(ws, { type: "history:fetch", chatId, limit: 100 }, 180_000);
+        if (page.type === "history" || ws?.readyState !== WebSocket.OPEN) break;
+        await sleep(3000);
+      }
+      if (page.type !== "history") { record({ action: "learn-ext-history-failed", chatId, code: page.code, attempts: 3 }); continue; }
       const threadIds = new Set(extThreads.get(chatId) ?? []);
       let images = 0;
       for (const m of page.messages) {

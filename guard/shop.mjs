@@ -133,6 +133,8 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
     const ips = isIP(host) ? [host] : (await resolve(host, { all: true }).catch(() => [])).map((entry) => entry.address);
     if (ips.length === 0 || ips.some(privateIp)) return undefined;
     if (/^(?:[\w-]+\.)*line\.me$/i.test(host) && /^\/(?:R\/)?ti\/g2?\//i.test(parsed.pathname)) return { url: parsed.toString(), html: "", invite: true };
+    // 11/4 18:20：短網址 302 到 LINE 官方帳號（line.me/R/ti/p/@ID、lin.ee、page.line.me）→ 停在這一跳標 lineOa，交給帶單老師 LINE@ 判斷（不再抓 LINE 頁）。
+    if ((/^(?:[\w-]+\.)*line\.me$/i.test(host) && /^\/(?:R\/)?ti\/p\/@/i.test(parsed.pathname)) || /^lin\.ee$/i.test(host) || /^page\.line\.me$/i.test(host)) return { url: parsed.toString(), html: "", lineOa: true };
     let response;
     try {
       response = await fetchImpl(parsed, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", Accept: "text/html" } });

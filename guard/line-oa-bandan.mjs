@@ -23,7 +23,7 @@ export const LINE_OA_AT = /(?:加|賴|line\s*id|LINE\s*ID|官方(?:帳號)?|老�
  * 私人老師／帶單語意（穩賺、翻倍單靠不夠——商家「雙11 穩賺優惠」不可命中）。
  * 需老師／帶單／跟單／喊單／投顧／報牌等，另見 hasBandanLure 的投資語境。
  */
-export const BANDAN_TEACHER = /帶單|喊單|老師帶|投顧老師|操盤老師|帶單老師|跟單老師|報牌|明牌|招收學員|學員名額|進群帶|帶你賺|保證獲利|免費諮詢.{0,8}(?:帶|跟|賺)|分析師.{0,8}(?:一對一|帶|跟)|老師.{0,10}(?:帶單|跟單|獲利|賺錢|加|私)|(?:賺錢|獲利).{0,10}(?:老師|帶單)|跟單(?:老師|名額|保證)/i;
+export const BANDAN_TEACHER = /帶單|喊單|老師帶|投顧老師|操盤老師|帶單老師|跟單老師|報牌|明牌|招收學員|學員名額|進群帶|帶你賺|保證獲利|免費諮詢.{0,8}(?:帶|跟|賺)|分析師.{0,8}(?:一對一|帶|跟)|老師.{0,10}(?:帶單|跟單|獲利|賺錢|加|私)|(?:賺錢|獲利).{0,10}(?:老師|帶單)|跟單(?:老師|名額|保證)|推薦.{0,6}老師|老師.{0,8}學員|學員(?:不多|有限|名額)/i;
 
 /** 單獨「跟單」字樣（交易所跟單功能也會用；要搭配投資語境，且排除官方跟單教學軟放行）。 */
 export const GENDAN = /跟單/;
@@ -41,7 +41,7 @@ export const EXCHANGE_BRAND = /幣安|binance|bybit|派網|pionex|okx|歐易/i;
 export const EXCHANGE_COPY_TEACH = /跟單(?:交易)?(?:教學|功能|說明|介紹|怎麼用|攻略|指南|設定)|(?:教學|介紹|說明|攻略).{0,10}跟單|官方.{0,8}跟單|跟單交易/i;
 
 /** 私人老師帶單語意：有這些就不走交易所軟放行。 */
-export const PRIVATE_TEACHER_LURE = /老師帶|帶單老師|跟單老師|投顧老師|操盤老師|私人.?老師|一對一.{0,8}(?:帶|跟)|保證獲利|招收學員|學員名額|報牌|明牌|喊單|帶你賺|加我.{0,8}(?:跟單|帶單)|私訊.{0,8}(?:帶|跟|老師)|帶單(?!交易)/i;
+export const PRIVATE_TEACHER_LURE = /老師帶|帶單老師|跟單老師|投顧老師|操盤老師|私人.?老師|一對一.{0,8}(?:帶|跟)|保證獲利|招收學員|學員名額|報牌|明牌|喊單|帶你賺|加我.{0,8}(?:跟單|帶單)|私訊.{0,8}(?:帶|跟|老師)|帶單(?!交易)|推薦.{0,6}老師|老師.{0,8}學員|學員(?:不多|有限)/i;
 
 const ANTI_WARN = /(?:疑似|可能是?|小心|注意|提醒|警告|防範|謹防).{0,10}(?:詐騙|假)|是詐騙嗎|是不是詐騙|165/i;
 
@@ -82,9 +82,22 @@ export function isExchangeOfficialCopyTrade(text = "") {
   return false;
 }
 
-/** 這段文字／QR 是否指向 LINE 官方帳號（含 OA 加好友連結）。 */
-export function hasLineOaForm(text = "", { qrContent } = {}) {
+/**
+ * 11/4 17:16／17:39 漏擋：看圖理由只寫「LINE 官方綠色 QR code」，沒有 @ID 可抽。
+ * 只用在看圖理由（vision: true）；一般文字仍要 @ID／連結，避免聊天提到「官方帳號」誤中。
+ */
+export const LINE_OA_VISION = /LINE\s*@|LINE\s*官方(?:帳號)?|官方帳號.{0,6}(?:QR|二維|條碼|截圖|分享卡|名片)|OA\s*QR/i;
+const VISION_NEGATED = /(?:無|沒有|未見|不含|並非|不是).{0,8}(?:QR|LINE|官方帳號)/i;
+
+/** 展開後的網址是不是 LINE 官方帳號加好友頁（@ID、lin.ee、page.line.me）。個人 ti/p/~ 不算。 */
+export function isLineOaUrl(url = "") {
+  return LINE_OA_URL.test(String(url ?? ""));
+}
+
+/** 這段文字／QR 是否指向 LINE 官方帳號（含 OA 加好友連結）。vision：看圖理由，可用「LINE 官方 QR」描述。 */
+export function hasLineOaForm(text = "", { qrContent, vision = false } = {}) {
   const raw = `${NFKC(text)}\n${NFKC(qrContent)}`;
+  if (vision && LINE_OA_VISION.test(NFKC(text)) && !VISION_NEGATED.test(NFKC(text))) return true;
   if (LINE_OA_URL.test(raw)) return true;
   if (qrContent && /line\.me\/(?:R\/)?ti\/p\/@|lin\.ee\/|page\.line\.me/i.test(String(qrContent))) return true;
   if (LINE_OA_AT.test(raw)) return true;
@@ -108,7 +121,7 @@ export function hasBandanLure(text = "") {
  * 帶單老師 LINE@：要同時有「帶單語意」與「LINE OA 形式」。
  * contextText：同人前後短時間內的帶單文／看圖理由（給 QR 接續用）。
  */
-export function isBandanLineOa(text = "", { qrContent, contextText = "", protectedSender = false } = {}) {
+export function isBandanLineOa(text = "", { qrContent, contextText = "", protectedSender = false, vision = false } = {}) {
   if (protectedSender) return false;
   const t = NFKC(text);
   const ctx = NFKC(contextText);
@@ -121,7 +134,7 @@ export function isBandanLineOa(text = "", { qrContent, contextText = "", protect
   if (isExchangeOfficialCopyTrade(all)) return false;
   if (!hasBandanLure(all)) return false;
   // OA 可在本則、QR 或上下文任一處
-  if (hasLineOaForm(t, { qrContent })) return true;
+  if (hasLineOaForm(t, { qrContent, vision })) return true;
   if (hasLineOaForm(ctx, { qrContent })) return true;
   return false;
 }
