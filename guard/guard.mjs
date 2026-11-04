@@ -17,7 +17,7 @@ import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RULES, SHORTENERS, forcedScamNames } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
-import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopLinks } from "./shop.mjs";
+import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopPageOnlyReviewOk, shopLinks } from "./shop.mjs";
 import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry, withLogDecision, scanNotifyDecision, visionMentionsConcreteShort, LINK_RULES } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
 import { isKnowledgePage, reviewOnlyScam, fakeNoticeModelsOk, impersonatorKick, firstUrl, imageNotify, makeLookalikeTracker, MINER_KICKABLE, minerAction, makeNotifyTracker, textNotifyReasons, urlKind, isMainstreamMediaHost, onlyMainstreamMediaLinks, zeroScoreShouldNotify, noticeTips, directNotifyNames, darkNickNotifyReasons } from "./notify-rules.mjs";
@@ -159,13 +159,13 @@ function isShoppingPage(html) {
 }
 // 短網址展開是購物頁：群內提醒（不刪不踢），每群 10 分鐘最多一次。
 const shopReminded = new Map();
-async function shopReminder(ws, message) {
+async function shopReminder(ws, message, text = "⚠️ 這個短網址打開是購物頁面，可能是詐騙，請勿亂下單、亂填信用卡。") {
   const now = Date.now();
   if (now - (shopReminded.get(message.channelId) ?? 0) < 10 * 60_000) return record({ action: "shop-reminder-skipped", chatId: message.channelId, reason: "cooldown" });
   shopReminded.set(message.channelId, now);
   record({ action: "shop-reminder", chatId: message.channelId, messageId: message.messageId });
   if (!notifyChats.has(message.channelId)) return;
-  const reply = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: "⚠️ 這個短網址打開是購物頁面，可能是詐騙，請勿亂下單、亂填信用卡。", mentions: [], replyTo: message.messageId });
+  const reply = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text, mentions: [], replyTo: message.messageId });
   if (reply?.answer?.type === "sent" && reply.answer.messageId) { sentByBot.add(reply.answer.messageId); ownMessages.add(reply.answer.messageId); }
 }
 const SHORT_LINK = new RegExp(`(?<![\\w.-])(?:[a-z0-9-]+\\.)*(${SHORTENERS.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\/[\\w-]`, "i");
@@ -1602,6 +1602,11 @@ async function checkScamShop(ws, message, rawText) {
   const { result, review } = scored;
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...contentRef(rawText), verdict: "SCAM_SHOP", names: ["疑似一頁式詐騙購物網站"], score: result.score, signals: result.signals, review: review?.verdict ?? (reviewLlm ? "UNAVAILABLE" : undefined), level: result.level };
   if (result.level === "none") { record({ action: "scam-shop-cleared", ...entry }); return false; }
+  if (result.level === "unsure" && shopPageOnlyReviewOk(result, review?.verdict)) {
+    record({ action: "scam-shop-review-ok", ...entry });
+    await shopReminder(ws, message, "⚠️ 反詐小幫手：這是購物頁面，下單前請先查證，勿亂填信用卡。（AI代理）");
+    return true;
+  }
   if (result.level === "unsure") {
     record({ action: "scam-shop-suspect", ...entry });
     notifyAdmins(ws, entry, "shop-suspect");

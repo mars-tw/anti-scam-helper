@@ -64,3 +64,26 @@ test("違規紀錄 30 天過期", () => {
   pruneOffenses(map, now);
   assert.deepEqual(map, { b: [now - 86_400_000] });
 });
+
+test("11/4 誤通知：只有頁面結構訊號＋覆核 OK → 只發溫和購物提醒，不貼一頁式詐騙通知", async () => {
+  const { shopPageOnlyReviewOk } = await import("../guard/shop.mjs");
+  const text = "活動報名表單 https://form.example.com/a";
+  const links = shopLinks(text);
+  const page = ["頁面：單頁訂購表單", "頁面：一頁式"];
+  const ok = scoreScamShop({ text, links, page, review: "OK" });
+  assert.equal(ok.level, "unsure");
+  assert.equal(shopPageOnlyReviewOk(ok, "OK"), true);
+  // 覆核不是 OK（SCAM／無法覆核）照舊通知
+  assert.equal(shopPageOnlyReviewOk(scoreScamShop({ text, links, page }), undefined), false);
+  assert.equal(shopPageOnlyReviewOk(scoreScamShop({ text, links, page, review: "UNSURE" }), "UNSURE"), false);
+  // 對抗：文字有名牌低價、貨到付款、怪網域任一項，就算覆核 OK 也照舊通知
+  for (const t of ["LV 名牌包只要 $399 https://form.example.com/a", "貨到付款 https://form.example.com/a", "看看 https://lv-bags-sale12345.shop/a"]) {
+    const r = scoreScamShop({ text: t, links: shopLinks(t), page, review: "OK" });
+    assert.equal(shopPageOnlyReviewOk(r, "OK"), false, t);
+  }
+  // 頁面名牌低價也不算純結構訊號
+  const lux = scoreScamShop({ text, links, page: ["頁面：名牌低價", "頁面：一頁式"], review: "OK" });
+  assert.equal(shopPageOnlyReviewOk(lux, "OK"), false);
+  // 確定等級不受影響
+  assert.equal(shopPageOnlyReviewOk({ level: "confident", signals: page }, "OK"), false);
+});

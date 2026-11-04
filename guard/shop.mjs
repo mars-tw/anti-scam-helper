@@ -71,6 +71,16 @@ export function scoreScamShop({ text, links, page = [], review }) {
   return { score, signals, level };
 }
 
+/**
+ * 11/4 誤通知：一般成員貼購物連結，只有頁面結構訊號（單頁訂購表單、一頁式），文字沒有名牌低價、貨到付款、怪網域，
+ * 覆核又判 OK → 當一般購物頁，只發溫和的「勿亂下單」提醒，不貼「一頁式詐騙網站特徵」通知。只影響通知，不影響刪踢。
+ */
+export function shopPageOnlyReviewOk(result, review) {
+  if (!result || result.level !== "unsure" || review !== "OK") return false;
+  const signals = result.signals ?? [];
+  return signals.length > 0 && signals.every((name) => name.startsWith("頁面：") && name !== "頁面：名牌低價");
+}
+
 function privateIp(ip) {
   if (isIP(ip) === 6) return /^(::1|::|fc|fd|fe80|::ffff:(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.))/i.test(ip);
   return /^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip);
