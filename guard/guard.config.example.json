@@ -73,6 +73,12 @@
     "maxAgeDays": 7,
     "purgeHour": 3
   },
+  "bandanLineOa": {
+    "_說明": "士軒 11/4：帶單老師 LINE@／官方帳號引流。永不踢。deleteMessage 超出現行「一般連結只評分」，獨立開關預設開；Hao0321／warnOnly 只警告。probePage 可選抓公開頁認證／好友數。",
+    "enabled": true,
+    "deleteMessage": true,
+    "probePage": true
+  },
   "scamLink": {
     "deleteOnConfirmed": false
   },

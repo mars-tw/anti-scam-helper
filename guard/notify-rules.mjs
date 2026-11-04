@@ -1,5 +1,6 @@
 import { isPlainAntiScamBotAlert, containsNameToken, looksLike } from "./policy.mjs";
 import { FRIEND_ADD, GROUP_INVITE } from "./kick-scope.mjs";
+import { BANDAN_LINE_OA, hasBandanLure, hasLineOaForm, isBandanLineOa as isBandanLineOaMatch } from "./line-oa-bandan.mjs";
 const INVITE_RE = /line\.me\/(?:R\/)?ti\/g2?\/|openchat\.line\.me\/|line\.me\/(?:R\/)?square\//i;
 export const CROSS_INVITE = "同群組邀請跨群出現";
 /** 踢人群（per-chat kickMode:kick，維護者 10/22 15:51）可刪踢的通知層理由；其他群一律只通知。 */
@@ -76,6 +77,11 @@ export const NOTIFY_RULES = [
     if (/派網|pionex/i.test(c) && !hasLinkOrInvite(c) && !LOAN_CONCRETE.test(c)) return false;
     if (LOAN_CONCRETE.test(c)) return true;
     return LOAN_SOFT.test(c) && !ANTI_SCAM_WARNING.test(c) && !ASK_IF_SCAM.test(c) && !WARN_EXTRA.test(c);
+  } },
+  // 士軒 11/4：帶單老師 LINE@／官方帳號引流。規則層列名＋通知；刪文由 guard handleBandanLineOa（永不踢）。
+  { name: BANDAN_LINE_OA, score: 4, direct: true, match: (t, ctx = {}) => {
+    if (ctx.protectedSender || (ctx.verdict === "OK" && ctx.review === "OK")) return false;
+    return isBandanLineOaMatch(t);
   } },
   // 10/27 自動反思：投顧／分析師一對一帶當沖、號稱新手也能跟的引流文＋外部短網址，兩個模型都判詐，規則只有 1 分沒通知（漏抓）。
   // 只通知，不進 rules.mjs 踢人分數，不在 MINER_KICKABLE，也不是踢人類別。
@@ -220,6 +226,7 @@ export function noticeTips(names = []) {
   if (names.includes(CODE_COUPON)) tips.push("驗證碼不要給任何人，給了帳號可能被盜。");
   if (names.includes(LOAN_LURE)) tips.push("正規銀行不會在群裡貼小額／分期貸款廣告叫人私下加好友辦貸；先收費、要存摺或提款卡、免碰面保證過件的都是詐騙。");
   if (names.includes(ADVISOR_LURE)) tips.push("合法投顧不會在群裡貼外部連結找人一對一帶當沖；點進去加 LINE 的「老師」多半是投資詐騙。");
+  if (names.includes(BANDAN_LINE_OA)) tips.push("沒認證或好友很少的 LINE 官方帳號，若對話在推帶單／跟單／保證賺錢，多半是詐騙帶單老師，請勿加好友或匯款。");
   if (names.includes(SHIP_VERIFY)) tips.push("賣貨便、郵局不會叫你加客服做實名認證、開網銀或截圖帳戶。");
   if (names.includes(SEX_PLATFORM)) tips.push("交友約會要先繳會員費、認證金、解凍金的都是詐騙，繳了只會被要更多。");
   if (names.includes(LUXURY_URL)) tips.push("名牌超低價出清的一頁式網站多是詐騙，買到假貨或收不到貨。");
@@ -280,6 +287,10 @@ export function imageNotify(verdict, reason) {
   const names = [];
   if (verdict === "SCAM") names.push("圖片判詐騙");
   if (/老師|直播|帶單|帶大家|跟單/.test(r) && hasUrl) names.push("老師直播／帶單獲利圖＋網址水印");
+  // 士軒 11/4：看圖理由同時有帶單語意＋LINE 官方帳號／OA／lin.ee／@帳號 → 帶單老師 LINE@（只通知名；刪文由 guard 主路徑／combo 處理）。
+  if (hasBandanLure(r) && (hasLineOaForm(r) || /LINE\s*官方|官方帳號|lin\.ee|page\.line\.me|加\s*@|好友\s*QR/i.test(r))) {
+    names.push(BANDAN_LINE_OA);
+  }
   const apy = Math.max(0, ...[...r.matchAll(/(?:年化|APY|APR)[^0-9+]{0,6}\+?([0-9][0-9,]*)\s*%/gi)].map((m) => Number(m[1].replace(/,/g, ""))));
   if ((apy >= 500 || /秒合約|猜漲跌|賭(?:價格|漲跌)/.test(r)) && (hasQr || hasUrl)) names.push("高年化／秒合約＋QR或網址");
   if (verdict === "UNSURE" && /多個.{0,6}(?:同頭像|同暱稱|帳號).{0,10}(?:冒充|假冒).{0,4}管理|冒充管理/.test(r)) names.push("多帳號冒充管理員");

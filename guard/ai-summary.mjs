@@ -11,6 +11,8 @@ export const SUMMARY_DEFAULTS = {
   cooldownMinutes: 10,
   /** 補掃到的指令超過幾分鐘就不理（和 @ 回覆的補回上限一致）。 */
   maxAgeMinutes: 10,
+  /** 士軒 11/4：整理對話只抓最近 N 天（全部／過長範圍都卡在這上限）。 */
+  maxHistoryDays: 7,
   budgetTokens: 4_000_000,
   chunkTokens: 180_000,
   concurrency: 4,
@@ -38,22 +40,40 @@ function taipeiMidnight(now, daysAgo = 0) {
   return Math.floor((now + offset) / 86_400_000) * 86_400_000 - offset - daysAgo * 86_400_000;
 }
 
-/** 解析指令；不是指令回 null。since：只整理這個時間之後（undefined＝能拿到多少算多少）。 */
-export function parseSummaryCommand(text, now = Date.now()) {
+/** 最近 N 天的 since（士軒 11/4：整理對話上限）。 */
+export function summarySinceFloor(now = Date.now(), maxDays = SUMMARY_DEFAULTS.maxHistoryDays) {
+  return now - Math.max(1, Number(maxDays) || SUMMARY_DEFAULTS.maxHistoryDays) * 86_400_000;
+}
+
+/**
+ * 把指令的 since 卡在最近 maxDays 天內；沒給 since 也回 7 天前。
+ * 所有整理入口（/ai整理、本人、手動 post、dry-run）都應再經這層。
+ */
+export function clampSummarySince(command, now = Date.now(), maxDays = SUMMARY_DEFAULTS.maxHistoryDays) {
+  const floor = summarySinceFloor(now, maxDays);
+  const since = Number.isFinite(command?.since) ? command.since : floor;
+  return Math.max(since, floor);
+}
+
+/** 解析指令；不是指令回 null。since：只整理這個時間之後（士軒 11/4 起預設與上限皆為最近 7 天）。 */
+export function parseSummaryCommand(text, now = Date.now(), { maxDays = SUMMARY_DEFAULTS.maxHistoryDays } = {}) {
   const match = CMD.exec(String(text ?? ""));
   if (!match) return null;
   const arg = DIGITS(match[2].trim()).slice(0, 20);
-  if (!arg || /^(全部|所有|全|all)$/i.test(arg)) return { label: "最近能取得的全部對話" };
-  if (/^今天|^今日/.test(arg)) return { since: taipeiMidnight(now), label: "今天" };
-  if (/^昨天|^昨日/.test(arg)) return { since: taipeiMidnight(now, 1), label: "昨天到現在" };
+  const floor = summarySinceFloor(now, maxDays);
+  if (!arg || /^(全部|所有|全|all)$/i.test(arg)) return { since: floor, label: `最近 ${maxDays} 天` };
+  if (/^今天|^今日/.test(arg)) return { since: Math.max(taipeiMidnight(now), floor), label: "今天" };
+  if (/^昨天|^昨日/.test(arg)) return { since: Math.max(taipeiMidnight(now, 1), floor), label: "昨天到現在" };
   const m = /^(\d{1,3}|[一兩二三四五六七八九十])\s*(個)?\s*(小時|hr|h|天|日|d|週|周|星期|禮拜|w)/i.exec(arg);
   if (m) {
     const n = Number(m[1]) || CN_NUM[m[1]];
     const unit = /小時|hr|h/i.test(m[3]) ? 3_600_000 : /天|日|d/i.test(m[3]) ? 86_400_000 : 7 * 86_400_000;
-    const span = Math.min(n * unit, 90 * 86_400_000);
-    return { since: now - span, label: `最近 ${m[1]}${m[3]}` };
+    const span = Math.min(n * unit, maxDays * 86_400_000);
+    const since = Math.max(now - span, floor);
+    const over = n * unit > maxDays * 86_400_000;
+    return { since, label: over ? `最近 ${maxDays} 天` : `最近 ${m[1]}${m[3]}` };
   }
-  return { label: "最近能取得的全部對話" };
+  return { since: floor, label: `最近 ${maxDays} 天` };
 }
 
 /** 粗估 token：中日韓字、全形符號約 1 字 1 token，其餘約 4 字元 1 token。 */

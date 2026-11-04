@@ -25,12 +25,13 @@ import { analyzeName, AVATAR_SYSTEM, avatarUrl, fakeAdminVerdict, parseAvatarAns
 import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText, stripEscalateFiller, trimCasual, decideAction, ESCALATE_REPLY, findImpersonated, looksLike, hasLink, isFalseModerationClaim, isPromise, PROMISE_PROMPT, NO_FABRICATION_PROMPT, LINE_INVITE_PATH, MODERATION_REPLY, LINE_URL, normalizeUrl, sanitizeLinks as sanitizeWith, shouldScreenLocally, squareKey, visionCounts, visionVerdict, isFakeGroupImage, visionHasLink, visionSoloMayNotify } from "./policy.mjs";
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, SpeakerBook, withAgentLabel } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
-import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
+import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, clampSummarySince, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
 import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
 import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
 import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
+import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, probeLineOaPage } from "./line-oa-bandan.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, unresolvedShortReportLine } from "./short-url-outcome.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
@@ -279,6 +280,7 @@ function ordinaryLinkScoreKind(message, entry, text) {
   if (GROUP_INVITE.test(textOf(message) || message.noteText || text || "")) return false;
   if (message.qrContent) return false;
   if ((entry.names ?? []).includes("短網址導向群組邀請")) return false;
+  if ((entry.names ?? []).includes(BANDAN_LINE_OA)) return false;
   if (entry.fromNotifyRule) return false;
   const names = entry.names ?? [];
   return entry.link === true || names.some((n) => LINK_RULES.has(n));
@@ -1285,6 +1287,20 @@ async function remove(ws, message, entry) {
 const COMBO_WINDOW_MS = 120_000;
 const comboLog = new Map(); // 聊天室＋發言者 → [{ messageId, at, invite }]
 const comboHandled = new Map(); // 聊天室＋發言者 → 處理時間（10 分鐘內不重複處理）
+// 士軒 11/4：同人前後 2 分鐘「帶單語意」→ 接續 LINE@／OA QR 也算帶單老師引流。
+const bandanLureLog = new Map(); // 聊天室＋發言者 → { at, text }
+function noteBandanLure(message, text) {
+  if (!hasBandanLure(text)) return;
+  const key = `${message.channelId} ${message.senderId}`;
+  bandanLureLog.set(key, { at: Date.now(), text: String(text ?? "").slice(0, 240) });
+  if (bandanLureLog.size > 2000) bandanLureLog.delete(bandanLureLog.keys().next().value);
+}
+function recentBandanContext(message) {
+  const key = `${message.channelId} ${message.senderId}`;
+  const e = bandanLureLog.get(key);
+  if (!e || Date.now() - e.at > COMBO_WINDOW_MS) return "";
+  return e.text;
+}
 function impersonatedAnyCommunity(message) {
   const id = message.senderId;
   if (message.senderRole || whitelist.has(id) || id === me || isSelf(message.channelId, id)) return undefined;
@@ -1718,6 +1734,60 @@ async function checkUnrecognizedLink(ws, message, text) {
   return true;
 }
 
+// 士軒 11/4 20:26：帶單老師 LINE@／官方帳號引流。永不踢；刪文超出現行「一般連結只評分」，獨立開關預設開。
+const bandanLineOaCfg = { enabled: true, deleteMessage: true, probePage: true, ...(config.bandanLineOa ?? {}) };
+async function handleBandanLineOa(ws, message, text, { qrContent } = {}) {
+  if (bandanLineOaCfg.enabled === false || neverKick(message) || isStaff(message) || message.senderId === me) return false;
+  const contextText = recentBandanContext(message);
+  if (!isBandanLineOa(text, { qrContent: qrContent ?? message.qrContent, contextText, protectedSender: neverKick(message) })) return false;
+  noteBandanLure(message, `${text}
+${contextText}`);
+  const entry = {
+    chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName,
+    contentType: message.contentType, names: [BANDAN_LINE_OA], verdict: "BANDAN_LINE_OA",
+    ...(text || qrContent ? contentRef(text || qrContent) : {}),
+  };
+  if (bandanLineOaCfg.probePage !== false) {
+    const url = firstLineOaUrl(text, qrContent ?? message.qrContent);
+    if (url) {
+      const probe = await probeLineOaPage(url).catch(() => undefined);
+      if (probe) entry.oaProbe = { verified: probe.verified, friends: probe.friends, lowFriends: probe.lowFriends };
+    }
+  }
+  const act = bandanLineOaAction({
+    warnOnly: warnOnly.has(message.channelId),
+    learnOnly: learnOnly.has(message.channelId),
+    deleteMessage: bandanLineOaCfg.deleteMessage !== false,
+    canDelete: !noAction(message.channelId) && notifyChats.has(message.channelId),
+  });
+  // 永不踢；kickMode 維持 notify 也不會因本規則升級。
+  if (act.delete) {
+    record({ action: "bandan-line-oa-flag", ...entry, disposition: act.reason, oaProbe: entry.oaProbe });
+    if (config.dryRun) {
+      record({ action: "bandan-line-oa-dry-run", chatId: entry.chatId, messageId: entry.messageId });
+      await notifyAdmins(ws, entry, "link-delete");
+      return true;
+    }
+    let answer = { type: "error", code: "NOT_SENT" };
+    const notified = await notifyThenAct(() => notifyAdmins(ws, entry, "link-delete"), async () => {
+      answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
+    }, notify.beforeActionMs ?? 2000, sleep);
+    const deleted = answer.type === "message:deleted";
+    if (deleted) markSelfCanKick(entry.chatId, "bandan-line-oa-deleted");
+    else record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+    record({ action: deleted ? "bandan-line-oa-deleted" : "bandan-line-oa-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code, kick: false });
+    if (!deleted) await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
+    return true;
+  }
+  if (act.notice) {
+    record({ action: "suspect-flag", ...entry, notifyRule: true, disposition: act.reason, kick: false });
+    await notifyAdmins(ws, entry, "suspect");
+    return true;
+  }
+  record({ action: "bandan-line-oa-skipped", ...entry, reason: act.reason });
+  return true;
+}
+
 // scamLink.deleteOnConfirmed：本帳號是管理員的群（不在 noDeleteChats、在 notify.chats），
 // 地端＋Meta 都判 SCAM 且含外部連結 → 先引用回覆發通知「將刪除」，等 notify.beforeActionMs，再刪這則訊息（不踢人）。
 // 刪不掉就補發「請發文者自行收回或請管理員處理」（不受冷卻限制）。公開版預設關閉。
@@ -1725,7 +1795,8 @@ const scamLink = { deleteOnConfirmed: false, ...config.scamLink };
 async function deleteScamLink(ws, message, entry) {
   if (isStaff(message) || message.senderId === me) return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
   // 23:01：一般連結（不是 LINE 群組邀請、不是 QR）只在群裡列出「可能是詐騙」的評分，不刪不踢。
-  if (config.kickScope?.ordinaryLinkScoreOnly !== false && !GROUP_INVITE.test(textOf(message) || message.noteText || "") && !message.qrContent && !(entry.names ?? []).includes("短網址導向群組邀請")) {
+  // 士軒 11/4：帶單老師 LINE@ 刪文例外（超出現行一般連結只評分；由 bandanLineOa.deleteMessage 控）。
+  if (config.kickScope?.ordinaryLinkScoreOnly !== false && !GROUP_INVITE.test(textOf(message) || message.noteText || "") && !message.qrContent && !(entry.names ?? []).includes("短網址導向群組邀請") && !(entry.names ?? []).includes(BANDAN_LINE_OA)) {
     record({ action: "link-score-only", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review });
     return notifyAdmins(ws, entry, "link-score");
   }
@@ -2070,6 +2141,11 @@ async function handle(ws, message) {
       }
     }
   }
+  // 士軒 11/4：帶單老師 LINE@／官方帳號（文字同則或接續）→ 刪文＋警告＋通知；永不踢。先於 friendNote，避免 OA 連結被溫和備註軟放行。
+  if (!trusted && text) {
+    noteBandanLure(message, text);
+    if (await handleBandanLineOa(ws, message, text)) { remember(message, text); return; }
+  }
   // 維護者 10/26 23:07：加好友（個人：賴、LINE ID、加好友連結）不列入詐騙、不刪不踢；只回一則溫和備註（同人同群冷卻）。
   if (!trusted && config.kickScope?.friendNote !== false && friendAddOnly(text)) {
     await friendNote(ws, message);
@@ -2307,6 +2383,8 @@ async function checkImage(ws, message) {
       return record(withLogDecision({ verdict: "QR_OWN_GROUP", ...entry }, "none"));
     }
     if (await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_LINE_INVITE" });
+    // 士軒 11/4：同人剛貼過帶單語意，接著貼 LINE@／OA QR → 帶單老師引流（刪＋通知，不踢）；不要走 friendNote 軟放行。
+    if (await handleBandanLineOa(ws, message, "", { qrContent: content })) return;
     // 23:07：個人加好友 QR（ti/p、lin.ee）不算詐騙：只回溫和備註，不覆核、不刪不踢。
     if (config.kickScope?.friendNote !== false && friendAddOnly("", { qrContent: content })) {
       record({ action: "qr-friend", ...entry });
@@ -2430,6 +2508,9 @@ async function checkWithVision(ws, message, picture) {
     if (cloudVerdict !== "SCAM") verdict = "UNSURE";
   }
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, contentType: "IMAGE", verdict: verdict ? `VISION_${verdict}` : "VISION_UNAVAILABLE", names: reason ? [reason] : [], model: usedVision.model ?? "none", ...(recheck ? { cloudRecheck: recheck } : {}), seconds: Math.round((Date.now() - started) / 1000) };
+  // 士軒 11/4：看圖理由有帶單語意 → 記進 combo，接續 OA QR 可併案；理由本身已含 LINE@ 則直接處置。
+  if (reason) noteBandanLure(message, reason);
+  if (reason && await handleBandanLineOa(ws, message, reason)) return;
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   // 維護者：交易所／獲利截圖沒附連結 → 只記錄（不通知、不標記、不計 24h 獲利圖次數）。
   if ((verdict === "SCAM" || verdict === "UNSURE") && !isFakeGroupImage(reason) && exchangeImageNoLink(reason)) {
@@ -2874,7 +2955,8 @@ async function requestSummary(ws, message, command) {
 async function runSummary(ws, chatId, command, { collectOnly = false, only, until = Infinity } = {}) {
   const started = Date.now();
   const deadline = started + summaryCfg.timeoutMs;
-  const since = command.since ?? 0;
+  // 士軒 11/4：所有整理入口一律卡在最近 maxHistoryDays（預設 7）天。
+  const since = clampSummarySince(command, started, summaryCfg.maxHistoryDays ?? SUMMARY_DEFAULTS.maxHistoryDays);
   const items = [];
   const flagged = flaggedMessageIds();
   let before;
@@ -3040,7 +3122,7 @@ async function postSummaryNow(ws, request) {
   if (summaryState.check(chatId, 0, { owner: true }).running) return record({ action: "ai-summary-post-skipped", chatId, reason: "running" });
   summaryState.start(chatId);
   try {
-    const result = await runSummary(ws, chatId, parseSummaryCommand(`/ai整理 ${request.arg ?? ""}`) ?? { label: "全部" });
+    const result = await runSummary(ws, chatId, parseSummaryCommand(`/ai整理 ${request.arg ?? ""}`) ?? { since: clampSummarySince({}, Date.now(), summaryCfg.maxHistoryDays ?? SUMMARY_DEFAULTS.maxHistoryDays), label: `最近 ${summaryCfg.maxHistoryDays ?? SUMMARY_DEFAULTS.maxHistoryDays} 天` });
     const target = { channelId: chatId, messageId: typeof request.replyTo === "string" ? request.replyTo : undefined, senderName: "manual" };
     const delivery = await deliverSummary(ws, target, result.sections);
     if (delivery.commit) summaryState.commit(chatId);
@@ -3110,7 +3192,7 @@ process.on("SIGUSR2", () => {
   try { request = JSON.parse(readFileSync(join(logDir, "ai-summary-dryrun.json"), "utf8")); } catch { return console.error("找不到 logs/ai-summary-dryrun.json"); }
   const chatIds = request.chatIds === "all" ? lastChannels.map((c) => c.channelId) : Array.isArray(request.chatIds) ? request.chatIds : [request.chatId];
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN || !chatIds.every((id) => typeof id === "string")) return console.error("試跑：尚未連線或缺 chatId");
-  const command = parseSummaryCommand(`/ai整理 ${request.arg ?? ""}`) ?? { label: "全部" };
+  const command = parseSummaryCommand(`/ai整理 ${request.arg ?? ""}`) ?? { since: clampSummarySince({}, Date.now(), summaryCfg.maxHistoryDays ?? SUMMARY_DEFAULTS.maxHistoryDays), label: `最近 ${summaryCfg.maxHistoryDays ?? SUMMARY_DEFAULTS.maxHistoryDays} 天` };
   void (async () => {
     for (const chatId of chatIds) {
       record({ action: "ai-summary-dryrun-start", chatId, collectOnly: request.collectOnly === true });

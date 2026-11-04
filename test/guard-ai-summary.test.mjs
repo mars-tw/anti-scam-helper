@@ -9,16 +9,18 @@ import { SummaryState, buildTranscript, chunkLines, estimateCost, estimateTokens
 const NOW = Date.parse("2026-10-19T00:30:00Z"); // 台北 08:30
 
 test("/ai整理 指令：半形／全形斜線、空白、時間範圍；其他文字不算", () => {
-  assert.deepEqual(parseSummaryCommand("/ai整理", NOW), { label: "最近能取得的全部對話" });
+  // 士軒 11/4：預設與上限皆最近 7 天（不再「全部能拿到多少算多少」／90 天）。
+  assert.deepEqual(parseSummaryCommand("/ai整理", NOW), { since: NOW - 7 * 86_400_000, label: "最近 7 天" });
   assert.ok(parseSummaryCommand("／AI整理", NOW));
   assert.ok(parseSummaryCommand(" / ai 整理 全部", NOW));
+  assert.equal(parseSummaryCommand("/ai整理 全部", NOW).since, NOW - 7 * 86_400_000);
   assert.equal(parseSummaryCommand("/ai整理 今天", NOW).since, Date.parse("2026-10-18T16:00:00Z"));
   assert.equal(parseSummaryCommand("/ai整理 昨天", NOW).since, Date.parse("2026-10-17T16:00:00Z"));
   assert.equal(parseSummaryCommand("/ai整理 3天", NOW).since, NOW - 3 * 86_400_000);
   assert.equal(parseSummaryCommand("/ai整理 ３天", NOW).since, NOW - 3 * 86_400_000);
   assert.equal(parseSummaryCommand("/ai整理 12小時", NOW).since, NOW - 12 * 3_600_000);
-  assert.equal(parseSummaryCommand("/ai整理 兩週", NOW).since, NOW - 14 * 86_400_000);
-  assert.equal(parseSummaryCommand("/ai整理 999天", NOW).since, NOW - 90 * 86_400_000);
+  assert.equal(parseSummaryCommand("/ai整理 兩週", NOW).since, NOW - 7 * 86_400_000);
+  assert.equal(parseSummaryCommand("/ai整理 999天", NOW).since, NOW - 7 * 86_400_000);
   for (const text of ["幫我 /ai整理", "/ai整理器", "/ai 整 理", "ai整理", "/aiXX整理"]) assert.equal(parseSummaryCommand(text, NOW), null, text);
 });
 
