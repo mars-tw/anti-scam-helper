@@ -1793,13 +1793,14 @@ ${contextText}`);
       answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
     }, notify.beforeActionMs ?? 2000, sleep);
     const deleted = answer.type === "message:deleted";
+    const plan = bandanDeletePlan({ deleted, priorMessageId: priorLure?.messageId });
     if (deleted) markSelfCanKick(entry.chatId, "bandan-line-oa-deleted");
-    // 併案：同人 2 分鐘內前一則帶單語意（圖／文）一起刪（只刪不踢；前一則已單獨處置過也只是刪不到）。
-    if (priorLure?.messageId) {
+    else record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+    // 併案：本則刪成功、且同人 2 分鐘內有前一則帶單語意（圖／文）→ 一起刪（只刪不踢）。本則沒刪成就不動前一則。
+    if (plan.deletePrior) {
       const prior = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: priorLure.messageId });
       record({ action: prior.type === "message:deleted" ? "bandan-line-oa-prior-deleted" : "bandan-line-oa-prior-delete-failed", chatId: entry.chatId, messageId: priorLure.messageId, pairedWith: entry.messageId, senderId: entry.senderId, contentType: priorLure.contentType, code: prior.type === "message:deleted" ? undefined : prior.code, kick: false });
     }
-    else record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
     record({ action: deleted ? "bandan-line-oa-deleted" : "bandan-line-oa-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code, kick: false });
     if (!deleted) await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
     return true;
@@ -1817,6 +1818,10 @@ ${contextText}`);
 // 地端＋Meta 都判 SCAM 且含外部連結 → 先引用回覆發通知「將刪除」，等 notify.beforeActionMs，再刪這則訊息（不踢人）。
 // 刪不掉就補發「請發文者自行收回或請管理員處理」（不受冷卻限制）。公開版預設關閉。
 const scamLink = { deleteOnConfirmed: false, ...config.scamLink };
+export function bandanDeletePlan({ deleted, priorMessageId }) {
+  return { markCanKick: !!deleted, kickFailed: !deleted, deletePrior: !!deleted && !!priorMessageId };
+}
+
 async function deleteScamLink(ws, message, entry) {
   if (isStaff(message) || message.senderId === me) return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
   // 23:01：一般連結（不是 LINE 群組邀請、不是 QR）只在群裡列出「可能是詐騙」的評分，不刪不踢。
