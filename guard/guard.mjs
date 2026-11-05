@@ -37,6 +37,7 @@ import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBa
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine, classifySusExpandLanding } from "./short-url-outcome.mjs";
 import { KNOWN_SCAM_INVITE, hasKnownScamInvite, normalizeInviteTickets } from "./known-scam-invite.mjs";
+import { cleanupAllowed, cleanupTargets, qrResultKind, VISION_LURE, visionLureKick } from "./kick-cleanup.mjs";
 import { SendFailTracker, fetchWithRetry, mediaFailReportLine, sendFailAlertLine, sendFailReportLine } from "./ops-report.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
@@ -1341,6 +1342,35 @@ async function remove(ws, message, entry) {
   }, notify.beforeActionMs ?? 2000, sleep);
 }
 
+// 11/5 21:02：踢人成功後，同一人在同群近 24 小時被守衛標過詐騙、仍在群的訊息一併刪除並讀回（只刪日誌有紀錄的 messageId）。
+const kickCleanup = { enabled: true, windowHours: 24, limit: 50, ...(config.kickCleanup ?? {}) };
+function readRecentLogs() {
+  const out = [];
+  const days = new Set([localDay(), (() => { const d = new Date(Date.now() - 86_400_000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })()]);
+  for (const day of days) {
+    const file = join(logDir, `guard-${day}.jsonl`);
+    if (!existsSync(file)) continue;
+    for (const line of readFileSync(file, "utf8").split("\n")) { if (!line) continue; try { out.push(JSON.parse(line)); } catch {} }
+  }
+  return out;
+}
+async function cleanupAfterKick(ws, entry) {
+  if (kickCleanup.enabled === false || config.dryRun) return;
+  const { chatId, senderId } = entry;
+  const protectedSender = whitelist.has(senderId) || senderId === me || Boolean(chatAdmins.get(chatId)?.has(senderId)) || isSelf(chatId, senderId);
+  if (!cleanupAllowed({ chatId, senderId, excludeChats: config.kickScope?.excludeChats ?? [], warnOnly, learnOnly, protectedSender })) return record({ action: "kick-cleanup-skipped", chatId, senderId });
+  const ids = cleanupTargets(readRecentLogs(), { chatId, senderId, exceptIds: [entry.messageId], windowMs: kickCleanup.windowHours * 3600_000, limit: kickCleanup.limit });
+  if (!ids.length) return;
+  let ok = 0;
+  for (const messageId of ids) {
+    const answer = await call(ws, { type: "message:delete", chatId, messageId });
+    const deleted = answer.type === "message:deleted";
+    if (deleted) ok++;
+    record({ action: deleted ? "kick-cleanup-deleted" : "kick-cleanup-delete-failed", chatId, messageId, senderId, pairedWith: entry.messageId, code: deleted ? undefined : answer.code });
+  }
+  record({ action: "kick-cleanup-done", chatId, senderId, pairedWith: entry.messageId, targets: ids.length, deleted: ok });
+}
+
 // ── 冒名＋邀請／QR ───────────────────────────────────────────
 // 暱稱冒用「同一社群」的管理員（依 ID 排除：受保護成員、任何群的管理員、本帳號、白名單），
 // 而且同一則（或同一人前後 2 分鐘內）有外部連結（LINE 群組／社群邀請、引流網址）或外部 LINE QR → 確認詐騙：
@@ -1565,6 +1595,8 @@ function kickScopeFor(message, entry = {}, impersonating) {
     text: textOf(message) || message.noteText || "", fileName: message.fileName, names: entry.names ?? [], verdict: entry.verdict === "QR_LINE_INVITE" ? undefined : entry.verdict, review: entry.review,
     qrContent: message.qrContent, fileGroupInvite: message.fileInvite === true, inviteExpanded: (entry.names ?? []).includes("短網址導向群組邀請"), impersonating,
     bandanKick: entry.bandanKick === true && (entry.names ?? []).includes(BANDAN_LINE_OA),
+    knownScamInvite: (entry.names ?? []).includes(KNOWN_SCAM_INVITE),
+    visionLureKick: entry.visionLureKick === true && (entry.names ?? []).includes(VISION_LURE),
   });
 }
 function neverKick(message) {
@@ -2497,8 +2529,11 @@ async function checkImage(ws, message) {
     content = readQr(picture.mime, Buffer.from(picture.data, "base64"));
   } catch (error) {
     recordError("image", error.message);
+    record({ action: "qr-scan", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, qrScanned: false, qrResult: "error" });
     return console.error(`圖片解讀失敗：${error.message}`);
   }
+  // 11/5 21:02：每張圖都記掃描結果（不記內容）。
+  record({ action: "qr-scan", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, qrScanned: true, qrResult: qrResultKind(content, { tickets: scamInviteTickets, isLineInvite }) });
   if (!content) {
     if (vision.enabled) queueVision(ws, message, picture);
     return;
@@ -2526,6 +2561,10 @@ async function checkImage(ws, message) {
       return record(withLogDecision({ verdict: "QR_OWN_GROUP", ...entry }, "none"));
     }
     if (await checkImpersonationInvite(ws, message, { invite: true })) return record({ action: "qr-impersonation", ...entry, verdict: "QR_LINE_INVITE" });
+    // 11/5 21:02：QR 是群組／社群邀請且命中已確認詐騙邀請碼 → 強特徵，照 10/26 22:59「詐騙群組」刪踢（範圍、排除、只警告、受保護由 remove() 把關）。
+    if (scamInviteTickets.length && GROUP_INVITE.test(content) && hasKnownScamInvite(content, scamInviteTickets)) {
+      return remove(ws, message, { ...entry, verdict: "QR_LINE_INVITE", names: [KNOWN_SCAM_INVITE, "外部 LINE 群組／社群邀請 QR code"], score: 6, review: "SCAM", reviewModel: "known-invite" });
+    }
     // 士軒 11/4：同人剛貼過帶單語意，接著貼 LINE@／OA QR → 帶單老師引流（刪＋通知，不踢）；不要走 friendNote 軟放行。
     if (await handleBandanLineOa(ws, message, "", { qrContent: content })) return;
     // 23:07：個人加好友 QR（ti/p、lin.ee）不算詐騙：只回溫和備註，不覆核、不刪不踢。
@@ -2654,6 +2693,10 @@ async function checkWithVision(ws, message, picture) {
   // 士軒 11/4：看圖理由有帶單語意 → 記進 combo，接續 OA QR 可併案；理由本身已含 LINE@ 則直接處置。
   if (reason) noteBandanLure(message, reason);
   if (reason && await handleBandanLineOa(ws, message, reason, { vision: true })) return;
+  if (vision.lureKick !== false && visionLureKick({ verdict, reason, protectedSender: neverKick(message) })) {
+    record({ action: "vision-lure-kick", ...entry });
+    return remove(ws, message, { ...entry, names: [VISION_LURE, ...entry.names], score: 6, visionLureKick: true });
+  }
   if (verdict === "SCAM" && vision.action === "remove") return remove(ws, message, entry);
   // 維護者：交易所／獲利截圖沒附連結 → 只記錄（不通知、不標記、不計 24h 獲利圖次數）。
   if ((verdict === "SCAM" || verdict === "UNSURE") && !isFakeGroupImage(reason) && exchangeImageNoLink(reason)) {
@@ -3905,6 +3948,7 @@ function connect() {
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
         // 11/5 誤判審查 1：處置前只發中性「處理中」（或沒權限時不發）；真的移出成功才發「已移出」。
         if (entry) notifyAdmins(ws, { ...entry, messageDeleted: Boolean(frame.messageDeleted) }, "done-removed", { force: true });
+        if (entry) void cleanupAfterKick(ws, entry).catch((error) => recordError("kick-cleanup", error?.message ?? error));
         return;
       }
       case "note:status":

@@ -16,13 +16,13 @@ const SCAM_TEXT = "通知：本群明天要刪除了，請大家加入新群 htt
 const NORMAL_TEXT = "我剛剛醒，睡很久";
 const now = Date.now();
 
-async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, media, setup, channels, invites = {}, file } = {}) {
+async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAnswer, visionAnswer, media, setup, channels, invites = {}, file } = {}) {
   const llm = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
       // 小助手的提示裡有「回答範圍」；其餘（詐騙判斷、覆核）一律回 SCAM。
-      const content = chatAnswer && (body.includes("回答範圍") || body.includes("資料整理員")) ? (typeof chatAnswer === "function" ? chatAnswer(JSON.parse(body)) : chatAnswer) : "SCAM\n測試";
+      const content = visionAnswer && body.includes("image_url") ? visionAnswer : chatAnswer && (body.includes("回答範圍") || body.includes("資料整理員")) ? (typeof chatAnswer === "function" ? chatAnswer(JSON.parse(body)) : chatAnswer) : "SCAM\n測試";
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });
@@ -917,4 +917,68 @@ test("11/5 帶單 LINE@ 對抗：交易所官方跟單教學、商家促銷、�
   ], { waitMs: 4000 });
   assert.equal(r.removes.length, 0);
   assert.equal(r.deletes.length, 0);
+});
+
+// 11/5 21:02：圖片一律掃 QR；已知詐騙邀請碼 QR → 強特徵刪踢；踢後清理同人 24h 內被標過的訊息。
+const KNOWN_QR_CFG = { kickMode: "kick", qr: { enabled: true, kickOnConfirmed: false }, scamInviteTickets: ["KnownBad0001"] };
+const knownQrPng = async () => (await QRCode.toBuffer("https://line.me/ti/g2/KnownBad0001", { width: 300 })).toString("base64");
+test("11/5 QR 已知詐騙邀請：踢人群 → 刪踢（kickOnConfirmed 關也照踢）；日誌記 qrScanned", async () => {
+  const r = await runGuard(KNOWN_QR_CFG, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: await knownQrPng(), waitMs: 3500 });
+  assert.equal(r.removes.length, 1);
+  assert.equal(r.removes[0].deleteMessage, true);
+});
+test("11/5 QR 已知詐騙邀請：excludeChats → 不踢不刪", async () => {
+  const r = await runGuard({ ...KNOWN_QR_CFG, kickScope: { excludeChats: ["cA"] } }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: await knownQrPng(), waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+});
+test("11/5 QR 已知詐騙邀請：warnOnly → 不踢不刪", async () => {
+  const r = await runGuard({ ...KNOWN_QR_CFG, groupPolicies: { cA: { warnOnly: true } } }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: await knownQrPng(), waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.deletes.length, 0);
+});
+test("11/5 QR 已知詐騙邀請：本群自己的邀請例外 → 不處置；管理員貼 → 不處置", async () => {
+  const own = await runGuard(KNOWN_QR_CFG, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: await knownQrPng(), invites: { own: ["https://line.me/ti/g2/KnownBad0001"] }, waitMs: 3500 });
+  assert.equal(own.removes.length + own.deletes.length, 0);
+  const adm = await runGuard(KNOWN_QR_CFG, [{ messageId: "m1", channelId: "cA", senderId: "pAdm", senderName: "管理員", senderRole: "coAdmin", contentType: "IMAGE" }], { media: await knownQrPng(), waitMs: 3500 });
+  assert.equal(adm.removes.length + adm.deletes.length, 0);
+});
+test("11/5 踢後清理：同人先前被標過的帶單訊息一併刪；交易所官方貼文與別人的訊息不刪", async () => {
+  const r = await runGuard({ ...KNOWN_QR_CFG, bandanLineOa: { probePage: false, kick: false, deleteMessage: false } }, [
+    { messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: "LINE 官方帳號 @daidan_ok 招收學員跟單 保證獲利" },
+    { messageId: "o1", channelId: "cA", senderId: "pOther", senderName: "別人", text: "LINE 官方帳號 @daidan_xx 招收學員跟單 保證獲利" },
+    { messageId: "s1", channelId: "cA", senderId: "pShop", senderName: "店家", text: "幣安官方帳號 https://lin.ee/abc 跟單交易教學" },
+    { messageId: "m2", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" },
+  ], { media: await knownQrPng(), waitMs: 6000 });
+  assert.equal(r.removes.length, 1);
+  const deleted = r.deletes.map((f) => f.messageId);
+  assert.ok(deleted.includes("m1"), JSON.stringify(deleted));
+  assert.equal(deleted.includes("s1"), false);
+  assert.equal(deleted.includes("o1"), false);
+});
+
+// 士軒 11/5 21:13：看圖確定 SCAM＋引流字眼 → 刪踢；兩條件缺一不踢。
+const PLAIN_PNG = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAd0lEQVR4AeXBAQEAAAiAIPP/5+qHMPsIkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJkziJk7gDVToEfLfAjjsAAAAASUVORK5CYII=";
+const VCFG = { kickMode: "kick", qr: { enabled: true }, vision: { enabled: true, action: "report" }, bandanLineOa: { probePage: false } };
+const visionRun = (answer, extra = {}, msg = {}) => runGuard({ ...VCFG, ...extra }, [{ messageId: "v1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE", ...msg }], { media: PLAIN_PNG, visionAnswer: answer, waitMs: 3500 });
+test("11/5 看圖 SCAM＋帶單進群字眼：踢人群 → 刪踢", async () => {
+  const r = await visionRun("SCAM\n投資帶單老師，叫人加入群組保證獲利");
+  assert.equal(r.removes.length, 1);
+});
+test("11/5 看圖引流：excludeChats／warnOnly／管理員／開關關 → 不踢", async () => {
+  const A = "SCAM\n投資帶單老師，叫人加入群組保證獲利";
+  for (const r of [
+    await visionRun(A, { kickScope: { excludeChats: ["cA"] } }),
+    await visionRun(A, { groupPolicies: { cA: { warnOnly: true } } }),
+    await visionRun(A, {}, { senderRole: "coAdmin" }),
+    await visionRun(A, { vision: { enabled: true, action: "report", lureKick: false } }),
+  ]) assert.equal(r.removes.length, 0);
+});
+test("11/5 看圖引流對抗：交易所官方公告、活動宣傳、商家促銷、只有字眼但不確定 → 不踢", async () => {
+  for (const a of [
+    "SCAM\n交易所官方公告，請加入官方 LINE 群組",
+    "SCAM\n活動宣傳海報，掃碼加入群組抽獎",
+    "SCAM\n商家促銷特價，加 LINE 好友領折扣",
+    "UNSURE\n疑似帶單老師要人進群",
+    "SCAM_WEAK\n帶單進群",
+  ]) assert.equal((await visionRun(a)).removes.length, 0, a);
 });

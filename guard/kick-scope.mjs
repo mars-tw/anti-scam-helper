@@ -12,6 +12,8 @@ export const KICK_FAKE_LUXURY = "確認是假精品";
 export const KICK_FAKE_PORN_PDF = "確認是假色情 PDF";
 // 士軒 11/5 19:57：帶單老師 LINE@ 引流過 strong-gate 時可踢（只由 handleBandanLineOa 帶 bandanKick 進來，不進一般內容分類）。
 export const KICK_BANDAN = "帶單老師 LINE@ 引流（強特徵）";
+// 士軒 11/5 21:13：看圖判 SCAM（不是不確定）且圖中文字有帶單／加 LINE／進群引流 → 可踢（只由看圖流程帶 visionLureKick 進來）。
+export const KICK_VISION_LURE = "圖片判詐騙＋帶單／加 LINE／進群引流（強特徵）";
 export const KICK_CATEGORIES = [KICK_FAKE_GROUP, KICK_SCAM_GROUP, KICK_FAKE_LUXURY, KICK_FAKE_PORN_PDF];
 
 const norm = (s) => String(s ?? "").normalize("NFKC").replace(/[\s\u200b-\u200f\u2060\ufeff\u3000\u2800\u3164]+/g, "");
@@ -45,7 +47,7 @@ export const PORN = /色情|成人|18禁|十八禁|裸|露點|外流|偷拍|私�
  * @param {string} [input.impersonating] 冒用的群主／管理員名字（冒名＋邀請那條）
  * @param {string} [input.shopLevel] 一頁式購物判定等級
  */
-export function kickCategory({ text = "", names = [], verdict, review, qrContent, inviteExpanded = false, impersonating, fileName, fileGroupInvite = false } = {}) {
+export function kickCategory({ text = "", names = [], verdict, review, qrContent, inviteExpanded = false, impersonating, fileName, fileGroupInvite = false, knownScamInvite = false } = {}) {
   const raw = `${text ?? ""} ${fileName ?? ""}`;
   const t = norm(raw);
   // 23:15：檔案（PDF 等）裡抽出外部 LINE 群組邀請連結或 QR → 詐騙群組；檔名／內文有色情字眼 → 假色情 PDF。
@@ -58,6 +60,8 @@ export function kickCategory({ text = "", names = [], verdict, review, qrContent
   const move = MOVE_GROUP.test(t) || names.some((n) => MOVE_RULE_NAMES.has(n));
   // (a) 換群／新群／二群＋群組連結或 QR。冒用群主／管理員＋外部群組邀請（連結或 QR）也算。
   if (groupLink && (move || impersonating)) return KICK_FAKE_GROUP;
+  // 11/5 21:02：群組邀請（連結、QR、短網址展開）命中已確認詐騙邀請碼 → 詐騙群組（不必等覆核）。
+  if (groupLink && knownScamInvite) return KICK_SCAM_GROUP;
   // (b) 詐騙群組：外部群組邀請（連結、QR、短網址展開）而且覆核確認 SCAM（文字要兩層都 SCAM；純 QR 截圖只有覆核）。
   if (groupLink && (qrContent && !text ? reviewed : confirmed)) return KICK_SCAM_GROUP;
   // (b) 假精品／假色情 PDF：要有連結或檔案，且兩層都判 SCAM。
@@ -81,7 +85,7 @@ export function kickScopeDecision({ chatId, excluded = false, scope = {}, ...con
   if (excluded) return { kick: false, reason: "excluded" };
   const chat = kickScopeChat(chatId, scope);
   if (!chat.ok) return { kick: false, reason: chat.reason };
-  const category = kickCategory(content) ?? (content.bandanKick === true ? KICK_BANDAN : undefined);
+  const category = kickCategory(content) ?? (content.bandanKick === true ? KICK_BANDAN : content.visionLureKick === true ? KICK_VISION_LURE : undefined);
   if (!category) return { kick: false, reason: "not-kick-category" };
   return { kick: true, category };
 }
