@@ -72,3 +72,14 @@ export function shortUrlNormalLanding({ expandedUrl, invite = false, lineOa = fa
   if (landingScore > 0) return false;
   return true;
 }
+
+/**
+ * 疑似短網址展開後的落地分類（guard 內 if/else-if 鏈；invite 優先，不得再走知識／購物）。
+ * @returns {{extraNames:string[],knowledgeLink:boolean,shopWarn:boolean}}
+ */
+export function classifySusExpandLanding({ invite = false, knowledge = false, shopping = false } = {}) {
+  if (invite) return { extraNames: ["短網址導向群組邀請"], knowledgeLink: false, shopWarn: false };
+  if (knowledge) return { extraNames: [], knowledgeLink: true, shopWarn: false };
+  if (shopping) return { extraNames: [], knowledgeLink: false, shopWarn: true };
+  return { extraNames: [], knowledgeLink: false, shopWarn: false };
+}

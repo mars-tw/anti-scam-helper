@@ -7,7 +7,7 @@ import test from "node:test";
 import { outboundGate, strongFeature, STRONG_SHORT_INVITE, STRONG_MIN_SCORE } from "../guard/strong-gate.mjs";
 import { KICK_FAKE_GROUP, kickScopeDecision, kickCategory } from "../guard/kick-scope.mjs";
 import { expandUrlSafe } from "../guard/shop.mjs";
-import { shortUrlExpandOutcome } from "../guard/short-url-outcome.mjs";
+import { shortUrlExpandOutcome, classifySusExpandLanding } from "../guard/short-url-outcome.mjs";
 import { makeRuleScorer, FORCED_SCAM_NAMES } from "../guard/rules.mjs";
 import { CERTAIN_FEATURES } from "../guard/notify-rules.mjs";
 import {
@@ -148,4 +148,21 @@ test("原始碼：shortUrlExpand 預設開（!== false）；strong-gate 認短�
   const sg = readFileSync(new URL("../guard/strong-gate.mjs", import.meta.url), "utf8");
   assert.match(sg, /STRONG_SHORT_INVITE|短網址導向群組邀請/);
   assert.match(sg, /KNOWN_SCAM_INVITE|已知詐騙群組邀請/);
+});
+
+test("疑似短網址→未知群邀請：不得設 knowledgeLink／shopWarn；已知碼判斷不插 else-if 鏈", async () => {
+  // 展開是群邀請但不在已知碼：invite 優先，知識頁／購物訊號都忽略。
+  const hit = classifySusExpandLanding({ invite: true, knowledge: true, shopping: true });
+  assert.deepEqual(hit.extraNames, ["短網址導向群組邀請"]);
+  assert.equal(hit.knowledgeLink, false);
+  assert.equal(hit.shopWarn, false);
+  // 非邀請才走知識／購物互斥鏈
+  assert.deepEqual(classifySusExpandLanding({ invite: false, knowledge: true, shopping: true }), { extraNames: [], knowledgeLink: true, shopWarn: false });
+  assert.deepEqual(classifySusExpandLanding({ invite: false, knowledge: false, shopping: true }), { extraNames: [], knowledgeLink: false, shopWarn: true });
+  assert.deepEqual(classifySusExpandLanding({}), { extraNames: [], knowledgeLink: false, shopWarn: false });
+  // 原始碼：必須透過 classifySusExpandLanding；不得再把已知碼 if 插進 invite 的 else-if 鏈
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../guard/guard.mjs", import.meta.url), "utf8");
+  assert.match(src, /classifySusExpandLanding\s*\(/);
+  assert.doesNotMatch(src, /if \(expanded\?\.invite\) extraNames\.push\("短網址導向群組邀請"\);\s*\n\s*if \(scamInviteTickets\.length && hasKnownScamInvite/);
 });

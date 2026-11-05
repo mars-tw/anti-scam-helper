@@ -35,7 +35,7 @@ import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, isLineOaUrl, probeLineOaPage } from "./line-oa-bandan.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
-import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine } from "./short-url-outcome.mjs";
+import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine, classifySusExpandLanding } from "./short-url-outcome.mjs";
 import { KNOWN_SCAM_INVITE, hasKnownScamInvite, normalizeInviteTickets } from "./known-scam-invite.mjs";
 import { SendFailTracker, fetchWithRetry, mediaFailReportLine, sendFailAlertLine, sendFailReportLine } from "./ops-report.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
@@ -2310,10 +2310,17 @@ async function handle(ws, message) {
         record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: "line-oa" });
         if (await handleBandanLineOa(ws, message, text, { expandedUrl: expanded.url })) { remember(message, text); return; }
       }
-      if (expanded?.invite) extraNames.push("短網址導向群組邀請");
+      // invite 優先：未知群邀請也不得再走 knowledgeLink／shopWarn（5379d8a 誤把已知碼 if 插進 else-if 鏈，已修）。
+      const susLanding = classifySusExpandLanding({
+        invite: Boolean(expanded?.invite),
+        knowledge: Boolean(expanded?.url && (isKnowledgePage(expanded.url, expanded.html) || isMainstreamMediaHost((() => { try { return new URL(expanded.url).hostname; } catch { return ""; } })()))),
+        shopping: Boolean(expanded?.html && isShoppingPage(expanded.html)),
+      });
+      for (const n of susLanding.extraNames) if (!extraNames.includes(n)) extraNames.push(n);
+      if (susLanding.knowledgeLink) knowledgeLink = true;
+      if (susLanding.shopWarn) shopWarn = true;
+      // 已知邀請碼獨立判斷，不插入上面的 if/else-if 鏈。
       if (scamInviteTickets.length && hasKnownScamInvite(`${expanded?.url ?? ""}\n${expanded?.html ?? ""}`, scamInviteTickets) && !extraNames.includes(KNOWN_SCAM_INVITE)) extraNames.push(KNOWN_SCAM_INVITE);
-      else if (expanded?.url && (isKnowledgePage(expanded.url, expanded.html) || isMainstreamMediaHost((() => { try { return new URL(expanded.url).hostname; } catch { return ""; } })()))) knowledgeLink = true;
-      else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
       // 11/5 誤判審查 4：展開成功、落地正常（非 LINE 邀請／官方帳號／加好友／QR、非可疑網域、非短網址）→ 換成落地網址再判斷，不加「疑似短網址」6 分。
       const landing = expanded?.url ? ruleScore({}, expanded.url) : undefined;
       normalLanding = shortUrlNormalLanding({
