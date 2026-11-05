@@ -11,6 +11,9 @@ import { FAKE_LOGISTICS_URL, FAKE_LOGISTICS_VERIFY } from "./notify-rules.mjs";
 export const STRONG_MIN_SCORE = 6;
 export const STRONG_BANDAN = "帶單 LINE@ 假老師";
 export const STRONG_PHISHING = "仿冒官方釣魚";
+export const STRONG_SCAM_SHOP = "一頁式詐騙購物";
+// 一頁式詐騙購物：規則分數本身 ≥6（不拉分）、覆核判 SCAM、且有貨到付款或名牌低價（頁面或文字）才算。
+const SHOP_STRONG = new Set(["貨到付款", "名牌低價", "頁面：貨到付款", "頁面：名牌低價"]);
 // 仿冒官方釣魚：本身就要求「仿冒＋騙資料」的命中名稱；只有多層子網域仿物流網址的，要覆核也判 SCAM。
 const PHISHING_NAMES = new Set([FAKE_LOGISTICS_VERIFY, "仿冒交易所網域", "釣魚彈窗連結帳號領額度"]);
 
@@ -27,6 +30,7 @@ export function strongFeature(entry = {}, content = {}) {
   if (names.includes(BANDAN_LINE_OA)) return STRONG_BANDAN;
   if (names.some((name) => PHISHING_NAMES.has(name))) return STRONG_PHISHING;
   if (names.includes(FAKE_LOGISTICS_URL) && entry.review === "SCAM") return STRONG_PHISHING;
+  if (entry.verdict === "SCAM_SHOP" && entry.review === "SCAM" && Number(entry.score) >= STRONG_MIN_SCORE && (entry.signals ?? []).some((n) => SHOP_STRONG.has(n))) return STRONG_SCAM_SHOP;
   return undefined;
 }
 

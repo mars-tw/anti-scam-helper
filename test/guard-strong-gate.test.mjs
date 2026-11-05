@@ -65,3 +65,42 @@ test("在提醒大家的訊息（引用詐騙）不算強特徵", () => {
 test("總閘可關（outboundGate.enabled=false）", () => {
   assert.equal(outboundGate({ score: 0 }, {}, { enabled: false }).send, true);
 });
+
+// 15:12 補充：新總閘對抗＋回歸 2afb810（新聞頁≠一頁式）
+import { scoreScamShop, isArticlePage } from "../guard/shop.mjs";
+import { STRONG_SCAM_SHOP } from "../guard/strong-gate.mjs";
+const nav = Array.from({ length: 20 }, (_, i) => `<a href="/p/${i}">項目${i}</a>`).join("");
+const shopEntry = (text, host, html, review) => {
+  const r = scoreScamShop({ text, links: [{ host }], page: pageSignals(html), review });
+  return { verdict: "SCAM_SHOP", names: ["疑似一頁式詐騙購物網站"], score: r.score, signals: r.signals, review, level: r.level };
+};
+test("真詐騙一頁式（名牌低價＋貨到付款＋怪網域＋覆核 SCAM）→ 有效分數≥6 會抓", () => {
+  const html = `<body><a href="/">首頁</a>LV 包 一折 出清 立即訂購 收件人 配送地址 貨到付款</body>`;
+  const e = shopEntry("LV 包包一折出清 貨到付款 https://lv-outlet-888.top/a", "lv-outlet-888.top", html, "SCAM");
+  const g = outboundGate(e, { text: "" });
+  assert.equal(g.send, true); assert.equal(g.feature, STRONG_SCAM_SHOP); assert.ok(g.score >= 6);
+});
+test("對抗：假冒新聞文章頁外觀的一頁式詐騙（og:type article＋貨到付款）仍≥6", () => {
+  const html = `<head><meta property="og:type" content="article"></head><body><a href="/">首頁</a>LV 一折 立即訂購 收件人 貨到付款</body>`;
+  const e = shopEntry("新聞：LV 一折 貨到付款 https://news-lv-999.top/a", "news-lv-999.top", html, "SCAM");
+  assert.equal(outboundGate(e, {}).send, true);
+});
+test("普通聊天不到標註", () => {
+  for (const t of ["早安大家", "今天比特幣漲好多", "晚上吃什麼？", "這工具不錯 https://github.com/mars-tw/anti-scam-helper"])
+    assert.equal(outboundGate({ score: 0, names: [] }, { text: t }).send, false, t);
+});
+test("回歸 2afb810：新聞文章頁 ≠ 一頁式，且總閘不發", () => {
+  const news = `<html><head><meta property="og:type" content="article"><script type="application/ld+json">{"@type":"NewsArticle"}</script></head><body>${nav}<article>記者報導 訂閱電子報</article></body></html>`;
+  assert.equal(isArticlePage(news), true);
+  assert.deepEqual(pageSignals(news), []);
+  const e = shopEntry("看這篇 https://news.example.com/a/1", "news.example.com", news, "OK");
+  assert.equal(e.level, "none");
+  assert.equal(outboundGate(e, {}).send, false);
+});
+test("正常多頁電商站（站內連結多、無貨到付款、無名牌低價）不到標註", () => {
+  const html = `<body>${nav}加入購物車 結帳 會員中心 退換貨政策</body>`;
+  const e = shopEntry("這家襪子好穿 https://www.example-shop.com.tw/item/1", "www.example-shop.com.tw", html, "OK");
+  assert.equal(outboundGate(e, {}).send, false);
+  const e2 = shopEntry("這家襪子好穿 https://www.example-shop.com.tw/item/1", "www.example-shop.com.tw", html, "SCAM");
+  assert.equal(outboundGate(e2, {}).send, false, "覆核誤判 SCAM 但分數低、無強特徵 → 仍不發");
+});
