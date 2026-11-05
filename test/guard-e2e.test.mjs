@@ -219,7 +219,9 @@ test("冒名＋群組邀請連結（同社群的管理員名）：通知＋刪�
   assert.equal(r.removes.length, 0);
   assert.deepEqual(r.deletes.map((f) => f.messageId), ["m1"]);
   assert.ok(r.sends.length >= 1);
-  assert.equal(r.sends[0].replyTo, "m1");
+  // 11/5：本帳號在這群沒有已知管理權 → 不發預告，刪成功才回「已刪除」（不引用已刪的訊息）。
+  assert.ok(r.sends.every((f) => !/將刪除|將把|將移出/.test(f.text ?? "")), JSON.stringify(r.sends));
+  assert.ok(r.sends.some((f) => /已刪除/.test(f.text ?? "")), JSON.stringify(r.sends));
 });
 
 test("冒名＋群組邀請連結：kickWithInvite=true 時踢人（即使 kickMode=notify）", async () => {

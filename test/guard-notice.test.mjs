@@ -76,11 +76,18 @@ test("canMention 全部不准：直接送引用＋不帶 @ 版本，不留 @ 純
   assert.ok(!server.frames[0].text.includes("@"));
 });
 
-test("逾時或限流就停，不重送（避免重複發）", async () => {
+test("11/5：逾時或限流各退避一次（5 秒）再送同一則；同一種不退避第二次", async () => {
   for (const code of ["TIMEOUT", "RATE_LIMITED"]) {
+    const waits = [];
     const server = fakeServer([{ type: "error", code }, { type: "sent" }]);
-    await sendNotice(server.send, { chatId: "c", text: "t", replyTo: "9" });
-    assert.equal(server.frames.length, 1, code);
+    const r = await sendNotice(server.send, { chatId: "c", text: "t", replyTo: "9", sleep: async (ms) => { waits.push(ms); } });
+    assert.equal(server.frames.length, 2, code);
+    assert.deepEqual(waits, [5000], code);
+    assert.equal(server.frames[1].replyTo, "9", "退避後送同一則");
+    assert.equal(r.answer.type, "sent");
+    const again = fakeServer([{ type: "error", code }, { type: "error", code }, { type: "sent" }]);
+    await sendNotice(again.send, { chatId: "c", text: "t", replyTo: "9", sleep: async () => {} });
+    assert.equal(again.frames.length, 2, `${code} 只退避一次`);
   }
 });
 

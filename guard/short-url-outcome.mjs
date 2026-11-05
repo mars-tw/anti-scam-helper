@@ -46,3 +46,29 @@ export function unresolvedShortReportLine({
   };
   return JSON.stringify(row);
 }
+
+// 11/5 誤判審查 4：短網址展開成功、落地判 normal → 不再加「疑似短網址」／「短網址」分數（6 分）。
+// 落地是 LINE 群組邀請／官方帳號／加好友／QR、可疑網域（規則有分、怪 TLD、已知詐騙網域）、仍是短網址、展開失敗 → 照舊計分。
+const LINE_LANDING = /(?:^|\/\/|\.)(?:line\.me|lin\.ee|liff\.line\.me|line\.naver\.jp)(?:[/:?#]|$)|\/(?:R\/)?ti\/[gp]\/|openchat|addfriend|\/qr(?:[/?#]|$)|qr[-_]?code/i;
+const SUSPICIOUS_TLD = /\.(shop|store|top|xyz|vip|club|online|site|buzz|icu|cyou|sbs|cfd|life|live|fun|mom|bond|best|today|sale|deals|boutique|fashion|bags|click|link|monster|rest|quest|work|win|bid|loan|cn|cc|ws|tk|ml|ga|cf|gq|ru|su|kr)$/i;
+export const SHORT_URL_RULE_NAMES = ["疑似短網址", "短網址"];
+
+/**
+ * @param {object} o
+ * @param {string} [o.expandedUrl] 展開後落地網址（無＝展開失敗）
+ * @param {boolean} [o.invite] 落地是群組邀請
+ * @param {boolean} [o.lineOa] 落地是 LINE 官方帳號
+ * @param {boolean} [o.stillShortener] 落地仍是短網址服務
+ * @param {boolean} [o.shopping] 落地是購物頁（照舊判斷）
+ * @param {number} [o.landingScore] 落地網址本身的規則分數（不含短網址規則）
+ * @returns {boolean} true＝可以拿掉短網址分數（換成落地網址再判斷）
+ */
+export function shortUrlNormalLanding({ expandedUrl, invite = false, lineOa = false, stillShortener = false, shopping = false, landingScore = 0 } = {}) {
+  if (!expandedUrl || invite || lineOa || stillShortener || shopping) return false;
+  let host;
+  try { const u = new URL(expandedUrl); if (!/^https?:$/.test(u.protocol)) return false; host = u.hostname; } catch { return false; }
+  if (LINE_LANDING.test(expandedUrl)) return false;
+  if (SUSPICIOUS_TLD.test(host)) return false;
+  if (landingScore > 0) return false;
+  return true;
+}

@@ -33,7 +33,8 @@ import { decideImpersonationKick } from "./impersonation-kick.mjs";
 import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriendNoteGate, plainInfoShare, unrecognizedLinkAction, unrecognizedReport, UNRECOGNIZED_REPLY, KICK_FAKE_LUXURY } from "./kick-scope.mjs";
 import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, isLineOaUrl, probeLineOaPage } from "./line-oa-bandan.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
-import { shortUrlExpandOutcome, unresolvedShortReportLine } from "./short-url-outcome.mjs";
+import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine } from "./short-url-outcome.mjs";
+import { SendFailTracker, fetchWithRetry, mediaFailReportLine, sendFailAlertLine, sendFailReportLine } from "./ops-report.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
 import { makeNameGuard } from "./protected-names.mjs";
@@ -264,6 +265,45 @@ function appendUnresolvedShortReport(row) {
     appendFileSync(file, `${line}\n`, { mode: 0o600 });
     chmodSync(file, 0o600);
   } catch (error) { recordError("unresolved-short-report", error.message); }
+}
+// 11/5 誤判審查 3、5：通知送出失敗、抓圖／檔失敗寫進日報 jsonl（600，給 22:00 日報彙整每群次數）。
+function appendOpsReport(line) {
+  if (!line) return;
+  try {
+    const file = resolve(logDir, config.opsReport?.reportFile ?? "ops-failures.jsonl");
+    appendFileSync(file, `${line}\n`, { mode: 0o600 });
+    chmodSync(file, 0o600);
+  } catch (error) { recordError("ops-report", error.message); }
+}
+const sendFails = new SendFailTracker();
+/** 每次通知送出失敗：記錯誤碼、被引用的原訊息還在不在；同群 1 小時內 ≥3 次寫告警。 */
+async function noteSendFailure(ws, { chatId, messageId, kind, code, attempt, replied, replyTo }) {
+  let replyExists;
+  if (replyTo) {
+    try {
+      const page = await call(ws, { type: "history:fetch", chatId, limit: 30 }, 10_000);
+      if (page?.type === "history" && Array.isArray(page.messages)) replyExists = page.messages.some((m) => String(m.messageId) === String(replyTo));
+    } catch {}
+  }
+  const day = localDay();
+  const { hourCount, dayCount, alert } = sendFails.note(chatId, day);
+  record({ action: "send-failed", chatId, messageId, kind, code, attempt, replied, ...(replyExists !== undefined ? { replyExists } : {}), hourCount, dayCount });
+  appendOpsReport(sendFailReportLine({ chatId, messageId, kind, code, attempt, replied, replyExists, hourCount, dayCount }));
+  if (alert) {
+    record({ action: "send-failed-alert", chatId, hourCount });
+    recordError("send-failed-alert", `同群 1 小時內通知送出失敗 ${hourCount} 次`, { chatId });
+    appendOpsReport(sendFailAlertLine({ chatId, hourCount }));
+  }
+}
+/** 抓圖／檔：失敗重抓一次，結果寫日報。回傳最後的回覆。 */
+async function fetchMedia(ws, frame, okType) {
+  const { answer, retried, first } = await fetchWithRetry((f) => call(ws, f), frame, { okType, delayMs: config.mediaRetryDelayMs ?? 1500, sleep });
+  if (retried) {
+    const recovered = answer?.type === okType;
+    record({ action: "media-refetch", chatId: frame.chatId, messageId: frame.messageId, frame: frame.type, code: first?.code, recovered });
+    appendOpsReport(mediaFailReportLine({ chatId: frame.chatId, messageId: frame.messageId, frame: frame.type, code: first?.code, retryCode: answer?.code, recovered }));
+  }
+  return answer;
 }
 function appendUnsupportedFileReport(row) {
   try {
@@ -1260,7 +1300,7 @@ async function remove(ws, message, entry) {
   if (config.dryRun) {
     console.log(`【試跑，未踢】${message.senderName}（${[entry.verdict, entry.names?.join("、"), refLabel(entry)].filter(Boolean).join("，")}）`);
     record({ action: "dry-run", ...entry });
-    notifyAdmins(ws, entry, kind);
+    notifyAdmins(ws, entry, "dry-run-removed");
     return;
   }
   if (warnOnly.has(message.channelId)) {
@@ -1272,7 +1312,7 @@ async function remove(ws, message, entry) {
     record({ action: "failed", code: "NO_PERMISSION", ...entry });
     return notifyAdmins(ws, entry, failedKind);
   }
-  await notifyThenAct(() => notifyAdmins(ws, entry, kind), (preNotified) => {
+  await notifyThenAct(() => preNotify(ws, entry, kind), (preNotified) => {
     const requestId = `kick${++requestSeq}`;
     pending.set(requestId, { ...entry, preNotified });
     sendKick(ws, { type: "member:remove", requestId, chatId: message.channelId, messageId: message.messageId, deleteMessage: config.deleteMessage !== false });
@@ -1537,7 +1577,7 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets, 
   let deleted = 0;
   let failed = 0;
   let kickSent = false;
-  const notified = await notifyThenAct(() => notifyAdmins(ws, entry, kick ? "removed" : "link-delete", { force: true }), async () => {
+  const notified = await notifyThenAct(() => preNotify(ws, entry, kick ? "removed" : "link-delete", { force: true }), async () => {
     // 踢人時，引用的那則交給踢人請求一起刪（伺服器要靠那則訊息找人）；其餘先刪。
     for (const messageId of targets) {
       if (kick && messageId === replyTo) continue;
@@ -1556,7 +1596,10 @@ async function punishImpersonationInvite(ws, message, victim, replyTo, targets, 
     }
   }, notify.beforeActionMs ?? 2000, sleep);
   record({ action: "impersonation-invite-handled", chatId: entry.chatId, messageId: replyTo, senderId: entry.senderId, notified, deleted, failed, kickSent });
-  if (failed > 0) await notifyAdmins(ws, entry, kick ? "failed" : "link-delete-failed", { force: true });
+  // 11/5 誤判審查 1：踢人時結果由 member:removed／error 回報（成功「已移出」、失敗「無法移除」各一則）；附帶刪文失敗只記錄，不另發互相矛盾的通知。
+  if (kick) return;
+  if (failed > 0) await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
+  else if (deleted > 0) await notifyAdmins(ws, entry, "done-deleted", { force: true });
 }
 
 // ── 一頁式詐騙購物站 ───────────────────────────────────────────
@@ -1640,7 +1683,7 @@ async function checkScamShop(ws, message, rawText) {
     return true;
   }
   let answer = { type: "message:deleted" };
-  const notified = await notifyThenAct(() => notifyAdmins(ws, entry, kick ? "removed" : repeat ? "shop-repeat" : "shop", { force: true }), async () => {
+  const notified = await notifyThenAct(() => preNotify(ws, entry, kick ? "removed" : repeat ? "shop-repeat" : "shop", { force: true }), async () => {
     if (kick) {
       kicked.add(`${message.channelId} ${message.senderId}`);
       markRemoved(message);
@@ -1656,6 +1699,7 @@ async function checkScamShop(ws, message, rawText) {
     // kickSent＝已送出；真正踢成看 removed，失敗看 kickFailed／failed
   } else if (deleted) {
     markSelfCanKick(entry.chatId, "scam-shop-deleted");
+    await notifyAdmins(ws, entry, "done-deleted", { force: true });
   } else {
     record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
   }
@@ -1681,7 +1725,7 @@ const fileScan = { enabled: false, ...FILE_SCAN_DEFAULTS, ...config.fileScan };
 async function checkFile(ws, message) {
   if (neverKick(message)) return;
   let got;
-  try { got = await call(ws, { type: "file:fetch", chatId: message.channelId, messageId: message.messageId }); } catch (error) { return recordError("file", error.message, { chatId: message.channelId, messageId: message.messageId }); }
+  try { got = await fetchMedia(ws, { type: "file:fetch", chatId: message.channelId, messageId: message.messageId }, "file"); } catch (error) { return recordError("file", error.message, { chatId: message.channelId, messageId: message.messageId }); }
   if (got?.type !== "file") return recordError("file", got?.code, { chatId: message.channelId, messageId: message.messageId });
   let scan;
   try { scan = await scanFile(Buffer.from(String(got.data ?? ""), "base64"), fileScan); } catch { scan = { urls: [], qrs: [], text: "", error: "SCAN_FAILED" }; }
@@ -1790,11 +1834,11 @@ ${contextText}`);
     record({ action: "bandan-line-oa-flag", ...entry, disposition: act.reason, oaProbe: entry.oaProbe });
     if (config.dryRun) {
       record({ action: "bandan-line-oa-dry-run", chatId: entry.chatId, messageId: entry.messageId });
-      await notifyAdmins(ws, entry, "link-delete");
+      await notifyAdmins(ws, entry, "dry-run-deleted");
       return true;
     }
     let answer = { type: "error", code: "NOT_SENT" };
-    const notified = await notifyThenAct(() => notifyAdmins(ws, entry, "link-delete"), async () => {
+    const notified = await notifyThenAct(() => preNotify(ws, entry, "link-delete"), async () => {
       answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
     }, notify.beforeActionMs ?? 2000, sleep);
     const deleted = answer.type === "message:deleted";
@@ -1807,7 +1851,7 @@ ${contextText}`);
       record({ action: prior.type === "message:deleted" ? "bandan-line-oa-prior-deleted" : "bandan-line-oa-prior-delete-failed", chatId: entry.chatId, messageId: priorLure.messageId, pairedWith: entry.messageId, senderId: entry.senderId, contentType: priorLure.contentType, code: prior.type === "message:deleted" ? undefined : prior.code, kick: false });
     }
     record({ action: deleted ? "bandan-line-oa-deleted" : "bandan-line-oa-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code, kick: false });
-    if (!deleted) await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
+    await notifyAdmins(ws, entry, deleted ? "done-deleted" : "link-delete-failed", { force: true });
     return true;
   }
   if (act.notice) {
@@ -1838,15 +1882,15 @@ async function deleteScamLink(ws, message, entry) {
   record({ action: "scam-link-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, score: entry.score, names: entry.names, verdict: entry.verdict, review: entry.review, reviewModel: entry.reviewModel });
   if (config.dryRun) {
     record({ action: "scam-link-dry-run", chatId: entry.chatId, messageId: entry.messageId });
-    notifyAdmins(ws, entry, "link-delete");
+    notifyAdmins(ws, entry, "dry-run-deleted");
     return;
   }
   let answer = { type: "error", code: "NOT_SENT" };
-  const notified = await notifyThenAct(() => notifyAdmins(ws, entry, "link-delete"), async () => {
+  const notified = await notifyThenAct(() => preNotify(ws, entry, "link-delete"), async () => {
     answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
   }, notify.beforeActionMs ?? 2000, sleep);
   const deleted = answer.type === "message:deleted";
-  if (deleted) markSelfCanKick(entry.chatId, "scam-link-deleted");
+  if (deleted) { markSelfCanKick(entry.chatId, "scam-link-deleted"); await notifyAdmins(ws, entry, "done-deleted", { force: true }); }
   record({ action: deleted ? "scam-link-deleted" : "scam-link-delete-failed", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code });
   if (!deleted) {
     recordError("delete", answer.code);
@@ -1959,7 +2003,7 @@ async function reviewVisionSolo(small) {
 }
 async function auditImage(ws, message) {
   if (!imageCap.take()) { record({ action: "audit-image-skipped", reason: "hourly-cap", chatId: message.channelId, messageId: message.messageId }); return; }
-  const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
+  const picture = await fetchMedia(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId }, "media");
   if (picture.type !== "media") { record({ action: "audit-image-failed", chatId: message.channelId, messageId: message.messageId, code: picture.code }); return; }
   const base = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName };
   const names = [message.senderName, ...ownerNames].filter(Boolean);
@@ -2230,6 +2274,7 @@ async function handle(ws, message) {
     // 「疑似短網址」（短網域＋短路徑，不在已知短網址清單）：也唯讀展開；是知識／社群／技術文件就放行（只在沒開踢人的群）。
     const susRule = RULES.find((r) => r.name === "疑似短網址");
     const susUrl = !shortUrl && config.shortUrlExpand === true ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
+    let normalLanding = false;
     if (susUrl) {
       const expanded = await expandUrlSafe(/^https?:/i.test(susUrl.trim()) ? susUrl.trim() : `https://${susUrl.trim()}`).catch(() => undefined);
       // 11/4 18:20：疑似短網址（url.kr 等）落地 LINE 官方帳號 → 帶單老師 LINE@ 判斷（要有帶單語意；不加分數、不踢）。
@@ -2240,9 +2285,18 @@ async function handle(ws, message) {
       if (expanded?.invite) extraNames.push("短網址導向群組邀請");
       else if (expanded?.url && (isKnowledgePage(expanded.url, expanded.html) || isMainstreamMediaHost((() => { try { return new URL(expanded.url).hostname; } catch { return ""; } })()))) knowledgeLink = true;
       else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
-      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: expanded ? (expanded.invite ? "invite" : knowledgeLink ? "knowledge" : shopWarn ? "shopping" : "normal") : "unreachable" });
+      // 11/5 誤判審查 4：展開成功、落地正常（非 LINE 邀請／官方帳號／加好友／QR、非可疑網域、非短網址）→ 換成落地網址再判斷，不加「疑似短網址」6 分。
+      const landing = expanded?.url ? ruleScore({}, expanded.url) : undefined;
+      normalLanding = shortUrlNormalLanding({
+        expandedUrl: expanded?.url, invite: Boolean(expanded?.invite), lineOa: Boolean(expanded?.lineOa) || Boolean(expanded?.url && isLineOaUrl(expanded.url)),
+        stillShortener: Boolean(expanded?.url && (SHORT_LINK.test(expanded.url) || landing?.names?.some((n) => SHORT_URL_RULE_NAMES.includes(n)))),
+        shopping: shopWarn, landingScore: landing?.names?.length ?? 0,
+      });
+      if (normalLanding) decideText = text.replace(susUrl.trim(), expanded.url);
+      record({ action: "short-url-expanded", chatId: message.channelId, messageId: message.messageId, suspicious: true, result: expanded ? (expanded.invite ? "invite" : knowledgeLink ? "knowledge" : shopWarn ? "shopping" : "normal") : "unreachable", ...(normalLanding ? { dropShortScore: true } : {}) });
     }
-    const result = await decide(message, decideText, { extraNames, dropNames: knowledgeLink && !perChatKickHere ? ["疑似短網址"] : [] });
+    const dropNames = normalLanding ? [...SHORT_URL_RULE_NAMES] : knowledgeLink && !perChatKickHere ? ["疑似短網址"] : [];
+    const result = await decide(message, decideText, { extraNames, dropNames });
     if (knowledgeLink) result.knowledgeLink = true;
     // 16:31 誤判：第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → 只記錄，不通知不標記（不影響刪踢）。
     // 10/22 22:24 誤判：只因「疑似短網址」（不在清單的短網域，是猜的）被強制判詐，但第一層與覆核都沒判 SCAM → 只記錄（不影響踢人群）。
@@ -2389,7 +2443,7 @@ async function qrOrigin(ws, chatId, content) {
 }
 
 async function checkImage(ws, message) {
-  const picture = await call(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId });
+  const picture = await fetchMedia(ws, { type: "media:fetch", chatId: message.channelId, messageId: message.messageId }, "media");
   if (picture.type !== "media") { recordError("media", picture.code, { chatId: message.channelId, messageId: message.messageId }); return console.error(`無法取得圖片（${picture.code}）`); }
   let content;
   try {
@@ -2840,28 +2894,37 @@ function noticeReason(entry) {
   return items.length ? `（${items.join("、")}）` : "";
 }
 
+const DONE_KINDS = new Set(["done-removed", "done-deleted"]);
 function buildNotice(entry, kind, admins) {
   // 不引用詐騙內容：暱稱去掉網址／ID／禁字，理由只放規則名稱（模型長句不放）。
   entry = { ...entry, senderName: safeName(entry.senderName, blockedWords) };
   const reason = noticeReason(entry);
   const head = kind === "repeat"
-    ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，將移出社群並刪除這則訊息。`
+    ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，疑似詐騙，處理中。`
     : kind === "repeat-failed"
       ? `⚠️ 反詐小幫手：「${entry.senderName}」先前已被提醒過，仍重複張貼外部 LINE 群組／好友資訊，但本帳號無法移除，請群主／管理員處理。`
     : kind === "removed"
-    ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，將把「${entry.senderName}」移出社群並刪除這則訊息。`
+    ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，處理中。`
+    : kind === "done-removed"
+    ? `⚠️ 反詐小幫手：已將「${entry.senderName}」移出社群${entry.messageDeleted ? "，並刪除那則疑似詐騙訊息" : ""}。`
+    : kind === "done-deleted"
+    ? `⚠️ 反詐小幫手：已刪除「${entry.senderName}」的疑似詐騙訊息。`
+    : kind === "dry-run-removed"
+    ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}（測試模式，未實際移除）。`
+    : kind === "dry-run-deleted"
+    ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}（測試模式，未實際刪除）。`
     : kind === "failed"
       ? `⚠️ 反詐小幫手：偵測到「${entry.senderName}」疑似詐騙${reason}，但本帳號無法移除，請管理員處理。`
       : kind === "shop"
-        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的疑似是一頁式詐騙購物網站（名牌超低價、貨到付款這類），將刪除這則訊息。請不要在這類網站下單。`
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的疑似是一頁式詐騙購物網站（名牌超低價、貨到付款這類），處理中。請不要在這類網站下單。`
       : kind === "shop-repeat"
-        ? `⚠️ 反詐小幫手：「${entry.senderName}」再次張貼疑似一頁式詐騙購物網站，將刪除這則訊息，請管理員留意。`
+        ? `⚠️ 反詐小幫手：「${entry.senderName}」再次張貼疑似一頁式詐騙購物網站，處理中，請管理員留意。`
       : kind === "shop-noperm"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的疑似是一頁式詐騙購物網站，請不要在這類網站下單；本帳號在這裡無法刪除，請管理員處理。`
       : kind === "shop-suspect"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的購物連結有一頁式詐騙網站的特徵，下單前請先查證（165 反詐騙專線），請管理員確認。`
       : kind === "link-delete"
-        ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，含可疑連結，將刪除這則訊息。`
+        ? `⚠️ 反詐小幫手：這則是疑似詐騙${reason}，含可疑連結，處理中。`
       : kind === "link-delete-failed"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」的訊息疑似詐騙${reason}，但本帳號無法刪除，請發文者自行收回，或請管理員處理。`
       : kind === "link-score"
@@ -2871,6 +2934,8 @@ function buildNotice(entry, kind, admins) {
       : kind === "qr"
         ? `⚠️ 反詐小幫手：「${entry.senderName}」貼的截圖含外部 LINE 群組／好友 QR code，疑似引流，請管理員確認。`
         : `⚠️ 反詐小幫手：「${entry.senderName}」貼的圖片疑似詐騙${reason}，請管理員確認。`;
+  // 已處置／測試模式的回報：不加通用提醒、不 @ 管理員。
+  if (DONE_KINDS.has(kind)) return { text: scrubNotice(head, blockedWords), mentions: [] };
   const tips = noticeTips(entry.names ?? []).map((t) => `\n${t}`).join("");
   let text = scrubNotice(`${head}\n請大家不要點陌生連結、不要加對方 LINE、不要匯款。${tips}`, blockedWords);
   const mentions = [];
@@ -2887,6 +2952,19 @@ function buildNotice(entry, kind, admins) {
   return { text, mentions };
 }
 
+/**
+ * 11/5 誤判審查 1：處置前的預告。先看即時權限（self-admin-status 的 notAdmin 名單＝selfCanKick 為 false）：
+ * 沒權限 → 不發預告（群裡不會出現「將移出／將刪除」），動作照試；成功發「已移出／已刪除」，失敗只發一則「無法移除／刪除，請管理員處理」。
+ * 有權限 → 先發中性「疑似詐騙，處理中」，成功後才發「已移出／已刪除」。
+ */
+async function preNotify(ws, entry, kind, opts) {
+  if (!selfCanKick(entry.chatId)) {
+    record({ action: "pre-notice-skipped", reason: "not-admin", kind, chatId: entry.chatId, messageId: entry.messageId });
+    return false;
+  }
+  return notifyAdmins(ws, entry, kind, opts);
+}
+
 /** 發通知；真的送出回 true。force：不受冷卻限制（處置失敗的補充通知）。 */
 async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   if (!notify.enabled || !entry?.chatId) return false;
@@ -2896,7 +2974,8 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   const now = Date.now();
   if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", kind, chatId: entry.chatId, messageId: entry.messageId, senderName: entry.senderName }); return false; }
   lastNotified.set(entry.chatId, now);
-  const admins = noticeAdmins(entry.chatId, [entry.senderId]);
+  const done = DONE_KINDS.has(kind);
+  const admins = done ? [] : noticeAdmins(entry.chatId, [entry.senderId]);
   const { text, mentions } = buildNotice(entry, kind, admins);
   if (config.dryRun) {
     // 通知內容只在試跑時顯示在主控台，供檢視；日誌只記字數。
@@ -2906,7 +2985,7 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   }
   // 回覆（引用）那則詐騙訊息，大家看得出是哪一則；訊息已刪除或伺服器不認得就退成不引用。
   // 伺服器只允許 @ 最近在這個聊天室發過言的人；不行就改發不帶 @ 的版本（名字仍寫在文字裡）。
-  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: entry.messageId, canMention: canMentionIn(entry.chatId), aboutName: entry.senderName });
+  const { answer: reply, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: entry.chatId, text, mentions, replyTo: done ? undefined : entry.messageId, canMention: canMentionIn(entry.chatId), aboutName: done ? undefined : entry.senderName, sleep, retryDelayMs: notify.retryDelayMs ?? 2500, backoffMs: notify.backoffMs ?? 5000, onFailure: (f) => noteSendFailure(ws, { ...f, chatId: entry.chatId, messageId: entry.messageId, kind }) });
   if (reply.type === "sent" && reply.messageId) { sentByBot.add(reply.messageId); ownMessages.add(reply.messageId); }
   if (reply.type === "sent") markReplySkipNotified(entry.chatId, entry.senderId);
   record({ action: reply.type === "sent" ? "notified" : "notify-failed", kind, chatId: entry.chatId, messageId: entry.messageId, code: reply.code, replied, mentioned: Boolean(reply.type === "sent" && tried.at(-1)?.mentions), tried: tried.map((t) => t.result), attempts: tried.length, mentions: mentions.map((m) => m.userId) });
@@ -3755,8 +3834,8 @@ function connect() {
         if (entry?.chatId) markSelfCanKick(entry.chatId, "member-removed");
         else if (frame.chatId) markSelfCanKick(frame.chatId, "member-removed");
         record({ action: "removed", messageDeleted: frame.messageDeleted, ...entry });
-        // 通知已在處置前發過；沒發成（冷卻、權限、失敗）才補發。
-        if (entry && !entry.preNotified) notifyAdmins(ws, entry, entry.noticeKind ?? "removed");
+        // 11/5 誤判審查 1：處置前只發中性「處理中」（或沒權限時不發）；真的移出成功才發「已移出」。
+        if (entry) notifyAdmins(ws, { ...entry, messageDeleted: Boolean(frame.messageDeleted) }, "done-removed", { force: true });
         return;
       }
       case "note:status":
@@ -3775,7 +3854,8 @@ function connect() {
         record({ action: "kickFailed", code: frame.code, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName });
         record({ action: "failed", code: frame.code, ...entry });
         // 已先發過「移出」通知：補一則「無法移除」（不受冷卻限制），讓管理員知道要手動處理。
-        notifyAdmins(ws, entry, entry.noticeKind ? `${entry.noticeKind}-failed` : "failed", { force: entry.preNotified });
+        // 失敗只發一則「無法移除，請管理員處理」（不受冷卻限制）。
+        notifyAdmins(ws, entry, entry.noticeKind ? `${entry.noticeKind}-failed` : "failed", { force: true });
       }
     }
   });

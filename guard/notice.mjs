@@ -70,28 +70,52 @@ export function keepMentions(text, mentions = [], keep = () => true) {
   return { text: out, mentions: kept };
 }
 
+/** 一則通知最多 @ 幾人（11/5 誤判審查 3：@ 太多人容易 SEND_FAILED）。 */
+export const MAX_NOTICE_MENTIONS = 3;
+const defaultSleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const TRANSIENT = new Set(["TIMEOUT", "RATE_LIMITED"]);
+
 /**
- * 送出通知（同一則最多補送一次）：
- * 1. 先送「引用該則訊息＋@」（@ 只留 canMention 准的人，其他人名字整段拿掉）。
- * 2. 伺服器明確拒絕（INVALID_REQUEST／SEND_FAILED 等）才補送一次：拿掉所有 @（不留「@名字」純文字）；
+ * 送出通知：
+ * 1. 先送「引用該則訊息＋@」（@ 只留 canMention 准的人，最多 maxMentions 位，其他人名字整段拿掉）。
+ * 2. 伺服器明確拒絕（INVALID_REQUEST／SEND_FAILED 等）→ 等 retryDelayMs（2.5 秒）補送一次：拿掉所有 @（不留「@名字」純文字）；
  *    帶 @ 被拒（INVALID_REQUEST）時保留引用，否則（LINE 端 SEND_FAILED 或本來就沒 @）連引用一起拿掉。
- * 逾時（可能已送出）或限流就停，不補送，避免重複發。
+ * 3. 11/5：逾時（TIMEOUT）與限流（RATE_LIMITED）各退避一次（backoffMs，5 秒）再送同一則；同一種不會退避第二次。
+ * 每次失敗都呼叫 onFailure({ code, attempt, replied, replyTo })（記錯誤碼、查原訊息還在不在），onFailure 出錯不影響送出。
  * @param send (frame) => Promise<reply>，reply.type 為 "sent" 或 "error"（含 code）
  */
-export async function sendNotice(send, { chatId, text, mentions = [], replyTo, canMention, aboutName }) {
+export async function sendNotice(send, { chatId, text, mentions = [], replyTo, canMention, aboutName, maxMentions = MAX_NOTICE_MENTIONS, retryDelayMs = 2500, backoffMs = 5000, sleep = defaultSleep, onFailure }) {
   text = withAgentLabel(text);
   const plain = mentions.length ? stripMentions(text, mentions) : text;
-  const first = canMention ? keepMentions(text, mentions, canMention) : { text, mentions };
+  const allowedIds = new Set();
+  for (const m of [...mentions].sort((a, b) => a.start - b.start)) {
+    if (allowedIds.size >= maxMentions) break;
+    if (!canMention || canMention(m.userId)) allowedIds.add(m.userId);
+  }
+  const first = mentions.length ? keepMentions(text, mentions, (id) => allowedIds.has(id)) : { text, mentions };
   const frameOf = (body, ms, reply) => ({ type: "message:send", chatId, text: body, ...(ms.length ? { mentions: ms } : {}), ...(reply ? { replyTo: reply } : {}) });
   const tried = [];
+  const backedOff = new Set();
   const attempt = async (frame) => {
     const answer = await send(frame);
     tried.push({ reply: Boolean(frame.replyTo), mentions: Boolean(frame.mentions), result: answer.type === "sent" ? "sent" : answer.code });
+    if (answer.type !== "sent" && onFailure) {
+      try { await onFailure({ code: answer.code ?? "UNKNOWN", attempt: tried.length, replied: Boolean(frame.replyTo), replyTo: frame.replyTo }); } catch {}
+    }
+    return answer;
+  };
+  // 逾時／限流：同一種只退避一次，再送同一則。
+  const withBackoff = async (frame, answer) => {
+    while (answer.type !== "sent" && TRANSIENT.has(answer.code) && !backedOff.has(answer.code)) {
+      backedOff.add(answer.code);
+      await sleep(backoffMs);
+      answer = await attempt(frame);
+    }
     return answer;
   };
   const firstFrame = frameOf(first.mentions.length ? first.text : plain, first.mentions, replyTo);
-  let answer = await attempt(firstFrame);
-  if (answer.type !== "sent" && answer.code !== "TIMEOUT" && answer.code !== "RATE_LIMITED") {
+  let answer = await withBackoff(firstFrame, await attempt(firstFrame));
+  if (answer.type !== "sent" && !TRANSIENT.has(answer.code)) {
     const keepReply = Boolean(firstFrame.mentions) && answer.code === "INVALID_REQUEST" ? replyTo : undefined;
     // 10/31：回覆送失敗改一般訊息時，文字帶上對方暱稱（無法引用原訊息時仍看得出指誰）。
     let retryText = plain;
@@ -103,7 +127,10 @@ export async function sendNotice(send, { chatId, text, mentions = [], replyTo, c
       }
     }
     const retry = frameOf(retryText, [], keepReply);
-    if (JSON.stringify(retry) !== JSON.stringify(firstFrame)) answer = await attempt(retry);
+    if (JSON.stringify(retry) !== JSON.stringify(firstFrame)) {
+      await sleep(retryDelayMs);
+      answer = await withBackoff(retry, await attempt(retry));
+    }
   }
   const last = tried.at(-1);
   return { answer, tried, replied: answer.type === "sent" && Boolean(last?.reply), mentioned: answer.type === "sent" && Boolean(last?.mentions) };

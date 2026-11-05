@@ -51,7 +51,7 @@ test("先記再判：noteBandanLure 會保留被蓋掉的前一則（prior），
 // ---- cooldown 不吞處置 ----
 test("cooldown：刪文路徑不看通知有沒有送出（notifyThenAct 一律執行刪文）、通知路徑先記錄再通知", () => {
   const body = src.slice(src.indexOf("async function handleBandanLineOa"), src.indexOf("// scamLink.deleteOnConfirmed"));
-  assert.match(body, /notifyThenAct\(\(\) => notifyAdmins\(ws, entry, "link-delete"\), async \(\) => \{\s*answer = await call\(ws, \{ type: "message:delete"/);
+  assert.match(body, /notifyThenAct\(\(\) => preNotify\(ws, entry, "link-delete"\), async \(\) => \{\s*answer = await call\(ws, \{ type: "message:delete"/);
   const flag = body.indexOf('record({ action: "suspect-flag"');
   const notifyAt = body.indexOf('await notifyAdmins(ws, entry, "suspect")');
   assert.ok(flag > 0 && notifyAt > flag);
