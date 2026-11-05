@@ -70,13 +70,16 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
   return { frames, removes: frames.filter((f) => f.type === "member:remove"), deletes: frames.filter((f) => f.type === "message:delete"), sends: frames.filter((f) => f.type === "message:send") };
 }
 
+// 11/5 14:43 士軒新評分標準：群內發言總閘。下面標 runGuardLegacy 的舊測試關掉總閘，驗證閘門後面的舊路徑仍正常。
+const runGuardLegacy = (c, ...a) => runGuard({ outboundGate: { enabled: false }, ...c }, ...a);
+
 test("對照：換群文字＋LINE 群組邀請＋兩模型 SCAM → 會送踢人（確認測試抓得到）", async () => {
   const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: "通知：本群明天要刪除了，請大家加入新群 https://line.me/ti/g2/FakeGroup0001 快點" }]);
   assert.equal(r.removes.length, 1);
 });
 
 test("10/26 22:59：高分詐騙但只有一般連結（不是群組邀請）→ 不踢、不刪，只通知", async () => {
-  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
+  const r = await runGuardLegacy({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
   assert.equal(r.removes.length, 0);
   assert.equal(r.deletes.length, 0);
   assert.equal(r.sends.length, 1);
@@ -94,7 +97,7 @@ test("受保護成員（protectedIds）：就算模型都判 SCAM 也不踢、�
 
 test("冒名：同社群同名不同 ID、Meta 判 SCAM → 預設只通知，不踢", async () => {
   const history = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
-  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pOther", senderName: "阿明", text: NORMAL_TEXT }], { history });
+  const r = await runGuardLegacy({}, [{ messageId: "m1", channelId: "cA", senderId: "pOther", senderName: "阿明", text: NORMAL_TEXT }], { history });
   assert.equal(r.removes.length, 0);
   assert.equal(r.deletes.length, 0);
   assert.equal(r.sends.length, 1);
@@ -107,7 +110,7 @@ test("冒名：管理員在別的社群，不比對、不通知", async () => {
 });
 
 test("kickMode=notify：達踢人門檻也只通知，不踢", async () => {
-  const r = await runGuard({ kickMode: "notify" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
+  const r = await runGuardLegacy({ kickMode: "notify" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
   assert.equal(r.removes.length, 0);
   assert.equal(r.sends.length, 1);
 });
@@ -254,7 +257,7 @@ test("冒名＋外部 LINE QR 圖片：通知＋刪除", async () => {
 });
 
 test("冒名但沒有連結：只通知（同社群），不刪不踢", async () => {
-  const r = await runGuard({ impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "大家好" }], { history: ADMIN_HISTORY });
+  const r = await runGuardLegacy({ impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "大家好" }], { history: ADMIN_HISTORY });
   assert.equal(r.removes.length + r.deletes.length, 0);
   assert.equal(r.sends.length, 1);
 });
@@ -281,7 +284,7 @@ const SHOP_AD = "LV 精品快閃店 名牌包只要 $399 貨到付款 https://lv
 const SHOP = { scamShop: { enabled: true, fetchPage: false, kickRepeat: false } };
 
 test("詐騙購物：第一次 → 10/26 23:01 起只引用回覆列出詐騙評分，不刪不踢", async () => {
-  const r = await runGuard({ ...SHOP }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
+  const r = await runGuardLegacy({ ...SHOP }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
   assert.equal(r.deletes.length, 0);
   assert.equal(r.removes.length, 0);
   assert.equal(r.sends[0].replyTo, "m1");
@@ -329,14 +332,14 @@ test("詐騙購物：受保護成員、管理員不處理", async () => {
 });
 
 test("詐騙購物：不確定 → 只通知，不刪", async () => {
-  const r = await runGuard({ ...SHOP, review: null }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: "名牌包特賣 https://bagsale.shop/x" }]);
+  const r = await runGuardLegacy({ ...SHOP, review: null }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: "名牌包特賣 https://bagsale.shop/x" }]);
   assert.equal(r.removes.length + r.deletes.length, 0);
   assert.equal(r.sends.length, 1);
   assert.ok(r.sends[0].text.includes("查證"));
 });
 
 test("詐騙購物：非管理員群 → 只通知", async () => {
-  const r = await runGuard({ ...SHOP, questionRedact: { noDeleteChats: ["cA"] } }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
+  const r = await runGuardLegacy({ ...SHOP, questionRedact: { noDeleteChats: ["cA"] } }, [{ messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: SHOP_AD }]);
   assert.equal(r.removes.length + r.deletes.length, 0);
   assert.equal(r.sends.length, 1);
 });
@@ -390,7 +393,7 @@ test("假冒管理員：暱稱「管理員小美」只閒聊 → 只記錄，不
 });
 
 test("假冒管理員＋換群內容（無連結）→ 通知一次（冷卻），不刪不踢", async () => {
-  const r = await runGuard({ ...FAKE }, [
+  const r = await runGuardLegacy({ ...FAKE }, [
     { messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "小幫手-小美", text: "本群即將關閉，請大家搬到新群" },
     { messageId: "m2", channelId: "cA", senderId: "pFake", senderName: "小幫手-小美", text: "請大家私我拿新群資訊" },
   ], { waitMs: 3500 });
@@ -618,7 +621,7 @@ test("只學習的群（groupPolicies.learnOnly）：收進參考資料，但不
 
 test("只警告的群（groupPolicies.warnOnly）：詐騙、冒名＋邀請、購物詐騙都不踢不刪，只發警告；其他群照常", async () => {
   const history = [{ messageId: "h1", channelId: "cB", senderId: "pAdminB", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
-  const r = await runGuard({ kickMode: "kick", impersonation: { kickWithInvite: true }, scamShop: { enabled: true, fetchPage: false, kickRepeat: true }, scamLink: { deleteOnConfirmed: true }, groupPolicies: { cB: { warnOnly: true } } }, [
+  const r = await runGuardLegacy({ kickMode: "kick", impersonation: { kickWithInvite: true }, scamShop: { enabled: true, fetchPage: false, kickRepeat: true }, scamLink: { deleteOnConfirmed: true }, groupPolicies: { cB: { warnOnly: true } } }, [
     { messageId: "b1", channelId: "cB", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT },
     { messageId: "b2", channelId: "cB", senderId: "pImp", senderName: "阿明", text: INVITE },
     { messageId: "b3", channelId: "cB", senderId: "pShop", senderName: "賣包包", text: "LV 精品快閃店 名牌包只要 $399 貨到付款 https://lv-bags-sale.shop/a" },
@@ -776,7 +779,7 @@ test("23:07 教入金 → 不評分、不刪、不踢", async () => {
   assert.equal(r.sends.length + r.deletes.length + r.removes.length, 0);
 });
 test("23:07 加好友 → 只發一次溫和備註（無評分、無 @），同人同群冷卻", async () => {
-  const r = await runGuard({}, [
+  const r = await runGuardLegacy({}, [
     { messageId: "m1", channelId: "cA", senderId: "pX", senderName: "網友", text: "加我賴：fakeid123 交個朋友" },
     { messageId: "m2", channelId: "cA", senderId: "pX", senderName: "網友", text: "加我賴：fakeid123 交個朋友喔" },
   ], { waitMs: 3500 });
@@ -850,7 +853,7 @@ test("allChats：檔案路徑照同一套 → 一般群踢；排除群、只學�
 });
 const IMP_HISTORY = [{ messageId: "h1", channelId: "cA", senderId: "pAdmin", senderName: "阿明", senderRole: "coAdmin", channelKind: "square", contentType: "NONE", text: "大家好", createdAt: now - 60_000 }];
 test("23:47 冒名＋一般連結 → 只回評分，不刪不踢（allChats 開著也一樣）", async () => {
-  const r = await runGuard(ALL, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "大家看這篇 https://scam-site.xyz/a" }], { history: IMP_HISTORY, waitMs: 3500 });
+  const r = await runGuardLegacy(ALL, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: "大家看這篇 https://scam-site.xyz/a" }], { history: IMP_HISTORY, waitMs: 3500 });
   assert.equal(r.removes.length + r.deletes.length, 0);
   assert.ok(r.sends.some((f) => String(f.text).includes("詐騙評分")), JSON.stringify(r.sends.map((f) => f.text)));
 });
@@ -870,4 +873,10 @@ test("23:47 冒用群主＋私聊 QR（ti/p）→ 不踢", async () => {
   const png = (await QRCode.toBuffer("https://line.me/ti/p/FakeFriendQr", { width: 300 })).toString("base64");
   const r = await runGuard({ ...ALL, qr: { enabled: true, kickOnConfirmed: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", contentType: "IMAGE" }], { media: png, history: IMP_HISTORY, waitMs: 3500 });
   assert.equal(r.removes.length, 0);
+});
+
+test("11/5 總閘：高分但只有一般連結（無強特徵）→ 群內完全不發，只記日誌", async () => {
+  const r = await runGuard({}, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: SCAM_TEXT }]);
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.sends.length, 0);
 });

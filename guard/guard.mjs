@@ -17,6 +17,7 @@ import { ScamPatterns } from "./scam-patterns.mjs";
 import { ASK_SCAM, benignUrlPattern, DEFAULT_BENIGN_DOMAINS, makeRuleScorer, RULES, SHORTENERS, forcedScamNames } from "./rules.mjs";
 import { Watermarks, selectCatchUp } from "./catchup.mjs";
 import { SummaryResendQueue, alreadyDelivered } from "./summary-resend.mjs";
+import { outboundGate } from "./strong-gate.mjs";
 import { allLinksLegit, expandUrlSafe, fetchPageSafe, pageSignals, pruneOffenses, scoreScamShop, shopPageOnlyReviewOk, shopLinks } from "./shop.mjs";
 import { isAntiScamBotAlert, isPlainAntiScamBotAlert, blockedForLearnOnly, blockedForWarnOnly, botCampChats, makeChatReplyLimiter, learnExtChats, kickModeFor, errorCode, redPacketExceptionBlocked, decideChatKick, parseAuditImage, parseVisionLabel, scanNotifyChats, promoNote, replyGuidelines, riskNote, brandSegments, impersonatesBrand, labelReply, learnOnlyChats, warnOnlyChats, mentionTargets, ownerAnswered, replyTargetsSelf, selfIsChatAdmin, isFlagEntry, withLogDecision, scanNotifyDecision, visionMentionsConcreteShort, LINK_RULES } from "./policy.mjs";
 import { exchangeTextNoLink, exchangeImageNoLink, outOfScopeNames } from "./exchange-nolink.mjs";
@@ -162,6 +163,7 @@ function isShoppingPage(html) {
 const shopReminded = new Map();
 async function shopReminder(ws, message, text = "⚠️ 這個短網址打開是購物頁面，可能是詐騙，請勿亂下單、亂填信用卡。") {
   const now = Date.now();
+  if (!gateSend({ chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, names: [] }, "shop-reminder")) return;
   if (now - (shopReminded.get(message.channelId) ?? 0) < 10 * 60_000) return record({ action: "shop-reminder-skipped", chatId: message.channelId, reason: "cooldown" });
   shopReminded.set(message.channelId, now);
   record({ action: "shop-reminder", chatId: message.channelId, messageId: message.messageId });
@@ -1261,6 +1263,7 @@ function impersonationKickDecision(message, entry) {
   });
 }
 async function remove(ws, message, entry) {
+  rememberContent(message);
   // 絕不處理管理員、群主、白名單或自己（伺服器也會再擋一次）。
   if (message.senderRole || whitelist.has(message.senderId) || message.senderId === me || chatAdmins.get(message.channelId)?.has(message.senderId) || nameGuard.protects(message)) {
     return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
@@ -1712,8 +1715,9 @@ async function checkScamShop(ws, message, rawText) {
 const friendGate = makeFriendNoteGate({ cooldownMs: (config.kickScope?.friendNoteCooldownMinutes ?? 360) * 60_000 });
 async function friendNote(ws, message) {
   const ok = notifyChats.has(message.channelId) && !neverKick(message) && friendGate({ chatId: message.channelId, senderId: message.senderId, learnOnly });
-  record({ action: "friend-add-note", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, sent: ok && !config.dryRun });
-  if (!ok || config.dryRun) return;
+  const gated = ok && !gateSend({ chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, names: [] }, "friend-note");
+  record({ action: "friend-add-note", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, sent: ok && !gated && !config.dryRun });
+  if (!ok || gated || config.dryRun) return;
   // 不是詐騙警告：不附分數、不 @ 管理員。只警告群也發，只學習群不發（friendGate 擋）。
   await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: FRIEND_NOTE, mentions: [], replyTo: message.messageId }).catch(() => undefined);
 }
@@ -1785,7 +1789,7 @@ async function checkUnrecognizedLink(ws, message, text) {
   } catch (error) { recordError("unrecognized-report", error.message); }
   if (config.dryRun) { record({ action: "unrecognized-link-dry-run", chatId: message.channelId, messageId: message.messageId }); return true; }
   // 先引用回覆（不含連結，結尾（AI代理）），再刪那則（刪了就引用不到）。
-  await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(UNRECOGNIZED_REPLY, blockedWords), mentions: [], replyTo: message.messageId }).catch(() => undefined);
+  if (gateSend({ chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, names: [] }, "unrecognized-reply")) await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(UNRECOGNIZED_REPLY, blockedWords), mentions: [], replyTo: message.messageId }).catch(() => undefined);
   const answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId });
   const deleted = answer.type === "message:deleted";
   const report = unrecognizedReport({ reportChat: unrecognized.reportChat, url, chatId: message.channelId });
@@ -2083,6 +2087,7 @@ async function auditImage(ws, message) {
 }
 
 async function handle(ws, message) {
+  rememberContent(message);
   if (learnOnly.has(message.channelId)) { learnOnlyMessage(message); return; }
   const text = textOf(message);
   const key = `${message.channelId} ${message.senderId}`;
@@ -2833,6 +2838,7 @@ async function remindAsker(ws, message, failed, { replyTo = message.messageId, f
     return false;
   }
   if (!notifyChats.has(message.channelId)) { record({ action: "asker-remind-skipped", reason: "chat-not-allowed", chatId: message.channelId }); return false; }
+  if (!gateSend({ chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, names: [] }, "asker-remind")) return false;
   // 回覆（引用）他貼的那則訊息；刪掉了或伺服器不認得就退成不引用。
   const { answer, tried, replied } = await sendNotice((frame) => call(ws, frame), { chatId: message.channelId, text: scrubNotice(text, blockedWords), mentions, replyTo, canMention: canMentionIn(message.channelId) });
   if (answer.type === "sent" && answer.messageId) { sentByBot.add(answer.messageId); ownMessages.add(answer.messageId); }
@@ -2841,6 +2847,25 @@ async function remindAsker(ws, message, failed, { replyTo = message.messageId, f
 }
 
 // ── 通知群主與管理員 ─────────────────────────────────────────
+// 士軒 11/5 14:43：群內發言總閘（strong-gate.mjs）。訊息內容只放記憶體（最多 5000 則），不進日誌。
+const gateCfg = { enabled: true, ...(config.outboundGate ?? {}) };
+const contentSeen = new Map();
+function rememberContent(message) {
+  if (!message?.messageId) return;
+  contentSeen.delete(message.messageId);
+  contentSeen.set(message.messageId, message);
+  if (contentSeen.size > 5000) contentSeen.delete(contentSeen.keys().next().value);
+}
+function contentFor(messageId) {
+  const m = contentSeen.get(messageId);
+  return m ? { text: textOf(m) || m.noteText || m.text || "", qrContent: m.qrContent, fileName: m.fileName, fileInvite: m.fileInvite } : {};
+}
+function gateSend(entry, kind, content = contentFor(entry?.messageId)) {
+  const gate = outboundGate(entry, content, { enabled: gateCfg.enabled !== false });
+  if (gate.send) return true;
+  record({ action: "outbound-gated", kind, reason: gate.reason, score: gate.score, chatId: entry?.chatId, messageId: entry?.messageId, senderId: entry?.senderId, names: entry?.names });
+  return false;
+}
 const lastNotified = new Map(); // 聊天室 id → 上次通知時間
 
 /**
@@ -2969,6 +2994,7 @@ async function preNotify(ws, entry, kind, opts) {
 async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   if (!notify.enabled || !entry?.chatId) return false;
   if (!notifyChats.has(entry.chatId)) { record({ action: "notify-skipped", reason: "chat-not-allowed", chatId: entry.chatId }); return false; }
+  if (!gateSend(entry, kind)) return false;
   // 10/27 F：一般連結的「可能詐騙」評分只在 > 0 分時貼（0 分、一般分享、一般投資訊息不貼）。
   if (!shouldPostLinkScore({ kind, score: entry.score })) { record({ action: "link-score-zero-skip", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId }); return false; }
   const now = Date.now();
@@ -3439,6 +3465,7 @@ async function handleNote(ws, chatId, note) {
 
 async function notifyNote(ws, entry, note, deleting) {
   if (!notify.enabled || !notifyChats.has(entry.chatId)) { record({ action: "note-flag", ...entry, notified: false, reason: "chat-not-allowed" }); return; }
+  if (!gateSend(entry, "note", { text: noteText(note.text) })) return;
   const admins = noticeAdmins(entry.chatId, [entry.senderId]);
   const { text, mentions } = buildNoteNotice({ snippet: noteSnippet(note.text, blockedWords), reason: noticeReason(entry), authorName: note.authorName ? safeName(note.authorName, blockedWords) : undefined, admins, deleting }, blockedWords);
   if (config.dryRun) {
