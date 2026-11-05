@@ -43,12 +43,15 @@ test("11/5-1 子網域短網址：通知正反例（含防詐提醒對抗）", (
 });
 
 const OA = "line.me/R/ti/p/@ab12xy";
-test("11/5-2 潛力股＋LINE@：正例只通知，LINE@ 不再扣分", () => {
+test("11/5-2 潛力股＋LINE@：正例只通知，踢人計分不變", () => {
   for (const t of [`免費領明天潛力股名單 加 ${OA}`, `飆股名單每天更新 https://${OA}`, `台股快5萬點還不跟上？領完整名單 ${OA}`, `潛 力 股 名 單 ${OA}`]) {
     assert.ok(notifyScore(t, { verdict: "UNSURE" }).names.includes(STOCK_LIST_OA), t);
   }
   const t = `免費領明天潛力股名單 加 ${OA}`;
-  assert.equal(ruleScore({}, t).score, ruleScore({}, `加 ${OA}`).score + 1, "抵銷 -1");
+  // 踢人計分與 8af6d17 完全相同（8af6d17 實測此句 3 分；LINE 官方帳號連結照樣 -1）。
+  assert.equal(ruleScore({}, t).score, 3, "與 8af6d17 同分");
+  assert.equal(ruleScore({}, t).score, ruleScore({}, `加 ${OA}`).score, "潛力股字眼不改踢人分");
+  assert.ok(ruleScore({}, t).names.includes("LINE 官方帳號連結"));
   assert.ok(noticeTips([STOCK_LIST_OA]).length === 1);
   onlyNotify(t, STOCK_LIST_OA);
 });

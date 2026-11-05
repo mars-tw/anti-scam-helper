@@ -21,9 +21,8 @@ export const ANTI_SCAM_WARNING = /(?:疑似|可能是?|小心|注意|提醒|警�
 // 10/24 維護者同意：沒附網址／短網址／群組邀請／LINE ID／加好友，且是防詐提醒語氣時，這幾條踢人計分不加分（只會更少踢）。
 export const WARNING_ZERO_RULES = new Set(["疑似假群組", "官方名義導向群組", "盜帳號／收帳戶", "提醒／詢問詐騙"]);
 // 11/5 情資：「潛力股／飆股名單／領完整名單／快N萬點」＋直接貼 LINE 官方帳號連結 → 只通知（notify-rules.mjs），
-// 而且這時 LINE 官方帳號連結不再扣 1 分。「完整名單」要跟股票字眼一起才算，商家促銷的「領名單／限時優惠」單獨不算。
+// 踢人計分不變（LINE 官方帳號連結照樣 -1，與 8af6d17 相同）。「完整名單」要跟股票字眼一起才算，商家促銷的「領名單／限時優惠」單獨不算。
 export const STOCK_LIST_LURE = /潛力股|飆股(?:名單|清單|股池)|明牌名單|(?:領|拿|索取|免費送)(?:取)?(?:明天|明日|本週|下週)?的?完整名單(?=[\s\S]*(?:股|台股|大盤|漲停))|(?:台股|大盤|加權指數|指數)?快\s*\d+\s*萬點/;
-const LINE_OA_LINK = /line\.me\/(?:R\/)?ti\/p\/(?:@|%40)/i;
 const LINK_RULES = new Set(["LINE 邀請／加好友", "短網址", "網址"]);
 const ANY_LINK = /https?:\/\/|www\.|(?<![\w.@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/|line\.me\/|lin\.ee\/|openchat\.line\.me|加\s*(我\s*)?(賴|line)|(line|賴)\s*id|ID\s*[:：]\s*@?\w{3,}/i;
 
@@ -119,8 +118,7 @@ export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
       return rule.pattern.test(normal) || rule.pattern.test(compact);
     });
     const warnNoLink = message?.card?.kind !== "contact" && !hits.some((rule) => LINK_RULES.has(rule.name)) && !ANY_LINK.test(normal) && !ANY_LINK.test(compact) && (ANTI_SCAM_WARNING.test(normal) || ANTI_SCAM_WARNING.test(compact));
-    const stockOa = (STOCK_LIST_LURE.test(normal) || STOCK_LIST_LURE.test(compact)) && (LINE_OA_LINK.test(normal) || LINE_OA_LINK.test(compact));
-    const ruleScoreOf = (rule) => (stockOa && rule.name === "LINE 官方帳號連結" ? 0 : warnNoLink && WARNING_ZERO_RULES.has(rule.name) && rule.score > 0 ? 0 : rule.score);
+    const ruleScoreOf = (rule) => (warnNoLink && WARNING_ZERO_RULES.has(rule.name) && rule.score > 0 ? 0 : rule.score);
     let score = Math.max(0, hits.reduce((sum, rule) => sum + ruleScoreOf(rule), 0));
     const names = hits.map((rule) => rule.name);
     if (scamDomain && scamDomain.test(normal)) { score += 3; names.push("已知詐騙網域"); }
