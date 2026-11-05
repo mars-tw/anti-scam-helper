@@ -10,6 +10,8 @@ export const KICK_FAKE_GROUP = "換群／假新群／假二群的群組連結或
 export const KICK_SCAM_GROUP = "確認是詐騙群組";
 export const KICK_FAKE_LUXURY = "確認是假精品";
 export const KICK_FAKE_PORN_PDF = "確認是假色情 PDF";
+// 士軒 11/5 19:57：帶單老師 LINE@ 引流過 strong-gate 時可踢（只由 handleBandanLineOa 帶 bandanKick 進來，不進一般內容分類）。
+export const KICK_BANDAN = "帶單老師 LINE@ 引流（強特徵）";
 export const KICK_CATEGORIES = [KICK_FAKE_GROUP, KICK_SCAM_GROUP, KICK_FAKE_LUXURY, KICK_FAKE_PORN_PDF];
 
 const norm = (s) => String(s ?? "").normalize("NFKC").replace(/[\s\u200b-\u200f\u2060\ufeff\u3000\u2800\u3164]+/g, "");
@@ -79,7 +81,7 @@ export function kickScopeDecision({ chatId, excluded = false, scope = {}, ...con
   if (excluded) return { kick: false, reason: "excluded" };
   const chat = kickScopeChat(chatId, scope);
   if (!chat.ok) return { kick: false, reason: chat.reason };
-  const category = kickCategory(content);
+  const category = kickCategory(content) ?? (content.bandanKick === true ? KICK_BANDAN : undefined);
   if (!category) return { kick: false, reason: "not-kick-category" };
   return { kick: true, category };
 }

@@ -880,3 +880,41 @@ test("11/5 總閘：高分但只有一般連結（無強特徵）→ 群內完�
   assert.equal(r.removes.length, 0);
   assert.equal(r.sends.length, 0);
 });
+
+// 士軒 11/5 19:57–19:59：帶單老師 LINE@ 過 strong-gate → 踢人群刪文＋踢；excludeChats／warnOnly 不踢；交易所官方／商家促銷／管理員不誤中。
+const BANDAN_TXT = "帶單老師 加 https://line.me/R/ti/p/@crypto_daidan 保證獲利 跟單名額有限";
+const BANDAN_CFG = { kickMode: "kick", bandanLineOa: { probePage: false } };
+test("11/5 帶單 LINE@：踢人群 → 送踢人（含刪文），成功後才報已移出", async () => {
+  const r = await runGuard(BANDAN_CFG, [{ messageId: "m1", channelId: "cA", senderId: "pBandan", senderName: "老師", text: BANDAN_TXT }], { waitMs: 3500 });
+  assert.equal(r.removes.length, 1);
+  assert.equal(r.removes[0].deleteMessage, true);
+  assert.ok(r.sends.length >= 1);
+  // 一般踢人流程：「已移出」只在送出踢人（且成功）之後才發；之前不能先報已移出。
+  const doneIdx = r.frames.findIndex((f) => f.type === "message:send" && /移出/.test(f.text ?? ""));
+  assert.ok(doneIdx > r.frames.indexOf(r.removes[0]), "移出成功才報");
+});
+test("11/5 帶單 LINE@：kickScope.excludeChats（熊群／學習群）→ 不踢不刪", async () => {
+  const r = await runGuard({ ...BANDAN_CFG, kickScope: { excludeChats: ["cA"] } }, [{ messageId: "m1", channelId: "cA", senderId: "pBandan", senderName: "老師", text: BANDAN_TXT }], { waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.deletes.length, 0);
+});
+test("11/5 帶單 LINE@：groupPolicies.warnOnly（上井生魚片）→ 只警告，不踢不刪", async () => {
+  const r = await runGuard({ ...BANDAN_CFG, groupPolicies: { cA: { warnOnly: true } } }, [{ messageId: "m1", channelId: "cA", senderId: "pBandan", senderName: "老師", text: BANDAN_TXT }], { waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.deletes.length, 0);
+  assert.ok(r.sends.length >= 1);
+});
+test("11/5 帶單 LINE@：kickMode=notify → 不踢", async () => {
+  const r = await runGuard({ ...BANDAN_CFG, kickMode: "notify" }, [{ messageId: "m1", channelId: "cA", senderId: "pBandan", senderName: "老師", text: BANDAN_TXT }], { waitMs: 3500 });
+  assert.equal(r.removes.length, 0);
+});
+test("11/5 帶單 LINE@ 對抗：交易所官方跟單教學、商家促銷、管理員、受保護成員 → 都不踢", async () => {
+  const r = await runGuard({ ...BANDAN_CFG, protectedIds: [{ note: "本人", ids: ["pProt"] }] }, [
+    { messageId: "m1", channelId: "cA", senderId: "pEx", senderName: "幣安小編", text: "幣安官方帳號 https://lin.ee/abc 跟單交易教學" },
+    { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: "加官方帳號 @shopabc 雙11 穩賺優惠 滿千折百" },
+    { messageId: "m3", channelId: "cA", senderId: "pAdm", senderName: "管理員", senderRole: "coAdmin", text: BANDAN_TXT },
+    { messageId: "m4", channelId: "cA", senderId: "pProt", senderName: "阿明", text: BANDAN_TXT },
+  ], { waitMs: 4000 });
+  assert.equal(r.removes.length, 0);
+  assert.equal(r.deletes.length, 0);
+});

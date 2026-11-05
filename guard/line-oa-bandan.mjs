@@ -150,10 +150,16 @@ export function bandanLineOaAction({
   excludeChat = false,
   deleteMessage = false,
   canDelete = true,
+  kick = false,
+  strong = false,
+  protectedSender = false,
 } = {}) {
   if (learnOnly) return { kick: false, delete: false, notice: false, reason: "learn-only" };
   if (warnOnly) return { kick: false, delete: false, notice: true, reason: "warn-only" };
   if (excludeChat) return { kick: false, delete: false, notice: true, reason: "kick-scope-excluded" };
+  // 士軒 11/5 19:57–19:59：「必須要踢的這種詐騙就給我踢掉」。該群走踢人模式＋過 strong-gate（有效分數≥6 且強特徵）
+  // ＋本帳號有權限（canDelete）＋發文者不受保護 → 走一般踢人流程（刪文＋移出）。
+  if (kick && strong && canDelete && !protectedSender) return { kick: true, delete: true, notice: true, reason: "kick" };
   if (deleteMessage && canDelete) return { kick: false, delete: true, notice: true, reason: "delete-and-notify" };
   return { kick: false, delete: false, notice: true, reason: deleteMessage ? "no-delete-permission" : "delete-disabled" };
 }

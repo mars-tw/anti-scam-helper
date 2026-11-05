@@ -1564,6 +1564,7 @@ function kickScopeFor(message, entry = {}, impersonating) {
     scope: { excludeChats: config.kickScope?.excludeChats ?? [], learnOnly, warnOnly },
     text: textOf(message) || message.noteText || "", fileName: message.fileName, names: entry.names ?? [], verdict: entry.verdict === "QR_LINE_INVITE" ? undefined : entry.verdict, review: entry.review,
     qrContent: message.qrContent, fileGroupInvite: message.fileInvite === true, inviteExpanded: (entry.names ?? []).includes("短網址導向群組邀請"), impersonating,
+    bandanKick: entry.bandanKick === true && (entry.names ?? []).includes(BANDAN_LINE_OA),
   });
 }
 function neverKick(message) {
@@ -1819,7 +1820,7 @@ async function checkUnrecognizedLink(ws, message, text) {
   return true;
 }
 
-// 士軒 11/4 20:26：帶單老師 LINE@／官方帳號引流。永不踢；刪文超出現行「一般連結只評分」，獨立開關預設關（只通知）。excludeChats（熊群）比照其他刪文路徑不刪。
+// 士軒 11/4 20:26：帶單老師 LINE@／官方帳號引流。11/5 19:57 起：踢人模式的群＋過 strong-gate → 走一般踢人流程 remove()；其餘照舊；刪文超出現行「一般連結只評分」，獨立開關預設關（只通知）。excludeChats（熊群）比照其他刪文路徑不刪。
 const bandanLineOaCfg = { enabled: true, deleteMessage: false, probePage: true, ...(config.bandanLineOa ?? {}) };
 async function handleBandanLineOa(ws, message, text, { qrContent, vision = false, expandedUrl } = {}) {
   if (bandanLineOaCfg.enabled === false || neverKick(message) || isStaff(message) || message.senderId === me) return false;
@@ -1845,14 +1846,24 @@ ${contextText}`);
   }
   // 熊群等 kickScope.excludeChats：比照 unrecognized 刪文路徑，不刪（仍可通知；learnOnly 另擋）。
   const excludeChat = (config.kickScope?.excludeChats ?? []).includes(message.channelId);
+  const gate = outboundGate({ ...entry, score: entry.score ?? 0 }, { text, qrContent: qrContent ?? message.qrContent }, { enabled: true });
   const act = bandanLineOaAction({
+    kick: bandanLineOaCfg.kick !== false && chatKickMode(message.channelId) === "kick",
+    strong: gate.send === true,
+    protectedSender: neverKick(message) || isStaff(message),
     warnOnly: warnOnly.has(message.channelId),
     learnOnly: learnOnly.has(message.channelId),
     excludeChat,
     deleteMessage: bandanLineOaCfg.deleteMessage === true,
     canDelete: !noAction(message.channelId) && notifyChats.has(message.channelId) && !excludeChat,
   });
-  // 永不踢；kickMode 維持 notify 也不會因本規則升級。
+  if (act.kick) {
+    // 一般踢人流程：remove() 內再擋受保護／管理員／warnOnly／excludeChats／無權限，先發「處理中」，移出成功才報「已移出」。
+    record({ action: "bandan-line-oa-kick", ...entry, disposition: act.reason, oaProbe: entry.oaProbe, score: gate.score, feature: gate.feature });
+    await remove(ws, message, { ...entry, score: gate.score, bandanKick: true });
+    return true;
+  }
+  // 非踢人群／沒過閘／沒權限：不踢；deleteMessage 開才刪。
   if (act.delete) {
     record({ action: "bandan-line-oa-flag", ...entry, disposition: act.reason, oaProbe: entry.oaProbe });
     if (config.dryRun) {
