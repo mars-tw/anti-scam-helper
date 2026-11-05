@@ -13,7 +13,7 @@ export function minerAction({ perChatKick, reasons = [], verdict, model, review,
 }
 // 通知層（10/22 誤判審查／情資分析）：只決定「要不要通知管理員」，分數只算通知分，絕不計入踢人分數，也不刪文。
 import { createHash } from "node:crypto";
-import { ANTI_SCAM_WARNING, MAINSTREAM_CONTENT_DOMAINS, PLATFORM_SHORTENERS, SHORTENERS as RULE_SHORTENERS } from "./rules.mjs";
+import { ANTI_SCAM_WARNING, MAINSTREAM_CONTENT_DOMAINS, PLATFORM_SHORTENERS, SHORTENERS as RULE_SHORTENERS, STOCK_LIST_LURE } from "./rules.mjs";
 
 const URL_RE = /(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?/gi;
 const INVEST = /投資|帶單|跟單|老師|獲利|報酬|收益|配息|股票|虛擬貨幣|幣圈|合約|USDT|期貨|黃金/i;
@@ -33,6 +33,27 @@ export const MODA_VOTE_CODE = "投票／領券騙 LINE 認證碼";
 export const VOTE_APK = "幫忙投票／票選＋APK／非商店安裝";
 export const CAMPAIGN_GIFT = "競選小物贈送＋驗證話術";
 export const FAKE_BILLING_CS = "假消費異常／冒名客服";
+// 11/5 情資：只通知，不進 rules.mjs 踢人分數、不在 MINER_KICKABLE、不是踢人類別、不刪不踢。
+export const STOCK_LIST_OA = "潛力股／飆股名單＋LINE 官方帳號連結";
+export const FAKE_LOGISTICS_URL = "多層子網域仿物流／超商品牌網址";
+export const FAKE_LOGISTICS_VERIFY = "仿物流網址＋實名認證／解凍";
+const OA_LINK_ID = /line\.me\/(?:R\/)?ti\/p\/(?:@|%40)([\w.-]+)/gi;
+// 交易所官方 LINE 帳號（ID 完全相同才算；@binance_vip 這類不算）。
+const EXCHANGE_OA_IDS = new Set(["binance", "bybit", "okx", "pionex"]);
+// 物流／超商品牌字樣（出現在網域的某一段，段落完全相同或以 - 分隔）。
+const LOGI_BRAND = /^(?:[\w]+-)*(?:t-?cat|blackcat|kuroneko|takkyubin|7-?11|7-?eleven|seven-?eleven|ibon|myship(?:711)?|famiport|famimart|hct|kerrytj)(?:-[\w]+)*$/i;
+// 官方網域：網域尾端精確比對（host === d 或 host 以 ".d" 結尾）。
+export const LOGISTICS_OFFICIAL = ["t-cat.com.tw", "7-11.com.tw", "ibon.com.tw", "family.com.tw", "famiport.com.tw", "post.gov.tw", "hct.com.tw", "kerrytj.com"];
+const LOGI_VERIFY = /實名(?:制)?(?:認證|驗證)|解凍|金流驗證/;
+function fakeLogisticsHost(t) {
+  return (t.match(URL_RE) ?? []).some((u) => {
+    const h = hostOf(u).split(":")[0];
+    if (LOGISTICS_OFFICIAL.some((d) => h === d || h.endsWith(`.${d}`))) return false;
+    const labels = h.split(".");
+    if (labels.length < 3) return false; // 多層子網域才算
+    return labels.slice(0, -2).some((l) => LOGI_BRAND.test(l));
+  });
+}
 export const NOTIFY_RULES = [
   { name: "福利／簽到／贈品／合資話術", score: 2, investBonus: 2, pattern: /福利群|每日簽到|免費(?:贈品|送|領).{0,12}(?:加|line|LINE|賴)|合資|每月配息|月月配息|黃金(?:交付|交割)|繳(?:稅金|保證金).{0,8}(?:領回|出金|提領)/ },
   { name: "冒充負責人問帳戶／指定匯款", score: 4, direct: true, pattern: /(?:帳戶|戶頭).{0,6}餘額|匯(?:款|錢)?到.{0,6}(?:指定|這個|以下).{0,4}(?:帳戶|帳號)|指定帳戶|匯款單.{0,6}(?:拍照|拍給|截圖)|(?:拍|傳).{0,4}匯款單/ },
@@ -115,6 +136,16 @@ export const NOTIFY_RULES = [
     if (/派網|pionex/i.test(c) && !hasLinkOrInvite(c) && !sexy) return false;
     return sexy || SEX_CONTACT.test(c);
   } },
+  // 11/5 情資 a) 潛力股／飆股名單＋直接貼 LINE 官方帳號連結。交易所官方帳號、單純聊股票、商家促銷用語單獨都不算。
+  { name: STOCK_LIST_OA, score: 4, direct: true, match: (t, ctx = {}) => {
+    const c = intelText(t);
+    if (!intelGate(c, ctx) || !STOCK_LIST_LURE.test(c)) return false;
+    const ids = [...c.matchAll(OA_LINK_ID)].map((m) => m[1].toLowerCase());
+    return ids.some((id) => !EXCHANGE_OA_IDS.has(id));
+  } },
+  // 11/5 情資 b) 多層子網域仿物流／超商品牌，主網域不是官方 → 只通知；再出現實名認證／解凍 → 加分（另一條理由）。
+  { name: FAKE_LOGISTICS_URL, score: 4, direct: true, match: (t, ctx = {}) => { const c = intelText(t); return intelGate(c, ctx) && fakeLogisticsHost(c); } },
+  { name: FAKE_LOGISTICS_VERIFY, score: 2, match: (t, ctx = {}) => { const c = intelText(t); return intelGate(c, ctx) && LOGI_VERIFY.test(c) && fakeLogisticsHost(c); } },
   // 3) 一頁式精品網址樣式：主網域含 outlet/supplier/wholesale/retailer/express/forum 且結尾 .shop/.store/.cam/.top，同訊息要有名牌或出清字眼。主流網址不算。
   { name: LUXURY_URL, score: 4, direct: true, match: (t, ctx = {}) => {
     const c = intelText(t);
@@ -229,6 +260,9 @@ export function noticeTips(names = []) {
   if (names.includes(BANDAN_LINE_OA)) tips.push("沒認證或好友很少的 LINE 官方帳號，若對話在推帶單／跟單／保證賺錢，多半是詐騙帶單老師，請勿加好友或匯款。");
   if (names.includes(SHIP_VERIFY)) tips.push("賣貨便、郵局不會叫你加客服做實名認證、開網銀或截圖帳戶。");
   if (names.includes(SEX_PLATFORM)) tips.push("交友約會要先繳會員費、認證金、解凍金的都是詐騙，繳了只會被要更多。");
+  if (names.includes(STOCK_LIST_OA)) tips.push("免費送潛力股、飆股名單叫你加 LINE 官方帳號的，多半是投資詐騙帶單老師，請勿加入或匯款。");
+  if (names.includes(FAKE_LOGISTICS_URL)) tips.push("黑貓、7-11、賣貨便的官方網址不會是一長串子網域；查包裹請自己打開官方網站或 App。");
+  if (names.includes(FAKE_LOGISTICS_VERIFY)) tips.push("物流與超商不會叫你做實名認證或解凍帳戶，這是假客服詐騙。");
   if (names.includes(LUXURY_URL)) tips.push("名牌超低價出清的一頁式網站多是詐騙，買到假貨或收不到貨。");
   if (names.includes(MODA_VOTE_CODE)) tips.push("正常投票或領券不會要 LINE 認證碼，請勿提供");
   if (names.includes(VOTE_APK)) tips.push("幫忙投票不會要你裝 APK 或開未知來源，裝了可能被盜簡訊驗證碼。");
@@ -394,6 +428,9 @@ export function textNotifyReasons({ text, chatId, senderId, result, tracker, sho
   // h：帶子網域的短網址寫法（例如 xx.supr.link）：只通知（踢人規則不變）。
   for (const u of String(text ?? "").match(URL_RE) ?? []) {
     const host = (u.replace(/^https?:\/\//i, "").split(/[/?#]/)[0] || "").toLowerCase();
+    // 11/5：群友提醒／詢問（「這是不是詐騙？…別點」）不算；第一層判 SCAM 時照算（防詐騙者加提醒字樣繞過）。
+    const tw = String(text ?? "").normalize("NFKC").replace(SPACES, "");
+    if (result.verdict !== "SCAM" && (ANTI_SCAM_WARNING.test(tw) || ASK_IF_SCAM.test(tw) || WARN_EXTRA.test(tw))) break;
     if (shorteners.some((d) => host.endsWith(`.${d}`) && host !== `www.${d}`)) { names.push("子網域短網址"); break; }
   }
   names.push(...intelNotify1025(text, { protectedSender, shorteners }));

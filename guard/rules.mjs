@@ -20,6 +20,10 @@ export const ASK_SCAM = /(這|那)(個|些|則|種)?(是|應該是|根本是|算
 export const ANTI_SCAM_WARNING = /(?:疑似|可能是?|小心|注意|提醒|警告|防範|謹防|慎防|當心|嚴防).{0,10}(?:詐騙|假群|假冒|冒充|冒用|被騙)|(?:不要|勿|別|切勿|請勿|千萬別|千萬不要)\s*(?:隨便|亂)?\s*(?:加入|點|加|相信|理會|上當|掃)/;
 // 10/24 維護者同意：沒附網址／短網址／群組邀請／LINE ID／加好友，且是防詐提醒語氣時，這幾條踢人計分不加分（只會更少踢）。
 export const WARNING_ZERO_RULES = new Set(["疑似假群組", "官方名義導向群組", "盜帳號／收帳戶", "提醒／詢問詐騙"]);
+// 11/5 情資：「潛力股／飆股名單／領完整名單／快N萬點」＋直接貼 LINE 官方帳號連結 → 只通知（notify-rules.mjs），
+// 而且這時 LINE 官方帳號連結不再扣 1 分。「完整名單」要跟股票字眼一起才算，商家促銷的「領名單／限時優惠」單獨不算。
+export const STOCK_LIST_LURE = /潛力股|飆股(?:名單|清單|股池)|明牌名單|(?:領|拿|索取|免費送)(?:取)?(?:明天|明日|本週|下週)?的?完整名單(?=[\s\S]*(?:股|台股|大盤|漲停))|(?:台股|大盤|加權指數|指數)?快\s*\d+\s*萬點/;
+const LINE_OA_LINK = /line\.me\/(?:R\/)?ti\/p\/(?:@|%40)/i;
 const LINK_RULES = new Set(["LINE 邀請／加好友", "短網址", "網址"]);
 const ANY_LINK = /https?:\/\/|www\.|(?<![\w.@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/|line\.me\/|lin\.ee\/|openchat\.line\.me|加\s*(我\s*)?(賴|line)|(line|賴)\s*id|ID\s*[:：]\s*@?\w{3,}/i;
 
@@ -28,6 +32,9 @@ export const RULES = [
   { name: "LINE 邀請／加好友", score: 3, pattern: /line\.me\/(ti|R\/ti)|lin\.ee\/|加\s*(我\s*)?(賴|line|LINE|Line)|(line|LINE|賴)\s*(id|ID)\s*[:：]?|ID\s*[:：]\s*@?\w{3,}/ },
   // 短網址：看不出真正去哪裡，詐騙引流常用。前面不能緊接英數字（避免 abc1url.cz 這類誤判）。
   { name: "短網址", score: 3, pattern: new RegExp(`(?<![\\w.-])(${SHORTENERS.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\/[\\w-]`, "i") },
+  // 11/5 情資：短網址前面多一層子網域（go.短網址服務/碼）也要認得。前置允許 ([\w-]+\.)+ 子網域，前面不能緊接英數字或「.」「-」，
+  // 所以 mybit.ly、evil-reurl.cc 這類一般網域的子字串不算。只通知：分數 0，不進踢人計分（通知由 notify-rules.mjs「子網域短網址」處理）。
+  { name: "子網域短網址", score: 0, pattern: new RegExp(`(?<![\\w.-])(?:[\\w-]+\\.)+(${SHORTENERS.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\/[\\w-]`, "i") },
   // 一般網址只加 1 分；常見技術、地圖、影音網站（benignDomains）先拿掉再判斷，不加分。
   { name: "網址", score: 1, pattern: /https?:\/\/|www\.|(?<![\w.@-])(?:[a-z0-9-]+\.)+[a-z]{2,}\/[\w-]/i, onBenignStripped: true },
   { name: "投資帶單", score: 2, pattern: /飆股|帶單|老師帶|投顧老師|穩賺|保證(獲利|賺)|勝率\s*\d|漲停板?.{0,6}(分享|帶|跟)|主力.{0,4}(進場|拉抬)|內線(消息)?|出金|入金|翻倍|獲利\s*\d+\s*%|報(明)?牌/ },
@@ -112,7 +119,8 @@ export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
       return rule.pattern.test(normal) || rule.pattern.test(compact);
     });
     const warnNoLink = message?.card?.kind !== "contact" && !hits.some((rule) => LINK_RULES.has(rule.name)) && !ANY_LINK.test(normal) && !ANY_LINK.test(compact) && (ANTI_SCAM_WARNING.test(normal) || ANTI_SCAM_WARNING.test(compact));
-    const ruleScoreOf = (rule) => (warnNoLink && WARNING_ZERO_RULES.has(rule.name) && rule.score > 0 ? 0 : rule.score);
+    const stockOa = (STOCK_LIST_LURE.test(normal) || STOCK_LIST_LURE.test(compact)) && (LINE_OA_LINK.test(normal) || LINE_OA_LINK.test(compact));
+    const ruleScoreOf = (rule) => (stockOa && rule.name === "LINE 官方帳號連結" ? 0 : warnNoLink && WARNING_ZERO_RULES.has(rule.name) && rule.score > 0 ? 0 : rule.score);
     let score = Math.max(0, hits.reduce((sum, rule) => sum + ruleScoreOf(rule), 0));
     const names = hits.map((rule) => rule.name);
     if (scamDomain && scamDomain.test(normal)) { score += 3; names.push("已知詐騙網域"); }
