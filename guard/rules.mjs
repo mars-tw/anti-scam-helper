@@ -3,6 +3,7 @@
 // 「本 群 明 天 要 刪 除」「換　群」這類用空格拆字躲關鍵字的寫法也會命中。原文或去空白版任一命中就算。
 import { analyzeName } from "./fakeadmin.mjs";
 import { lookalikeExchange } from "./redpacket.mjs";
+import { KNOWN_SCAM_INVITE, hasKnownScamInvite } from "./known-scam-invite.mjs";
 
 // 常見短網址服務（貼這些等於看不到真正的目的地）。
 export const SHORTENERS = ["bit.ly", "bit.do", "reurl.cc", "tinyurl.com", "tiny.cc", "pse.is", ...["", 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`lihi${n}.cc`, `lihi${n}.com`, `lihi${n}.me`]), "ppt.cc", "myppt.cc", "is.gd", "v.gd", "t.ly", "shorturl.at", "shorturl.asia", "cutt.ly", "1url.cz", "ada.nz", "cutt.us", "tny.im", "u.nu", "n9.cl", "surl.li", "ouo.io", "shrtco.de", "9m.no", "t.cn", "kutt.it", "han.gl", "me2.do", "vo.la", "sor.bz", "rb.gy", "ow.ly", "buff.ly", "s.id", "goo.su", "gg.gg", "x.gd", "rebrand.ly", "short.gy", "shorturl.gg", "0rz.tw", "risu.io", "cli.re", "u.to", "clck.ru", "qrco.de", "tw.gg", "url.cn", "dwz.cn", "suo.im", "supr.link", "urlr.me"];
@@ -104,8 +105,9 @@ export function scamDomainPattern(domains = []) {
   if (!list.length) return undefined;
   return new RegExp(`(?<![\\w-])(?:[a-z0-9-]+\\.)*(?:${list.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|")})(?![a-z0-9-])`, "i");
 }
-export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
+export function makeRuleScorer(benignDomains, { scamDomains, scamInviteTickets } = {}) {
   const scamDomain = scamDomainPattern(scamDomains);
+  const inviteTickets = scamInviteTickets ?? [];
   const benignUrl = benignUrlPattern(benignDomains ?? DEFAULT_BENIGN_DOMAINS);
   return function ruleScore(message, text) {
     const { normal, compact } = normalizeForRules(text);
@@ -122,6 +124,10 @@ export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
     let score = Math.max(0, hits.reduce((sum, rule) => sum + ruleScoreOf(rule), 0));
     const names = hits.map((rule) => rule.name);
     if (scamDomain && scamDomain.test(normal)) { score += 3; names.push("已知詐騙網域"); }
+    // 士軒 11/5 18:21：已確認詐騙社群邀請碼（本機 scamInviteTickets／scam-invites.json）→ 強特徵分數。
+    if (inviteTickets.length && hasKnownScamInvite(normal, inviteTickets) && !names.includes(KNOWN_SCAM_INVITE)) {
+      score += 6; names.push(KNOWN_SCAM_INVITE);
+    }
     // 在群組裡丟聯絡人卡片，是常見的引流手法。
     if (message?.card?.kind === "contact") {
       score += 3;
@@ -140,5 +146,5 @@ export function makeRuleScorer(benignDomains, { scamDomains } = {}) {
 }
 
 /** 一般成員出現就一律判詐騙的特徵（維護者 10/22）：群組邀請、轉移／新群、未知短網址服務。 */
-export const FORCED_SCAM_NAMES = new Set(["群組邀請連結", "催促加入新群", "假群組公告", "假群組連結", "疑似短網址", "短網址導向群組邀請"]);
+export const FORCED_SCAM_NAMES = new Set(["群組邀請連結", "催促加入新群", "假群組公告", "假群組連結", "疑似短網址", "短網址導向群組邀請", "已知詐騙群組邀請"]);
 export function forcedScamNames(names = []) { return names.filter((name) => FORCED_SCAM_NAMES.has(name)); }

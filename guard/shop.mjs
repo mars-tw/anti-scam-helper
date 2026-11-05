@@ -159,6 +159,8 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
     const ips = isIP(host) ? [host] : (await resolve(host, { all: true }).catch(() => [])).map((entry) => entry.address);
     if (ips.length === 0 || ips.some(privateIp)) return undefined;
     if (/^(?:[\w-]+\.)*line\.me$/i.test(host) && /^\/(?:R\/)?ti\/g2?\//i.test(parsed.pathname)) return { url: parsed.toString(), html: "", invite: true };
+    // OpenChat 封面／加入頁也算群組／社群邀請（士軒 11/5 18:21）。
+    if (/^openchat\.line\.me$/i.test(host) && /^\/[a-z]{2}(?:-[a-z]{2,4})?\/(?:cover|join)\//i.test(parsed.pathname)) return { url: parsed.toString(), html: "", invite: true };
     // 11/4 18:20：短網址 302 到 LINE 官方帳號（line.me/R/ti/p/@ID、lin.ee、page.line.me）→ 停在這一跳標 lineOa，交給帶單老師 LINE@ 判斷（不再抓 LINE 頁）。
     if ((/^(?:[\w-]+\.)*line\.me$/i.test(host) && /^\/(?:R\/)?ti\/p\/@/i.test(parsed.pathname)) || /^lin\.ee$/i.test(host) || /^page\.line\.me$/i.test(host)) return { url: parsed.toString(), html: "", lineOa: true };
     let response;
@@ -175,7 +177,8 @@ export async function expandUrlSafe(url, { timeoutMs = 5000, maxBytes = 200_000,
       reader?.cancel().catch(() => {});
       html = Buffer.concat(chunks.map((c) => Buffer.from(c))).subarray(0, maxBytes).toString("utf8");
     }
-    const invite = /line\.me(?:\\?\/)+(?:R(?:\\?\/)+)?ti(?:\\?\/)+g2?(?:\\?\/)/i.test(html);
+    const invite = /line\.me(?:\\?\/)+(?:R(?:\\?\/)+)?ti(?:\\?\/)+g2?(?:\\?\/)/i.test(html)
+      || /openchat\.line\.me\/[a-z]{2}(?:-[a-z]{2,4})?\/(?:cover|join)\//i.test(html);
     // 短網址中繼頁用 meta refresh 或 location 轉址（不是 3xx）：再跟下一跳，免得只停在第一跳。
     // 短網址中繼頁：meta refresh、JS location、og:url／canonical（指向不同主機）都跟下一跳，避免停在短網址站卻標成 normal。
     let next = invite ? undefined : html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*\d*\s*;?\s*url\s*=\s*['"]?([^"'>\s]+)/i)?.[1] ?? html.match(/(?:window\.)?location(?:\.href)?\s*(?:=|\.replace\(|\.assign\()\s*["'](https?:\/\/[^"']+)["']/i)?.[1];

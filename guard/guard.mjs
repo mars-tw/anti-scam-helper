@@ -36,6 +36,7 @@ import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriend
 import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, isLineOaUrl, probeLineOaPage } from "./line-oa-bandan.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine } from "./short-url-outcome.mjs";
+import { KNOWN_SCAM_INVITE, hasKnownScamInvite, normalizeInviteTickets } from "./known-scam-invite.mjs";
 import { SendFailTracker, fetchWithRetry, mediaFailReportLine, sendFailAlertLine, sendFailReportLine } from "./ops-report.mjs";
 import { FILE_SCAN_DEFAULTS, scanFile, fileExtension, unsupportedFileReportLine } from "./file-scan.mjs";
 import { noteLinkOutcome, shouldPostLinkScore, startupStatusLine } from "./note-link.mjs";
@@ -402,7 +403,22 @@ if (memory) {
 }
 
 // 規則計分（含去空白正規化、短網址清單、假換群字眼）在 rules.mjs。
-const ruleScore = makeRuleScorer(config.benignDomains, { scamDomains: config.scamDomains });
+// 士軒 11/5 18:21：已確認詐騙社群邀請碼（本機 data/scam-patterns/scam-invites.json 或設定 scamInviteTickets；不進 git）。
+function loadScamInviteTickets() {
+  const fromConfig = normalizeInviteTickets(config.scamInviteTickets);
+  let fromFile = [];
+  try {
+    const dir = resolve(here, "..", config.patterns?.dir ?? "data/scam-patterns");
+    const path = join(dir, "scam-invites.json");
+    if (existsSync(path)) {
+      const raw = JSON.parse(readFileSync(path, "utf8"));
+      fromFile = normalizeInviteTickets(Array.isArray(raw) ? raw : (raw?.tickets ?? []));
+    }
+  } catch {}
+  return [...new Set([...fromConfig, ...fromFile])];
+}
+const scamInviteTickets = loadScamInviteTickets();
+const ruleScore = makeRuleScorer(config.benignDomains, { scamDomains: config.scamDomains, scamInviteTickets });
 
 function textOf(message) {
   if (message.text) return message.text;
@@ -2129,7 +2145,8 @@ async function handle(ws, message) {
     const fakeNotice = ruleScore(message, cleaned).names.includes("假群組公告");
     let inviteExpanded = false;
     let expandFailed = false;
-    if (config.shortUrlExpand === true) {
+    // 士軒 11/5 18:21：短網址一律展開進去看（預設開；設 shortUrlExpand:false 才關）。
+    if (config.shortUrlExpand !== false) {
       const susRe = RULES.find((r) => r.name === "疑似短網址")?.pattern;
       const probe = await probeInviteShortUrl(cleaned, {
         shortUrlRe: SHORT_URL,
@@ -2260,12 +2277,14 @@ async function handle(ws, message) {
     let decideText = text;
     let shopWarn = false;
     const shortUrl = sanitizeLinks(text).text.match(SHORT_URL)?.[0];
-    if (shortUrl && config.shortUrlExpand === true) {
+    if (shortUrl && config.shortUrlExpand !== false) {
       const expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
       const stillShortener = Boolean(expanded?.url && SHORT_LINK.test(expanded.url));
       const shopping = Boolean(expanded?.url && !stillShortener && isShoppingPage(expanded.html));
       const outcome = shortUrlExpandOutcome({ expanded, stillShortener, shopping });
       for (const n of outcome.extraNames) if (!extraNames.includes(n)) extraNames.push(n);
+      // 展開後落地網址／頁面 HTML 命中已確認詐騙邀請碼 → 加「已知詐騙群組邀請」。
+      if (scamInviteTickets.length && hasKnownScamInvite(`${expanded?.url ?? ""}\n${expanded?.html ?? ""}`, scamInviteTickets) && !extraNames.includes(KNOWN_SCAM_INVITE)) extraNames.push(KNOWN_SCAM_INVITE);
       shopWarn = outcome.shopWarn;
       // 真正落地才改寫本文再計分；不另外 drop「短網址」分數。
       if (outcome.rewrite && expanded?.url) decideText = text.replace(shortUrl, expanded.url);
@@ -2276,13 +2295,13 @@ async function handle(ws, message) {
     }
     const perChatKickHere = policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick";
     let knowledgeLink = false;
-    if (shortUrl && config.shortUrlExpand === true && decideText !== text) {
+    if (shortUrl && config.shortUrlExpand !== false && decideText !== text) {
       const exp = firstUrl(sanitizeLinks(decideText).text);
       if (exp && urlKind(exp) === "知識") knowledgeLink = true;
     }
     // 「疑似短網址」（短網域＋短路徑，不在已知短網址清單）：也唯讀展開；是知識／社群／技術文件就放行（只在沒開踢人的群）。
     const susRule = RULES.find((r) => r.name === "疑似短網址");
-    const susUrl = !shortUrl && config.shortUrlExpand === true ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
+    const susUrl = !shortUrl && config.shortUrlExpand !== false ? sanitizeLinks(text).text.match(susRule.pattern)?.[0] : undefined;
     let normalLanding = false;
     if (susUrl) {
       const expanded = await expandUrlSafe(/^https?:/i.test(susUrl.trim()) ? susUrl.trim() : `https://${susUrl.trim()}`).catch(() => undefined);
@@ -2292,6 +2311,7 @@ async function handle(ws, message) {
         if (await handleBandanLineOa(ws, message, text, { expandedUrl: expanded.url })) { remember(message, text); return; }
       }
       if (expanded?.invite) extraNames.push("短網址導向群組邀請");
+      if (scamInviteTickets.length && hasKnownScamInvite(`${expanded?.url ?? ""}\n${expanded?.html ?? ""}`, scamInviteTickets) && !extraNames.includes(KNOWN_SCAM_INVITE)) extraNames.push(KNOWN_SCAM_INVITE);
       else if (expanded?.url && (isKnowledgePage(expanded.url, expanded.html) || isMainstreamMediaHost((() => { try { return new URL(expanded.url).hostname; } catch { return ""; } })()))) knowledgeLink = true;
       else if (expanded?.html && isShoppingPage(expanded.html)) shopWarn = true;
       // 11/5 誤判審查 4：展開成功、落地正常（非 LINE 邀請／官方帳號／加好友／QR、非可疑網域、非短網址）→ 換成落地網址再判斷，不加「疑似短網址」6 分。
@@ -3434,7 +3454,7 @@ async function handleNote(ws, chatId, note) {
   // 10/27 B：記事本也唯讀展開短網址；結果只用於評分與通知（不刪不踢，踢人條件不變）。
   let expanded;
   let noteShortResult;
-  const shortUrl = config.shortUrlExpand === true ? sanitizeLinks(text).text.match(SHORT_URL)?.[0] : undefined;
+  const shortUrl = config.shortUrlExpand !== false ? sanitizeLinks(text).text.match(SHORT_URL)?.[0] : undefined;
   if (shortUrl) {
     expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
     const stillShortener = Boolean(expanded?.url && SHORT_LINK.test(expanded.url));

@@ -507,7 +507,7 @@ export function isKnowledgePage(url, html = "") {
   return urlKind(url) === "知識" || KNOWLEDGE_PAGE.test(String(html).slice(0, 20000));
 }
 /** 確定特徵：有這些就不因「只有覆核判 SCAM」而降級。 */
-export const CERTAIN_FEATURES = new Set(["群組邀請連結", "短網址導向群組邀請", "疑似短網址", "短網址", "已知詐騙網域", "催促加入新群", "假群組公告", "假群組連結"]);
+export const CERTAIN_FEATURES = new Set(["群組邀請連結", "短網址導向群組邀請", "已知詐騙群組邀請", "疑似短網址", "短網址", "已知詐騙網域", "催促加入新群", "假群組公告", "假群組連結"]);
 /** 第一層 Claude 判 OK、只有覆核判 SCAM、沒有確定特徵 → true＝只記錄不通知不標記。 */
 export function reviewOnlyScam({ verdict, model, review, names = [] }) {
   return verdict === "OK" && /^claude/i.test(String(model ?? "")) && review === "SCAM" && !names.some((n) => CERTAIN_FEATURES.has(n));
