@@ -37,15 +37,29 @@ export function shopLinks(text) {
   return out;
 }
 
+/** 新聞／文章頁結構：Article／NewsArticle／BlogPosting schema、og:type article、發布時間或作者 meta。 */
+export function isArticlePage(html) {
+  const h = String(html ?? "");
+  return /"@type"\s*:\s*\[?\s*"(News|Report|Blog|Analysis)?(Article|Posting)"/i.test(h)
+    || /<meta[^>]+property=["']og:type["'][^>]+content=["']article["']/i.test(h)
+    || /<meta[^>]+content=["']article["'][^>]+property=["']og:type["']/i.test(h)
+    || /<meta[^>]+(property|name)=["'](article:published_time|article:author|pubdate|publishdate)["']/i.test(h);
+}
+
 /** 頁面 HTML（不執行 JS）的訊號。 */
 export function pageSignals(html) {
   const text = String(html ?? "").replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
   const internal = (String(html ?? "").match(/<a\s[^>]*href=["'](\/|#|\.\/|[a-z]+\.html)[^"']*["']/gi) ?? []).length;
   const signals = [];
-  if (COD.test(text)) signals.push("頁面：貨到付款");
-  if (ORDER_FORM.test(text)) signals.push("頁面：單頁訂購表單");
-  if (LUXURY.test(text) && DISCOUNT.test(text)) signals.push("頁面：名牌低價");
-  if (internal <= 5 && ORDER_FORM.test(text)) signals.push("頁面：一頁式");
+  const cod = COD.test(text);
+  const luxuryLow = LUXURY.test(text) && DISCOUNT.test(text);
+  // 11/5 誤判：新聞站文章頁（訂閱、「立即購買」廣告、讀者服務的「收件人」等字樣）被當單頁訂購表單。
+  // 文章頁結構＋站內連結多＋沒有貨到付款／名牌低價 → 不算訂購表單。假冒 og:type article 但有貨到付款、名牌低價或連結很少的單頁仍照抓。
+  const form = ORDER_FORM.test(text) && !(isArticlePage(html) && internal > 5 && !cod && !luxuryLow);
+  if (cod) signals.push("頁面：貨到付款");
+  if (form) signals.push("頁面：單頁訂購表單");
+  if (luxuryLow) signals.push("頁面：名牌低價");
+  if (internal <= 5 && form) signals.push("頁面：一頁式");
   return signals;
 }
 

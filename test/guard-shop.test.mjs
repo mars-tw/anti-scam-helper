@@ -87,3 +87,31 @@ test("11/4 誤通知：只有頁面結構訊號＋覆核 OK → 只發溫和購�
   // 確定等級不受影響
   assert.equal(shopPageOnlyReviewOk({ level: "confident", signals: page }, "OK"), false);
 });
+
+// 11/5 誤判：新聞站文章頁被當單頁訂購表單（Howard 貼的新聞連結）
+{
+  const { isArticlePage: isArt, pageSignals: ps, scoreScamShop: sc } = await import("../guard/shop.mjs");
+  const nav = Array.from({ length: 20 }, (_, i) => `<a href="/news/${i}">新聞${i}</a>`).join("");
+  const news = `<html><head><meta property="og:type" content="article"><meta property="article:published_time" content="2026-11-05"><script type="application/ld+json">{"@type":"NewsArticle","author":"記者"}</script></head><body>${nav}<p>記者報導……訂閱電子報 立即訂購 雜誌 收件人 姓名</p></body></html>`;
+  test("新聞文章頁（NewsArticle、og:type article、站內連結多）不算單頁訂購表單", () => {
+    assert.equal(isArt(news), true);
+    assert.deepEqual(ps(news), []);
+    assert.equal(sc({ text: "看這篇 https://news.example.com/a/1", links: [{ host: "news.example.com" }], page: ps(news) }).level, "none");
+  });
+  test("對抗：假冒 og:type article 但有貨到付款仍抓", () => {
+    const fake = news.replace("訂閱電子報", "限時特價 貨到付款");
+    const s = ps(fake);
+    assert.ok(s.includes("頁面：貨到付款") && s.includes("頁面：單頁訂購表單"));
+  });
+  test("對抗：假冒 og:type article 但站內連結少的單頁訂購仍抓一頁式", () => {
+    const fake = `<html><head><meta property="og:type" content="article"></head><body><a href="/">首頁</a>立即訂購 收件人 配送地址</body></html>`;
+    assert.deepEqual(ps(fake), ["頁面：單頁訂購表單", "頁面：一頁式"]);
+  });
+  test("對抗：假冒文章頁但名牌低價仍抓", () => {
+    const fake = news.replace("訂閱電子報", "LV 包 一折 出清");
+    assert.ok(ps(fake).includes("頁面：單頁訂購表單"));
+  });
+  test("沒有文章結構的一般單頁訂購仍抓", () => {
+    assert.ok(ps(`<body>${nav}立即訂購 收件人</body>`).includes("頁面：單頁訂購表單"));
+  });
+}
