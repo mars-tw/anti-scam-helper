@@ -27,6 +27,7 @@ import { buildGuardFacts, CASUAL_PROMPT, hasScamSignal, isCasual, kickStatusText
 import { DEFAULT_BLOCKED_WORDS, notifyThenAct, safeMentionTargets, safeName, scrubNotice, sendNotice, SpeakerBook, withAgentLabel } from "./notice.mjs";
 import { makeGroupCooldown, makeNameMatcher } from "./name-trigger.mjs";
 import { SUMMARY_DEFAULTS, SummaryState, buildTranscript, chatComplete, chunkLines, clampSummarySince, estimateCost, estimateTokens, finalizeSummary, mapReduce, parseSummaryCommand, selfSummaryCommand, shouldSendFollowup, summaryDelivery, summaryFormatOk, summaryPlanFor, cloudComplete, cloudLlmChain, rewriteHint } from "./ai-summary.mjs";
+import { createDomainLog } from "./log-domains.mjs";
 import { allLinksKnown, extractUrls, isRedPacketOnly, linkKey, lookalikeExchange } from "./redpacket.mjs";
 import { cleanGrokSessions, GROK_CLI_DEFAULTS } from "./grok-cli.mjs";
 import { NOTE_DEFAULTS, NotesSeen, buildNoteNotice, decideNoteAction, noteKey, noteSnippet, noteText } from "./notes.mjs";
@@ -1222,9 +1223,11 @@ function trackProfitImage(inl, message) {
   if (inl?.profitOnly) notifyTracker.profitImage(message.channelId, message.senderId);
   return false;
 }
+const domainLog = createDomainLog();
 function record(entry) {
   const day = localDay();
-  appendFileSync(join(logDir, `guard-${day}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 });
+  // 只為日誌加 domains 欄位；下面 memory 判斷仍用原 entry。
+  appendFileSync(join(logDir, `guard-${day}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...domainLog.tag(entry) })}\n`, { mode: 0o600 });
   if (memory && entry.senderId && entry.chatId && isFlagEntry(entry, FLAG_ACTIONS)) { try { memory.forget(entry.chatId, entry.senderId); } catch {} }
 }
 
@@ -2088,6 +2091,7 @@ async function auditImage(ws, message) {
 
 async function handle(ws, message) {
   rememberContent(message);
+  try { domainLog.note(message.messageId, textOf(message)); } catch {}
   if (learnOnly.has(message.channelId)) { learnOnlyMessage(message); return; }
   const text = textOf(message);
   const key = `${message.channelId} ${message.senderId}`;
