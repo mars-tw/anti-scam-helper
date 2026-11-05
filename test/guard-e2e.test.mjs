@@ -763,7 +763,7 @@ const KS_MOVE = `本群要解散了，請大家加入新群 ${KS_GROUP}`;
 test("22:59 範圍：kickScope.excludeChats（排除群）、只學習、只警告群 → 換群連結也不踢", async () => {
   for (const extra of [{ kickScope: { excludeChats: ["cA"] } }, { groupPolicies: { cA: { learnOnly: true } } }, { groupPolicies: { cA: { warnOnly: true } } }]) {
     const r = await runGuard(extra, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
-    assert.equal(r.removes.length, 0, JSON.stringify(extra));
+    assert.equal(r.removes.length, 0, JSON.stringify(extra)); assert.equal(r.deletes.length, 0, JSON.stringify(extra));
   }
 });
 test("22:59 受保護（白名單）貼換群連結 → 不踢", async () => {
@@ -806,7 +806,7 @@ test("23:15 檔案：PDF 內含群組 QR → 刪文＋踢", async () => {
 test("23:15 檔案：排除群（excludeChats）的群組 QR PDF → 不踢", async () => {
   const data = (await makePdf({ text: "hello", qr: KS_GROUP })).toString("base64");
   const r = await runGuard({ fileScan: { enabled: true }, kickScope: { excludeChats: ["cA"] } }, [FILE_MSG], { file: { name: "a.pdf", data }, waitMs: 5000 });
-  assert.equal(r.removes.length, 0);
+  assert.equal(r.removes.length, 0); assert.equal(r.deletes.length, 0);
 });
 test("23:15 檔案：PDF 只有一般連結 → 只列評分，不刪不踢；沒有連結／壞檔 → 什麼都不做", async () => {
   const link = await runGuard({ fileScan: { enabled: true } }, [FILE_MSG], { file: { name: "a.pdf", data: (await makePdf({ text: "join now https://scam-site.xyz/join guaranteed profit" })).toString("base64") }, waitMs: 5000 });
@@ -831,7 +831,7 @@ test("allChats：excludeChats／learnOnly／warnOnly 的群 → 換群連結、�
       { messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE },
       { messageId: "m2", channelId: "cA", senderId: "pShop", senderName: "小店", text: LUX_AD },
     ], { waitMs: 3500 });
-    assert.equal(r.removes.length, 0, JSON.stringify(extra));
+    assert.equal(r.removes.length, 0, JSON.stringify(extra)); assert.equal(r.deletes.length, 0, JSON.stringify(extra));
   }
 });
 test("allChats：沒有管理員權限的群（noDeleteChats）→ 只通知，不送刪文／踢人", async () => {
@@ -929,7 +929,7 @@ test("11/5 QR 已知詐騙邀請：踢人群 → 刪踢（kickOnConfirmed 關也
 });
 test("11/5 QR 已知詐騙邀請：excludeChats → 不踢不刪", async () => {
   const r = await runGuard({ ...KNOWN_QR_CFG, kickScope: { excludeChats: ["cA"] } }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: await knownQrPng(), waitMs: 3500 });
-  assert.equal(r.removes.length, 0);
+  assert.equal(r.removes.length, 0); assert.equal(r.deletes.length, 0);
 });
 test("11/5 QR 已知詐騙邀請：warnOnly → 不踢不刪", async () => {
   const r = await runGuard({ ...KNOWN_QR_CFG, groupPolicies: { cA: { warnOnly: true } } }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", contentType: "IMAGE" }], { media: await knownQrPng(), waitMs: 3500 });
@@ -971,7 +971,7 @@ test("11/5 看圖引流：excludeChats／warnOnly／管理員／開關關 → �
     await visionRun(A, { groupPolicies: { cA: { warnOnly: true } } }),
     await visionRun(A, {}, { senderRole: "coAdmin" }),
     await visionRun(A, { vision: { enabled: true, action: "report", lureKick: false } }),
-  ]) assert.equal(r.removes.length, 0);
+  ]) { assert.equal(r.removes.length, 0); assert.equal(r.deletes.length, 0); }
 });
 test("11/5 看圖引流對抗：交易所官方公告、活動宣傳、商家促銷、只有字眼但不確定 → 不踢", async () => {
   for (const a of [

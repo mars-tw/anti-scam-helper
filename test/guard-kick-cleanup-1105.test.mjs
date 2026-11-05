@@ -58,3 +58,11 @@ test("visionLureKick：要 SCAM 且有引流字眼；公告／活動／促銷、
   assert.equal(visionLureKick({ verdict: "SCAM", reason: "週年慶促銷，加 LINE 好友" }), false);
   assert.equal(visionLureKick({ verdict: "SCAM", reason: "帶單進群", protectedSender: true }), false);
 });
+
+test("審查 21:49 visionLureKick 對抗：只有加 LINE／加群不算，要有帶單／老師／獲利／投資", () => {
+  assert.equal(visionLureKick({ verdict: "SCAM", reason: "請加 LINE 官方帳號" }), false);
+  assert.equal(visionLureKick({ verdict: "SCAM", reason: "官方活動抽獎加群" }), false);
+  assert.equal(visionLureKick({ verdict: "SCAM", reason: "官方群組活動，請加入群組" }), false);
+  assert.equal(visionLureKick({ verdict: "SCAM", reason: "進群聊天" }), false);
+  assert.equal(visionLureKick({ verdict: "SCAM", reason: "老師帶單獲利加 LINE" }), true);
+});

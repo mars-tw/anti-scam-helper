@@ -142,7 +142,9 @@ const mediaLearnChats = new Set([...learnExt, ...scanNotify]);
 // 只警告的群：不踢、不刪，只發警告通知（見 policy.mjs warnOnlyChats）。
 const warnOnly = warnOnlyChats(groupPolicies);
 /** 這個群不能刪訊息／踢人：本帳號不是管理員（noDeleteChats）或設成只警告。 */
-const noAction = (chatId) => noDeleteChats.has(chatId) || warnOnly.has(chatId);
+// 審查 11/5 21:49：kickScope.excludeChats（熊群／只學習群）一律不刪不踢，所有刪文路徑都走這個閘。
+const excludedChat = (chatId) => (config.kickScope?.excludeChats ?? []).includes(chatId);
+const noAction = (chatId) => noDeleteChats.has(chatId) || warnOnly.has(chatId) || excludedChat(chatId);
 // noteLinks: true → 群主／管理員／受保護成員在記事本貼的連結，加進這個群自己的白名單（存 logs/note-links.json，600）；
 // linkAllow: [...] 可手動加。只比完全相同的連結。
 const noteLinksFile = join(logDir, "note-links.json");
@@ -2477,11 +2479,20 @@ async function handle(ws, message) {
 const waiting = new Map(); // requestId → 等待伺服器回應的 resolve
 
 /** 直接送出的踢人請求：受保護名字最後再擋一次。 */
+// 最後一道閘：任何踢人／刪文 frame 指向 excludeChats 一律不送。
+const DESTRUCTIVE = new Set(["member:remove", "message:delete"]);
+function excludedFrame(frame) {
+  if (!DESTRUCTIVE.has(frame?.type) || !excludedChat(frame.chatId)) return false;
+  record({ action: "exclude-chat-skip", frameType: frame.type, chatId: frame.chatId, messageId: frame.messageId });
+  return true;
+}
 function sendKick(ws, frame) {
+  if (excludedFrame(frame)) return;
   if (nameGuard.blocks(frame)) return record({ action: "protected-name-skip", frameType: frame.type, chatId: frame.chatId, messageId: frame.messageId });
   ws.send(JSON.stringify(frame));
 }
 function call(ws, frame, timeoutMs = 30_000) {
+  if (excludedFrame(frame)) return Promise.resolve({ type: "error", code: "EXCLUDED_CHAT" });
   if (nameGuard.blocks(frame)) { record({ action: "protected-name-skip", frameType: frame.type, chatId: frame.chatId, messageId: frame.messageId }); return Promise.resolve({ type: "error", code: "PROTECTED_NAME" }); }
   const requestId = `req${++requestSeq}`;
   return new Promise((done) => {
