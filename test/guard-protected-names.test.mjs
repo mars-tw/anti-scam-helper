@@ -46,6 +46,6 @@ test("guard.mjs 每條踢人／刪文路徑都接上受保護名字", () => {
   assert.equal((src.match(/ws\.send\(JSON\.stringify\(\{ type: "member:remove"/g) ?? []).length, 0, "不准繞過 sendKick");
   assert.match(src, /protectedMember: neverKick\(message\)/, "礦工群");
   assert.match(src, /!trusted && !neverKick\(message\) && policyOf/, "冒充管理員直接踢");
-  assert.match(src, /nameGuard\.note\(message\);\n\s+watermarks\.bump/, "即時訊息登記");
+  assert.match(src, /nameGuard\.note\(message\); enforcement\.note\(message\);\n\s+watermarks\.bump/, "即時訊息登記");
   assert.match(body("processHistory"), /nameGuard\.note\(message\)/, "歷史訊息登記");
 });

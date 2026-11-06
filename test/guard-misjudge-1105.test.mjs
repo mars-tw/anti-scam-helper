@@ -54,7 +54,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2600, respon
     ...extraConfig,
   };
   writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
-  const child = spawn(process.execPath, ["guard/guard.mjs", join(dir, "guard.config.json")], { env: { ...process.env, LINEJS_TOKEN: "test", LINEJS_URL: `ws://127.0.0.1:${wss.address().port}` }, stdio: "ignore" });
+  const child = spawn(process.execPath, ["guard/guard.mjs", join(dir, "guard.config.json")], { env: { ...process.env, LINEJS_TOKEN: "test", GUARD_NO_KICK_FILE: join(dir, "no-GUARD_NO_KICK"), GUARD_NO_KICK_CHATS_FILE: join(dir, "no-GUARD_NO_KICK_CHATS"), LINEJS_URL: `ws://127.0.0.1:${wss.address().port}` }, stdio: "ignore" });
   await new Promise((done) => setTimeout(done, waitMs));
   const exited = child.exitCode !== null ? Promise.resolve() : new Promise((done) => child.once("exit", done));
   child.kill();

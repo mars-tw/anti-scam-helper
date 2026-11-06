@@ -17,7 +17,7 @@ test("無前一則＋本則刪成功 → 不記多餘 kickFailed、不併刪", (
   assert.deepEqual(bandanDeletePlan({ deleted: true, priorMessageId: undefined }), { markCanKick: true, kickFailed: false, deletePrior: false });
 });
 test("源碼：else kickFailed 緊接 if (deleted)，併刪只看 plan.deletePrior", () => {
-  assert.match(handler, /if \(deleted\) markSelfCanKick\(entry\.chatId, "bandan-line-oa-deleted"\);\n\s*else record\(\{ action: "kickFailed"/);
+  assert.match(handler, /if \(deleted\) markSelfCanKick\(entry\.chatId, "bandan-line-oa-deleted"\);\n\s*else if \(!gateHeld\(answer\)\) record\(\{ action: "kickFailed"/);
   assert.match(handler, /if \(plan\.deletePrior\) \{/);
   assert.doesNotMatch(handler, /\}\n\s*else record\(\{ action: "kickFailed"/);
   assert.doesNotMatch(handler, /kick:\s*true|chat:kick|member:kick/);

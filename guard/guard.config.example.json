@@ -109,5 +109,19 @@
     }
   },
   "shortUrlExpand": true,
-  "scamInviteTickets": []
+  "scamInviteTickets": [],
+  "groupPolicies": {
+    "m6e67dc9769ef0f015e9bf37110ea4b9e": {
+      "kickNote": "2026-11-06 08:32 士軒「先關Hao踢人」。此群不自動踢。",
+      "_label": "Claude Code"
+    },
+    "m4326d9310ae6a55d7aa25f7bf5f8d596": {
+      "kickNote": "2026-11-06 08:32 士軒「先關Hao踢人」。此群不自動踢。",
+      "_label": "Codex"
+    },
+    "m428a4fc16b94b601aadd924056883c86": {
+      "kickNote": "2026-11-06 08:32 士軒「先關Hao踢人」。此群不自動踢。",
+      "_label": "xAI Grok"
+    }
+  }
 }

@@ -59,7 +59,7 @@ async function runGuard(extraConfig, live, { history = [], waitMs = 2500, chatAn
   };
   if (setup) setup(dir, config);
   writeFileSync(join(dir, "guard.config.json"), JSON.stringify(config));
-  const child = spawn(process.execPath, ["guard/guard.mjs", join(dir, "guard.config.json")], { env: { ...process.env, LINEJS_TOKEN: "test", LINEJS_URL: `ws://127.0.0.1:${wss.address().port}` }, stdio: "ignore" });
+  const child = spawn(process.execPath, ["guard/guard.mjs", join(dir, "guard.config.json")], { env: { ...process.env, LINEJS_TOKEN: "test", GUARD_NO_KICK_FILE: join(dir, "no-GUARD_NO_KICK"), GUARD_NO_KICK_CHATS_FILE: join(dir, "no-GUARD_NO_KICK_CHATS"), LINEJS_URL: `ws://127.0.0.1:${wss.address().port}` }, stdio: "ignore" });
   await new Promise((done) => setTimeout(done, waitMs));
   // 等守衛真的結束（收到 SIGTERM 會先把參考資料存檔），再讀檔，免得偶爾讀到存檔前的內容。
   const exited = child.exitCode !== null ? Promise.resolve() : new Promise((done) => child.once("exit", done));
@@ -227,8 +227,8 @@ test("冒名＋群組邀請連結（同社群的管理員名）：通知＋刪�
   assert.ok(r.sends.some((f) => /已刪除/.test(f.text ?? "")), JSON.stringify(r.sends));
 });
 
-test("冒名＋群組邀請連結：kickWithInvite=true 時踢人（即使 kickMode=notify）", async () => {
-  const r = await runGuard({ kickMode: "notify", impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+test("冒名＋群組邀請連結：kickWithInvite=true 且 kickMode=kick 才踢", async () => {
+  const r = await runGuard({ kickMode: "kick", impersonation: { kickWithInvite: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
   assert.equal(r.removes.length, 1);
   assert.equal(r.removes[0].messageId, "m1");
   assert.ok(r.sends.length >= 1);
@@ -293,8 +293,8 @@ test("詐騙購物：第一次 → 10/26 23:01 起只引用回覆列出詐騙評
 });
 
 const LUX_AD = "LV 1:1 高仿包 名牌包只要 $399 貨到付款 https://lv-bags-sale.shop/a";
-test("10/26 23:47 假精品確認（高仿／1:1＋連結＋兩層 SCAM）→ 第一次就刪文＋踢（kickRepeat=true，即使 kickMode=notify）", async () => {
-  const r = await runGuard({ kickMode: "notify", scamShop: { enabled: true, kickRepeat: true } }, [
+test("10/26 23:47 假精品確認（高仿／1:1＋連結＋兩層 SCAM）→ 第一次就刪文＋踢（kickRepeat=true；11/06 起須 kickMode=kick）", async () => {
+  const r = await runGuard({ kickMode: "kick", scamShop: { enabled: true, kickRepeat: true } }, [
     { messageId: "m1", channelId: "cA", senderId: "pShop", senderName: "小店", text: LUX_AD },
   ], { waitMs: 3500 });
   assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
@@ -362,8 +362,12 @@ test("正式組合：只有冒名（Meta 判 SCAM）仍只通知，不踢", asyn
   assert.equal(r.removes.length + r.deletes.length, 0);
 });
 
-test("正式組合：冒名＋邀請連結 → 踢", async () => {
+test("正式組合：冒名＋邀請連結在 kickMode=notify 不踢（11/06 起 kickWithInvite 不繞過）", async () => {
   const r = await runGuard({ ...PROD }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
+  assert.equal(r.removes.length, 0);
+});
+test("正式組合：冒名＋邀請連結在 kick 模式 → 踢", async () => {
+  const r = await runGuard({ ...PROD, kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pImp", senderName: "阿明", text: INVITE }], { history: ADMIN_HISTORY });
   assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
 });
 
@@ -401,13 +405,13 @@ test("假冒管理員＋換群內容（無連結）→ 通知一次（冷卻）�
   assert.equal(r.sends.length, 1);
 });
 
-test("假冒管理員＋外部 LINE 邀請 → kickWithInvite 踢（即使 kickMode=notify）", async () => {
-  const r = await runGuard({ ...FAKE }, [{ messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "官方客服", text: INVITE }]);
+test("假冒管理員＋外部 LINE 邀請 → kickWithInvite 踢（須 kickMode=kick）", async () => {
+  const r = await runGuard({ ...FAKE, kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "官方客服", text: INVITE }]);
   assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
 });
 
-test("空白（Hangul 填充字）暱稱＋外部 LINE 邀請 → 踢", async () => {
-  const r = await runGuard({ ...FAKE }, [{ messageId: "m1", channelId: "cA", senderId: "pBlank", senderName: "\u3164", text: INVITE }]);
+test("空白（Hangul 填充字）暱稱＋外部 LINE 邀請 → 踢（須 kickMode=kick）", async () => {
+  const r = await runGuard({ ...FAKE, kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pBlank", senderName: "\u3164", text: INVITE }]);
   assert.deepEqual(r.removes.map((f) => f.messageId), ["m1"]);
 });
 
@@ -818,11 +822,11 @@ test("23:15 檔案：PDF 只有一般連結 → 只列評分，不刪不踢；�
 });
 
 // ── 10/26 23:47：kickScope.allChats=true（正式設定會開；預設關）──
-const ALL = { kickMode: "notify", kickScope: { allChats: true }, scamShop: { enabled: true, fetchPage: false }, impersonation: { kickWithInvite: true } };
-test("allChats：一般群換群連結 → 踢；預設（沒開 allChats、kickMode=notify）→ 不踢", async () => {
+const ALL = { kickMode: "kick", kickScope: { allChats: true }, scamShop: { enabled: true, fetchPage: false }, impersonation: { kickWithInvite: true } };
+test("allChats：kick 模式換群連結 → 踢；kickMode=notify 即使 allChats 也不踢", async () => {
   const on = await runGuard(ALL, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
   assert.equal(on.removes.length, 1);
-  const off = await runGuard({ kickMode: "notify" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
+  const off = await runGuard({ kickMode: "notify", kickScope: { allChats: true } }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
   assert.equal(off.removes.length, 0);
 });
 test("allChats：excludeChats／learnOnly／warnOnly 的群 → 換群連結、假精品都一定不踢", async () => {
@@ -981,4 +985,55 @@ test("11/5 看圖引流對抗：交易所官方公告、活動宣傳、商家促
     "UNSURE\n疑似帶單老師要人進群",
     "SCAM_WEAK\n帶單進群",
   ]) assert.equal((await visionRun(a)).removes.length, 0, a);
+});
+
+// ── 11/06：共用關卡。旗標、Hao kickNote、受保護名稱換新 ID、forced／allChats。──
+const HAO_CLAUDE = "m6e67dc9769ef0f015e9bf37110ea4b9e";
+test("11/06 旗標不存在：kick 模式換群連結仍踢", async () => {
+  const r = await runGuard({ kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }]);
+  assert.equal(r.removes.length, 1);
+});
+test("11/06 全域旗標 GUARD_NO_KICK 存在：kick 模式也不送 member:remove", async () => {
+  const r = await runGuard({ kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }], {
+    setup(dir, config) {
+      const flag = join(dir, "GUARD_NO_KICK");
+      writeFileSync(flag, "");
+      config.enforcement = { noKickFlagFile: flag, noKickChatsFile: join(dir, "no-chats") };
+    },
+  });
+  assert.equal(r.removes.length, 0);
+});
+test("11/06 按群旗標：清單內的群不踢，清單外仍踢", async () => {
+  const blocked = await runGuard({ kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }], {
+    setup(dir, config) {
+      const chats = join(dir, "GUARD_NO_KICK_CHATS");
+      writeFileSync(chats, "cA\n");
+      config.enforcement = { noKickFlagFile: join(dir, "absent-flag"), noKickChatsFile: chats };
+    },
+  });
+  assert.equal(blocked.removes.length, 0);
+  const open = await runGuard({ kickMode: "kick" }, [{ messageId: "m1", channelId: "cA", senderId: "pBad", senderName: "陌生人", text: KS_MOVE }], {
+    setup(dir, config) {
+      const chats = join(dir, "GUARD_NO_KICK_CHATS");
+      writeFileSync(chats, "cOther\n");
+      config.enforcement = { noKickFlagFile: join(dir, "absent-flag"), noKickChatsFile: chats };
+    },
+  });
+  assert.equal(open.removes.length, 1);
+});
+test("11/06 Hao 三群 kickNote：kick 模式＋allChats 也不自動踢", async () => {
+  const r = await runGuard({
+    kickMode: "kick", kickScope: { allChats: true },
+    notify: { enabled: true, chats: [HAO_CLAUDE], cooldownSeconds: 0, beforeActionMs: 10 },
+  }, [{ messageId: "m1", channelId: HAO_CLAUDE, senderId: "pBad", senderName: "陌生人", text: KS_MOVE }], {
+    channels: [{ channelId: HAO_CLAUDE, name: "Claude Code", kind: "square" }],
+  });
+  assert.equal(r.removes.length, 0);
+});
+test("11/06 白名單換新 ID：名稱相同（含物件取代字元）只暫緩，不踢不刪，也不寫入新 ID", async () => {
+  const r = await runGuard({
+    kickMode: "kick", kickScope: { allChats: true },
+    protectedIds: [{ note: "星語（測試用，不寫入新 ID）", ids: ["pOldStar"] }],
+  }, [{ messageId: "m1", channelId: "cA", senderId: "pNewStar", senderName: "\uFFFC星語", text: KS_MOVE }]);
+  assert.equal(r.removes.length + r.deletes.length, 0, JSON.stringify([...r.removes, ...r.deletes]));
 });
