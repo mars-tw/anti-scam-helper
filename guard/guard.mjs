@@ -1952,6 +1952,31 @@ export function bandanDeletePlan({ deleted, priorMessageId }) {
   return { markCanKick: !!deleted, kickFailed: !deleted, deletePrior: !!deleted && !!priorMessageId };
 }
 
+// 士軒 11/7：假搬家圖與確認的外部邀請 QR 只刪文；不標記踢人，後續踢人路徑仍可處理。
+async function deleteOnly(ws, message, entry, tag) {
+  if (noAction(message.channelId) || learnOnly.has(message.channelId)) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "chat-policy" });
+  if (neverKick(message)) return record({ ...entry, action: "protected-skip" });
+  if (killSwitchOn()) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "kill-switch" });
+  if (config.deleteMessage === false) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "delete-disabled" });
+  if (config.dryRun) {
+    record({ ...entry, action: `${tag}-dry-run` });
+    await notifyAdmins(ws, entry, "dry-run-deleted");
+    return;
+  }
+  let answer = { type: "error", code: "NOT_SENT" };
+  const notified = await notifyThenAct(() => preNotify(ws, entry, "link-delete"), async () => {
+    answer = await call(ws, { type: "message:delete", chatId: message.channelId, messageId: message.messageId }, 30_000, { senderId: message.senderId, senderName: message.senderName });
+  }, notify.beforeActionMs ?? 2000, sleep);
+  const deleted = answer.type === "message:deleted";
+  if (deleted) { markSelfCanKick(entry.chatId, `${tag}-deleted`); await notifyAdmins(ws, entry, "done-deleted", { force: true }); }
+  record({ action: deleted ? `${tag}-deleted` : `${tag}-delete-failed`, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, notified, code: deleted ? undefined : answer.code });
+  if (!deleted && !gateHeld(answer)) {
+    recordError("delete", answer.code);
+    record({ action: "kickFailed", code: answer.code, phase: "delete", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+    await notifyAdmins(ws, entry, "link-delete-failed", { force: true });
+  }
+}
+
 async function deleteScamLink(ws, message, entry) {
   if (isStaff(message) || message.senderId === me) return record({ action: "protected-skip", chatId: message.channelId, senderId: message.senderId, senderName: message.senderName, verdict: entry.verdict });
   // 23:01：一般連結（不是 LINE 群組邀請、不是 QR）只在群裡列出「可能是詐騙」的評分，不刪不踢。
@@ -2639,7 +2664,7 @@ async function checkImage(ws, message) {
     const review = await metaReview(`［成員貼出的截圖，QR code 解碼內容］${content}`, qrReviewContext(entry.qrOrigin));
     const flagged = { ...entry, verdict: "QR_LINE_INVITE", names: [entry.qrOrigin === "other" ? "別的社群的 LINE 邀請 QR code" : "外部 LINE 群組／好友 QR code"], review: review.verdict ?? "UNAVAILABLE", reviewModel: review.model };
     if (review.verdict === "SCAM") {
-      // 預設只通知不踢（qr.kickOnConfirmed: true 才會踢）；寧可漏判也不誤踢。
+      // 士軒 11/7：預設只刪文不踢；qr.kickOnConfirmed: true 保留原踢人流程。
       if (qr.kickOnConfirmed === true) {
         // 給 qrGraceSeconds 等看看他是不是接著問「這是詐騙嗎」：是就交給詢問者遮蔽，不踢。
         if (questionRedact.enabled && questionRedact.qrGraceSeconds > 0) {
@@ -2653,7 +2678,7 @@ async function checkImage(ws, message) {
         return remove(ws, message, flagged);
       }
       record({ action: "qr-flag", ...flagged });
-      return notifyAdmins(ws, flagged, "qr");
+      return deleteOnly(ws, message, flagged, "qr-invite");
     }
     return record({ action: "qr-flag", ...flagged });
   }
@@ -2759,12 +2784,11 @@ async function checkWithVision(ws, message, picture) {
     record({ action: "pionex-nolink-skip", ...entry });
     return;
   }
-  // 圖片假搬家公告（要成員申請加入新群）：理由有「公告」被降成 SCAM_WEAK 時仍只發通知（不刪不踢，不走踢人群路徑）。
+  // 士軒 11/7：假搬家公告被降成 SCAM_WEAK 時也只刪文，不踢人。
   if (verdict === "SCAM_WEAK" && isFakeGroupImage(reason)) {
     const flagged = { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] };
     record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE" });
-    await notifyAdmins(ws, flagged, "suspect");
-    return;
+    return deleteOnly(ws, message, flagged, "fake-move-image");
   }
   // 10/31：SCAM_WEAK 但理由提到具體短網址 → 必跑覆核；覆核也 SCAM 才通知（只通知，不刪不踢）。
   if (verdict === "SCAM_WEAK" && visionMentionsConcreteShort(reason)) {
@@ -2788,7 +2812,7 @@ async function checkWithVision(ws, message, picture) {
   if (verdict === "SCAM" || verdict === "UNSURE") {
     console.log(`【疑似詐騙圖片】${message.senderName}：${verdict}${reason ? `（${reason}）` : ""}`);
     record({ action: "vision-flag", ...entry });
-    // 例外：圖片假搬家公告（要成員轉移到新群）沒有 QR 也發通知（只通知，不刪不踢）。
+    // 士軒 11/7：圖片假搬家公告沒有 QR 也刪文；既有踢人群流程不變。
     // 開刪踢的群（踢人群，維護者 10/22 同意）：要求轉移到新群的假群組圖直接當詐騙，照該群踢人條件
     // （第一層看圖要是 Claude；看圖覆核 Grok → Meta：SCAM 踢、沒回應照踢、OK／UNSURE 只通知）。
     if (isFakeGroupImage(reason) && policyOf(message.channelId).kickMode === "kick" && chatKickMode(message.channelId) === "kick") {
@@ -2799,14 +2823,12 @@ async function checkWithVision(ws, message, picture) {
       const flagged = { ...entry, verdict: "FAKE_GROUP_IMAGE", names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names], review: rv ?? "UNAVAILABLE", reviewModel: usedReview.model };
       record({ action: "fake-group-image", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, model: entry.model, review: flagged.review, decision });
       if (decision === "kick" && !neverKick(message)) return remove(ws, message, flagged);
-      await notifyAdmins(ws, flagged, "suspect");
-      return;
+      return deleteOnly(ws, message, flagged, "fake-move-image");
     }
     if (isFakeGroupImage(reason)) {
       const flagged = { ...entry, names: ["圖片假群組公告（要成員轉移到新群）", ...entry.names] };
       record({ action: "suspect-flag", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, senderName: entry.senderName, names: flagged.names, verdict: entry.verdict, contentType: "IMAGE" });
-      await notifyAdmins(ws, flagged, "suspect");
-      return;
+      return deleteOnly(ws, message, flagged, "fake-move-image");
     }
     // 10/22 通知層：UNSURE 但是 老師帶單圖＋網址水印／高年化＋QR或網址／多帳號冒充管理員；或同一人 24h 第 2 張純獲利圖 → 通知。
     const inl = imageNotify(verdict, reason);
