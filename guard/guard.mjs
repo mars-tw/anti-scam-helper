@@ -1953,11 +1953,24 @@ export function bandanDeletePlan({ deleted, priorMessageId }) {
 }
 
 // 士軒 11/7：假搬家圖與確認的外部邀請 QR 只刪文；不標記踢人，後續踢人路徑仍可處理。
-async function deleteOnly(ws, message, entry, tag) {
-  if (noAction(message.channelId) || learnOnly.has(message.channelId)) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "chat-policy" });
+// 11/10 審查（Grok Bot）：跳過刪文分兩類——
+//  (1) excludeChats（熊群）／learnOnly：維持只記錄，不在群裡發通知。
+//  (2) warnOnly（如上井）／本帳號非管理員（noDeleteChats）／kill switch／deleteMessage=false：改回通知管理員，不刪不踢。
+//  受保護發文者一律只記錄。
+async function deleteOnly(ws, message, entry, tag, fallbackKind = "suspect") {
+  const chatId = message.channelId;
+  if (excludedChat(chatId) || learnOnly.has(chatId)) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "chat-policy" });
   if (neverKick(message)) return record({ ...entry, action: "protected-skip" });
-  if (killSwitchOn()) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "kill-switch" });
-  if (config.deleteMessage === false) return record({ ...entry, action: `${tag}-delete-skipped`, reason: "delete-disabled" });
+  let skip;
+  if (warnOnly.has(chatId)) skip = "warn-only";
+  else if (noDeleteChats.has(chatId)) skip = "no-delete-permission";
+  else if (killSwitchOn()) skip = "kill-switch";
+  else if (config.deleteMessage === false) skip = "delete-disabled";
+  if (skip) {
+    record({ ...entry, action: `${tag}-delete-skipped`, reason: skip });
+    await notifyAdmins(ws, entry, fallbackKind);
+    return;
+  }
   if (config.dryRun) {
     record({ ...entry, action: `${tag}-dry-run` });
     await notifyAdmins(ws, entry, "dry-run-deleted");
@@ -2678,7 +2691,7 @@ async function checkImage(ws, message) {
         return remove(ws, message, flagged);
       }
       record({ action: "qr-flag", ...flagged });
-      return deleteOnly(ws, message, flagged, "qr-invite");
+      return deleteOnly(ws, message, flagged, "qr-invite", "qr"); // 11/10：跳過刪除時以 qr 類型通知（同 11/7 前原行為）。
     }
     return record({ action: "qr-flag", ...flagged });
   }
