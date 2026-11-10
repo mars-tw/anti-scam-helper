@@ -36,6 +36,7 @@ import { FRIEND_NOTE, friendAddOnly, GROUP_INVITE, kickScopeDecision, makeFriend
 import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBandanLineOa, isLineOaUrl, probeLineOaPage } from "./line-oa-bandan.mjs";
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine, classifySusExpandLanding } from "./short-url-outcome.mjs";
+import { fakeBrandGroupInvite } from "./fake-brand-group.mjs";
 import { KNOWN_SCAM_INVITE, hasKnownScamInvite, normalizeInviteTickets } from "./known-scam-invite.mjs";
 import { cleanupAllowed, cleanupTargets, qrResultKind, VISION_LURE, visionLureKick } from "./kick-cleanup.mjs";
 import { SendFailTracker, fetchWithRetry, mediaFailReportLine, sendFailAlertLine, sendFailReportLine } from "./ops-report.mjs";
@@ -1466,10 +1467,21 @@ async function checkImpersonationInvite(ws, message, { invite, strictInvite = in
   if (comboLog.size > 2000) comboLog.delete(comboLog.keys().next().value);
   const invites = list.filter((item) => item.invite);
   if (invites.length === 0) return false;
+  // 士軒 11/10：同一則訊息只處理一次（chatId＋messageId）。
+  if (noticeSeenBefore(message.channelId, message.messageId, "combo") === true) { record({ action: "impersonation-invite-duplicate", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId }); return true; }
   if (Date.now() - (comboHandled.get(key) ?? 0) < 600_000) {
     // 同一人連發、後一則晚一步才判到：等前一輪踢完，再把這則一併刪掉（只刪已被踢的人）。
     await comboPending.get(key)?.catch(() => {});
-    await deleteFollowup(ws, message, key);
+    const current = list.at(-1);
+    const currentInvite = current?.messageId === message.messageId && current.invite;
+    // 非邀請的後續訊息：維持舊行為（只刪已被踢的人的文），不標注。
+    if (removedAt.has(key) || kicked.has(key) || !currentInvite) {
+      await deleteFollowup(ws, message, key);
+      return true;
+    }
+    // 這則本身是邀請／假通知、且人還沒被移除（kickMode notify、停手踢、warnOnly 等）：這則新訊息重新標注，不踢；不更新 comboHandled（踢人冷卻不變）。
+    record({ action: "impersonation-invite-repeat", chatId: message.channelId, messageId: message.messageId, senderId: message.senderId });
+    await punishImpersonationInvite(ws, message, victim, message.messageId, [message.messageId], { notice: current.notice, inviteExpanded, expandFailed, noKick: true });
     return true;
   }
   comboHandled.set(key, Date.now());
@@ -1493,6 +1505,17 @@ const avatarPending = new Map();
 const fakeAdminNotified = new Map(); // 聊天室＋發言者 → 上次通知時間
 const darkNickNotified = new Map(); // 10/30 A／B 暗稱／＠群管：聊天室＋發言者 → 上次通知時間
 const fakeAdminLogged = new Map(); // 聊天室＋發言者 → 上次記錄時間
+// 士軒 11/10 08:50「每次對方發出就標」：群內通知只依「同一則訊息」去重（chatId＋messageId），不再依同一人、同一短網址或假冒管理員冷卻跳過。
+const noticedMessages = new Map(); // 聊天室＋messageId → 第一次處理時間
+/** 這則訊息是否已處理過通知（第一次呼叫時登記並回 false）。沒有 messageId 回 undefined（呼叫端改用舊冷卻）。 */
+function noticeSeenBefore(chatId, messageId, scope = "notice") {
+  if (!chatId || !messageId) return undefined;
+  const k = `${scope} ${chatId} ${messageId}`;
+  if (noticedMessages.has(k)) return true;
+  noticedMessages.set(k, Date.now());
+  if (noticedMessages.size > 5000) noticedMessages.delete(noticedMessages.keys().next().value);
+  return false;
+}
 const avatarKey = (pictureId) => createHash("sha256").update(String(pictureId)).digest("hex").slice(0, 20);
 function saveAvatarCache() {
   try {
@@ -1584,14 +1607,23 @@ async function checkFakeAdmin(ws, message, text) {
   const now = Date.now();
   const entry = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "FAKE_ADMIN", names: ["假冒管理員", ...fa.labels] };
   if (fa.fake && (risky || fa.strong)) {
-    if (now - (fakeAdminNotified.get(key) ?? 0) < fakeAdmin.cooldownHours * 3_600_000) {
-      record({ action: "fake-admin-cooldown", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, risky });
-      return false;
+    // 士軒 11/10「每次對方發出就標」：同一則訊息（chatId＋messageId）只處理一次；同一人新的一則照標，不再依同一人冷卻跳過。
+    if (noticeSeenBefore(message.channelId, message.messageId, "fake-admin") === true) {
+      record({ action: "fake-admin-duplicate", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+      return true;
     }
+    const repeat = now - (fakeAdminNotified.get(key) ?? 0) < fakeAdmin.cooldownHours * 3_600_000;
     fakeAdminNotified.set(key, now);
     if (fakeAdminNotified.size > 2000) fakeAdminNotified.delete(fakeAdminNotified.keys().next().value);
-    record({ action: "fake-admin-notify", ...entry, risky, strong: fa.strong });
-    if (!config.dryRun) await notifyAdmins(ws, entry, "suspect");
+    record({ action: "fake-admin-notify", ...entry, risky, strong: fa.strong, repeat });
+    // 士軒 11/10：假冒管理員通知沒送出（如強特徵閘擋下）→ 交給後面一般規則判斷，該標就標；不放寬閘門。
+    const sent = config.dryRun ? true : await notifyAdmins(ws, entry, "suspect");
+    if (!sent) {
+      record({ action: "fake-admin-notice-unsent", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId });
+      return false;
+    }
+    // 沒有文字的圖片：不在這裡結束，讓圖片繼續走 QR／視覺檢查（同一則通知已由去重擋住）。
+    if (!message.text && message.contentType === "IMAGE") return false;
     return true;
   }
   if (now - (fakeAdminLogged.get(key) ?? 0) >= fakeAdmin.logEveryHours * 3_600_000) {
@@ -1618,13 +1650,13 @@ function neverKick(message) {
   return Boolean(message.senderRole || whitelist.has(message.senderId) || message.senderId === me || isSelf(message.channelId, message.senderId)
     || [...chatAdmins.values()].some((admins) => admins.has(message.senderId)) || isStaff(message) || nameGuard.protects(message));
 }
-async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false, inviteExpanded = false, expandFailed = false } = {}) {
+async function punishImpersonationInvite(ws, message, victim, replyTo, targets, { notice = false, inviteExpanded = false, expandFailed = false, noKick = false } = {}) {
   const names = [`冒用「${victim}」`, notice ? "假群組公告" : "外部邀請／引流連結或 QR code"];
   if (inviteExpanded) names.push("短網址導向群組邀請");
   const entry = { chatId: message.channelId, messageId: replyTo, senderId: message.senderId, senderName: message.senderName, verdict: "IMPERSONATION_INVITE", names };
   const scope = kickScopeFor(message, { names: entry.names }, victim);
-  const kick = config.impersonation?.kickWithInvite === true && chatKickMode(message.channelId) === "kick" && !neverKick(message) && scope.kick;
-  if (config.impersonation?.kickWithInvite === true && !kick) record({ action: "kick-out-of-scope", reason: scope.reason, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, verdict: entry.verdict });
+  const kick = !noKick && config.impersonation?.kickWithInvite === true && chatKickMode(message.channelId) === "kick" && !neverKick(message) && scope.kick;
+  if (!noKick && config.impersonation?.kickWithInvite === true && !kick) record({ action: "kick-out-of-scope", reason: scope.reason, chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, verdict: entry.verdict });
   record({ action: "impersonation-invite-flag", ...entry, messages: targets.length, kick, review: "PENDING" });
   // 冒名＋邀請是規則判定（不經模型）；10/22 起另外跑一次雲端覆核，只寫日誌（review／reviewModel），不影響處置。
   if (message.text) metaReview(sanitizeLinks(message.text).text, "發訊者冒用管理員／群主名義並貼外部邀請或假群組公告。").then((rv) => record({ action: "impersonation-invite-review", chatId: entry.chatId, messageId: entry.messageId, review: rv.verdict ?? "UNAVAILABLE", reviewModel: rv.model })).catch((error) => recordError("model", `impersonation-review：${String(error?.message).slice(0, 60)}`));
@@ -2332,8 +2364,8 @@ async function handle(ws, message) {
     if (nickReasons.length) {
       const nk = `${message.channelId} ${message.senderId}`;
       const now = Date.now();
-      const cd = (fakeAdmin.cooldownHours || 6) * 3_600_000;
-      if (now - (darkNickNotified.get(nk) ?? 0) >= cd) {
+      // 士軒 11/10「每次對方發出就標」：同一則訊息只通知一次（chatId＋messageId），不再依同一人冷卻跳過。
+      if (!noticeSeenBefore(message.channelId, message.messageId, "dark-nick")) {
         darkNickNotified.set(nk, now);
         if (darkNickNotified.size > 2000) darkNickNotified.delete(darkNickNotified.keys().next().value);
         const ne = { chatId: message.channelId, messageId: message.messageId, senderId: message.senderId, senderName: message.senderName, ...(text ? contentRef(text) : { contentType: message.contentType }), verdict: "DARK_NICK", names: nickReasons };
@@ -2492,10 +2524,17 @@ async function handle(ws, message) {
     // 地端判 SCAM＋含連結，但 Meta 不可用：不處置，只記錄。
     if (result.verdict === "SCAM" && result.link && result.review === "UNAVAILABLE") record({ action: "scam-link-meta-unavailable", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, score: result.score, names: result.names });
     if (result.action === "notice") {
-      // 同一位假冒管理員剛被通知過（冷卻中）：只通知類的結果不再重發（刪除／踢人不受影響）。
-      if (fakeAdmin.enabled && Date.now() - (fakeAdminNotified.get(key) ?? 0) < fakeAdmin.cooldownHours * 3_600_000) {
-        record({ action: "suspect-cooldown", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, reason: "fake-admin-notified" });
+      // 士軒 11/10「每次對方發出就標」：同一人新的一則照標；只有同一則訊息已通知過才不重發（刪除／踢人不受影響）。
+      if (noticedMessages.has(`notice ${entry.chatId} ${entry.messageId}`)) {
+        record({ action: "suspect-duplicate", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, reason: "same-message" });
         return;
+      }
+      // 士軒 11/10 08:51：確認的假旅行社群／假超商群邀請（第一層或覆核判 SCAM）→ 刪文＋標注（deleteOnly，不踢；沒有新增踢人條件）。
+      const brandGroup = (result.verdict === "SCAM" || result.review === "SCAM") ? fakeBrandGroupInvite({ text: sanitizeLinks(text).text, names: result.names ?? [], inviteExpanded: extraNames.includes("短網址導向群組邀請") }) : undefined;
+      if (brandGroup) {
+        const be = { ...entry, names: [brandGroup, ...(result.names ?? [])] };
+        record({ action: "fake-brand-group-flag", chatId: be.chatId, messageId: be.messageId, senderId: be.senderId, label: brandGroup, verdict: result.verdict, review: result.review });
+        return deleteOnly(ws, message, be, "fake-brand-group", "suspect");
       }
       // 10/26 23:01＋10/31：一般連結分數 > 0 且雙模型 SCAM → 貼「可能詐騙」評分（link-score），不用疑似詐騙模板。
       const kind = ordinaryLinkScoreKind(message, entry, text) ? "link-score" : "suspect";
@@ -3174,7 +3213,10 @@ async function notifyAdmins(ws, entry, kind, { force = false } = {}) {
   // 10/27 F：一般連結的「可能詐騙」評分只在 > 0 分時貼（0 分、一般分享、一般投資訊息不貼）。
   if (!shouldPostLinkScore({ kind, score: entry.score })) { record({ action: "link-score-zero-skip", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId }); return false; }
   const now = Date.now();
-  if (!force && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", kind, chatId: entry.chatId, messageId: entry.messageId, senderName: entry.senderName }); return false; }
+  // 士軒 11/10「每次對方發出就標」：有 messageId 時只擋「同一則訊息」重複通知（force 的處置結果通知不擋）；新的一則不受每群冷卻限制。
+  const seen = noticeSeenBefore(entry.chatId, entry.messageId);
+  if (!force && seen === true) { record({ action: "notify-skipped", reason: "same-message", kind, chatId: entry.chatId, messageId: entry.messageId, senderName: entry.senderName }); return false; }
+  if (!force && seen === undefined && now - (lastNotified.get(entry.chatId) ?? 0) < notify.cooldownSeconds * 1000) { record({ action: "notify-skipped", reason: "cooldown", kind, chatId: entry.chatId, messageId: entry.messageId, senderName: entry.senderName }); return false; }
   lastNotified.set(entry.chatId, now);
   const done = DONE_KINDS.has(kind);
   const admins = done ? [] : noticeAdmins(entry.chatId, [entry.senderId]);

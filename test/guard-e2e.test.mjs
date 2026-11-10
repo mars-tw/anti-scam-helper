@@ -396,13 +396,13 @@ test("假冒管理員：暱稱「管理員小美」只閒聊 → 只記錄，不
   assert.equal(r.sends.length + r.removes.length + r.deletes.length, 0);
 });
 
-test("假冒管理員＋換群內容（無連結）→ 通知一次（冷卻），不刪不踢", async () => {
+test("假冒管理員＋換群內容（無連結）→ 每則都通知（士軒 11/10「每次對方發出就標」），不刪不踢", async () => {
   const r = await runGuardLegacy({ ...FAKE }, [
     { messageId: "m1", channelId: "cA", senderId: "pFake", senderName: "小幫手-小美", text: "本群即將關閉，請大家搬到新群" },
     { messageId: "m2", channelId: "cA", senderId: "pFake", senderName: "小幫手-小美", text: "請大家私我拿新群資訊" },
   ], { waitMs: 3500 });
   assert.equal(r.removes.length + r.deletes.length, 0);
-  assert.equal(r.sends.length, 1);
+  assert.equal(r.sends.length, 2);
 });
 
 test("假冒管理員＋外部 LINE 邀請 → kickWithInvite 踢（須 kickMode=kick）", async () => {
