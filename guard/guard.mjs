@@ -37,6 +37,7 @@ import { BANDAN_LINE_OA, bandanLineOaAction, firstLineOaUrl, hasBandanLure, isBa
 import { probeInviteShortUrl, impersonationInviteIsGroupy, shouldDeferImpersonationForExpandFail } from "./invite-expand.mjs";
 import { shortUrlExpandOutcome, shortUrlNormalLanding, SHORT_URL_RULE_NAMES, unresolvedShortReportLine, classifySusExpandLanding } from "./short-url-outcome.mjs";
 import { fakeBrandGroupInvite } from "./fake-brand-group.mjs";
+import { TEXT_SHORT_INVITE, shortInviteUrls, textShortInviteDecision } from "./text-short-invite.mjs";
 import { KNOWN_SCAM_INVITE, hasKnownScamInvite, normalizeInviteTickets } from "./known-scam-invite.mjs";
 import { cleanupAllowed, cleanupTargets, qrResultKind, VISION_LURE, visionLureKick } from "./kick-cleanup.mjs";
 import { SendFailTracker, fetchWithRetry, mediaFailReportLine, sendFailAlertLine, sendFailReportLine } from "./ops-report.mjs";
@@ -2404,6 +2405,8 @@ async function handle(ws, message) {
     const extraNames = [];
     let decideText = text;
     let shopWarn = false;
+    // 士軒 11/10 17:18：短網址展開出的群組／社群邀請網址（只用來判斷是不是本群自己的邀請，不寫進日誌）。
+    const shortInvites = [];
     const shortUrl = sanitizeLinks(text).text.match(SHORT_URL)?.[0];
     if (shortUrl && config.shortUrlExpand !== false) {
       const expanded = await expandUrlSafe(/^https?:/i.test(shortUrl) ? shortUrl : `https://${shortUrl}`).catch(() => undefined);
@@ -2411,6 +2414,7 @@ async function handle(ws, message) {
       const shopping = Boolean(expanded?.url && !stillShortener && isShoppingPage(expanded.html));
       const outcome = shortUrlExpandOutcome({ expanded, stillShortener, shopping });
       for (const n of outcome.extraNames) if (!extraNames.includes(n)) extraNames.push(n);
+      for (const u of shortInviteUrls(expanded)) if (!shortInvites.includes(u)) shortInvites.push(u);
       // 展開後落地網址／頁面 HTML 命中已確認詐騙邀請碼 → 加「已知詐騙群組邀請」。
       if (scamInviteTickets.length && hasKnownScamInvite(`${expanded?.url ?? ""}\n${expanded?.html ?? ""}`, scamInviteTickets) && !extraNames.includes(KNOWN_SCAM_INVITE)) extraNames.push(KNOWN_SCAM_INVITE);
       shopWarn = outcome.shopWarn;
@@ -2445,6 +2449,7 @@ async function handle(ws, message) {
         shopping: Boolean(expanded?.html && isShoppingPage(expanded.html)),
       });
       for (const n of susLanding.extraNames) if (!extraNames.includes(n)) extraNames.push(n);
+      for (const u of shortInviteUrls(expanded)) if (!shortInvites.includes(u)) shortInvites.push(u);
       if (susLanding.knowledgeLink) knowledgeLink = true;
       if (susLanding.shopWarn) shopWarn = true;
       // 已知邀請碼獨立判斷，不插入上面的 if/else-if 鏈。
@@ -2535,6 +2540,25 @@ async function handle(ws, message) {
         const be = { ...entry, names: [brandGroup, ...(result.names ?? [])] };
         record({ action: "fake-brand-group-flag", chatId: be.chatId, messageId: be.messageId, senderId: be.senderId, label: brandGroup, verdict: result.verdict, review: result.review });
         return deleteOnly(ws, message, be, "fake-brand-group", "suspect");
+      }
+      // 士軒 11/10 17:18「文字短網址展開是詐騙群邀請也要刪文＋標注，不踢」：短網址展開為別群／社群的 LINE 邀請、覆核 SCAM → deleteOnly（不踢）。
+      // 本群自己的邀請用 QR 同一套 qrOrigin 判斷；受保護發文者、覆核非 SCAM、展開失敗、qr.allow → 照舊只通知。
+      // warnOnly／noDeleteChats／kill switch／deleteMessage=false → deleteOnly 內改通知；excludeChats／learnOnly → 只記錄。不加分、不改門檻。
+      if (extraNames.includes("短網址導向群組邀請") && shortInvites.length && result.review === "SCAM" && !neverKick(message)) {
+        const origins = [];
+        for (const u of shortInvites) origins.push(await qrOrigin(ws, message.channelId, u).catch(() => ({ origin: "unknown", via: "error" })));
+        const ti = textShortInviteDecision({ names: extraNames, review: result.review, inviteUrls: shortInvites, origins, protectedSender: neverKick(message), allow: qr.allow });
+        record({ action: "text-short-invite-check", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, act: ti.act, reason: ti.reason, origins: origins.map((o) => `${o.origin}/${o.via ?? ""}`) });
+        if (ti.act) {
+          // 同一則重複送達不重刪（另立範圍，不影響 6f50b0f 通知去重）。
+          if (noticeSeenBefore(entry.chatId, entry.messageId, "text-short-invite") === true) {
+            record({ action: "suspect-duplicate", chatId: entry.chatId, messageId: entry.messageId, senderId: entry.senderId, reason: "same-message" });
+            return;
+          }
+          const te = { ...entry, names: [TEXT_SHORT_INVITE, ...(result.names ?? [])], qrOrigin: origins.find((o) => o.origin === "other") ? "other" : "unknown" };
+          record({ action: "text-short-invite-flag", chatId: te.chatId, messageId: te.messageId, senderId: te.senderId, verdict: result.verdict, review: result.review, reviewModel: result.reviewModel, origin: te.qrOrigin });
+          return deleteOnly(ws, message, te, "text-short-invite", "suspect");
+        }
       }
       // 10/26 23:01＋10/31：一般連結分數 > 0 且雙模型 SCAM → 貼「可能詐騙」評分（link-score），不用疑似詐騙模板。
       const kind = ordinaryLinkScoreKind(message, entry, text) ? "link-score" : "suspect";
