@@ -82,10 +82,10 @@ export const RULES = [
 ];
 
 // 正常技術、地圖、影音、官方網站：不因為「有網址」加分（短網址、LINE 邀請另外計）。
-export const DEFAULT_BENIGN_DOMAINS = ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "bilibili.com", "twitch.tv", "instagram.com", "fb.watch", "reddit.com", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "nvidia.com", "amd.com", "intel.com", "amazon.com", "aws.amazon.com", "cloudflare.com", "ibm.com", "oracle.com", "adobe.com", "samsung.com", "tsmc.com", "asus.com", "docker.com", "python.org", "nodejs.org", "mozilla.org", "kaggle.com", "arxiv.org", "mistral.ai", "deepseek.com", "perplexity.ai", "ollama.com", "openrouter.ai", "vercel.com", "azure.com", "bitbucket.org", "antigravity.google", "docs.", "developer."].concat(PLATFORM_SHORTENERS, MAINSTREAM_CONTENT_DOMAINS).filter((d, i, a) => a.indexOf(d) === i);
+export const DEFAULT_BENIGN_DOMAINS = ["github.com", "gitlab.com", "google.com", "goo.gl/maps", "maps.app.goo.gl", "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "bilibili.com", "twitch.tv", "instagram.com", "fb.watch", "reddit.com", "openai.com", "anthropic.com", "claude.ai", "x.ai", "grok.com", "gemini.google.com", "ai.google.dev", "huggingface.co", "npmjs.com", "pypi.org", "stackoverflow.com", "wikipedia.org", "medium.com", "hackmd.io", "notion.so", "x.com", "twitter.com", "facebook.com", "threads.net", "gov.tw", "edu.tw", "microsoft.com", "apple.com", "cursor.com", "meta.ai", "nvidia.com", "amd.com", "intel.com", "amazon.com", "aws.amazon.com", "cloudflare.com", "ibm.com", "oracle.com", "adobe.com", "samsung.com", "tsmc.com", "asus.com", "docker.com", "python.org", "nodejs.org", "mozilla.org", "kaggle.com", "arxiv.org", "mistral.ai", "deepseek.com", "perplexity.ai", "ollama.com", "openrouter.ai", "vercel.com", "azure.com", "bitbucket.org", "antigravity.google", "techorange.com", "midjourney.com", "docs.", "developer."].concat(PLATFORM_SHORTENERS, MAINSTREAM_CONTENT_DOMAINS).filter((d, i, a) => a.indexOf(d) === i);
 // 網域前後要有邊界：fakenvidia.com、nvidia.com.evil.ru 這類仿冒不算一般網域（docs.／developer. 這類前綴除外）。
 export function benignUrlPattern(domains = DEFAULT_BENIGN_DOMAINS) {
-  return new RegExp(`(?<![\\w.-])(https?:\\/\\/)?([\\w-]+\\.)*(${domains.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (d.endsWith(".") ? "" : "(?=$|[\\/?#:\\s，。）)」』])")).join("|")})[^\\s，。）)」』]*`, "gi");
+  return new RegExp(`(?<!https?:\\/\\/[^\\s]*)(?<!(?<![\\w.@-])(?:[a-z0-9-]+\\.)+[a-z]{2,}\\/[^\\s<>"'）)]*)(?<![\\w.-])(?!(?:https?:\\/\\/)?[^\\s\\/?#]*@)(https?:\\/\\/)?([\\w-]+\\.)*(${domains.map((d) => d.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + (d.endsWith(".") ? "" : "(?=$|[\\/?#:\\s，。）)」』])(?![。．｡][^\\s\\/?#:])")).join("|")})[^\\s，。）)」』]*`, "gi");
 }
 
 /** 正規化：全形轉半形；compact 另外去掉所有空白與看不見的字元。 */
@@ -112,7 +112,7 @@ export function makeRuleScorer(benignDomains, { scamDomains, scamInviteTickets }
   return function ruleScore(message, text) {
     const { normal, compact } = normalizeForRules(text);
     const strippedNormal = normal.replace(benignUrl, "［一般網站］");
-    const strippedCompact = compact.replace(benignUrl, "［一般網站］");
+    const strippedCompact = normalizeForRules(strippedNormal).compact.replace(benignUrl, "［一般網站］");
     const hits = RULES.filter((rule) => {
       if (rule.lookalike) return lookalikeExchange(rule.onBenignStripped ? strippedNormal : normal) || lookalikeExchange(compact);
       if (rule.normalOnly) return rule.pattern.test(rule.onBenignStripped ? strippedNormal : normal);

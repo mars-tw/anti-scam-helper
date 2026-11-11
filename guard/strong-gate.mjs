@@ -13,6 +13,8 @@ export const STRONG_MIN_SCORE = 6;
 export const STRONG_BANDAN = "帶單 LINE@ 假老師";
 export const STRONG_PHISHING = "仿冒官方釣魚";
 export const STRONG_SCAM_SHOP = "一頁式詐騙購物";
+// 士軒 11/7：看圖確認的假搬家公告可通知，不改變踢人範圍。
+export const STRONG_FAKE_MOVE_IMAGE = "圖片假群組公告（要成員轉移到新群）";
 // 士軒 11/5 18:21：短網址展開後落在 LINE 群組／社群邀請 → 強特徵（不再只靠兩層 LLM 判 SCAM）；外觀與換群／假群連結同一類處置。
 export const STRONG_SHORT_INVITE = "短網址導向群組邀請";
 // 一頁式詐騙購物：規則分數本身 ≥6（不拉分）、覆核判 SCAM、且有貨到付款或名牌低價（頁面或文字）才算。
@@ -23,6 +25,7 @@ const PHISHING_NAMES = new Set([FAKE_LOGISTICS_VERIFY, "仿冒交易所網域", 
 /** 回強特徵類別；沒有回 undefined。entry：判定紀錄（names／verdict／review）；content：訊息原文、QR、檔名等（不進日誌）。 */
 export function strongFeature(entry = {}, content = {}) {
   const names = entry.names ?? [];
+  if (names.includes(STRONG_FAKE_MOVE_IMAGE)) return STRONG_FAKE_MOVE_IMAGE;
   const category = kickCategory({
     text: content.text ?? "", fileName: content.fileName, names,
     verdict: entry.verdict === "QR_LINE_INVITE" ? undefined : entry.verdict, review: entry.review,
