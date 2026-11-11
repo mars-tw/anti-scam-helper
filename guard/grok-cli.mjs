@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, st
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { compressImageForGrok, GROK_IMAGE_MAX_BASE64, GROK_IMAGE_MAX_PROMPT_JSON, GROK_IMAGE_MAX_SIDE } from "./qr.mjs";
 
 export const GROK_CLI_DEFAULTS = {
   bin: join(homedir(), ".grok", "bin", "grok"),
@@ -16,7 +17,10 @@ export const GROK_CLI_DEFAULTS = {
   timeoutMs: 60_000,
   concurrency: 2,
   effort: "low",
-  maxImageBase64: 100_000,
+  // 100_000：圖的 base64 上限，預留給 --prompt-json 的 JSON 包紙與提示（Linux 單一參數最多 131071 字元）。
+  maxImageBase64: GROK_IMAGE_MAX_BASE64,
+  maxImageSide: GROK_IMAGE_MAX_SIDE,
+  maxPromptJson: GROK_IMAGE_MAX_PROMPT_JSON,
   disableMinutesOnAuthError: 30,
   quotaDisableMinutes: 60,
 };
@@ -79,12 +83,16 @@ export function grokArgs(cfg, { promptFile, promptJson, system, model, schema })
 
 /**
  * 呼叫一次；成功回 { text, usage, structured }，失敗丟錯（錯誤碼不含內容）。
- * image：{ mime, base64 }（太大就不送圖，丟 IMAGE_TOO_LARGE）。
+ * image：{ mime, base64 }。送出前會先縮成 JPEG 並壓到長邊／base64 上限；縮失敗且仍太大就不送圖，丟 IMAGE_TOO_LARGE。
  */
 export async function grokCli(llm, system, user, { image, schema, spawnImpl = spawn, now = Date.now, onAuthError = () => {} } = {}) {
   const cfg = { ...GROK_CLI_DEFAULTS, ...llm };
   if (now() < state.disabledUntil) throw new Error("GROK_DISABLED");
-  if (image && image.base64.length > cfg.maxImageBase64) throw new Error("IMAGE_TOO_LARGE");
+  if (image) {
+    // 縮圖失敗才用原圖；原圖或壓縮結果仍超過上限 → IMAGE_TOO_LARGE，走 llm.mjs 的 fallback。
+    image = compressImageForGrok(image, { maxSide: cfg.maxImageSide ?? GROK_IMAGE_MAX_SIDE, maxBase64: cfg.maxImageBase64 ?? GROK_IMAGE_MAX_BASE64 }) ?? image;
+    if (image.base64.length > (cfg.maxImageBase64 ?? GROK_IMAGE_MAX_BASE64)) throw new Error("IMAGE_TOO_LARGE");
+  }
   // /tmp 重開機會清空：每次呼叫都確保工作目錄與沙箱設定存在且正確。
   mkdirSync(cfg.workDir, { recursive: true, mode: 0o700 });
   try { chmodSync(cfg.workDir, 0o700); } catch {}
@@ -95,6 +103,8 @@ export async function grokCli(llm, system, user, { image, schema, spawnImpl = sp
   let promptJson;
   if (image) promptJson = JSON.stringify([{ type: "image", mimeType: image.mime, data: image.base64 }, { type: "text", text: user }]);
   else writeFileSync(promptFile, user, { mode: 0o600 });
+  // 整段 --prompt-json 仍須低於 Linux 單一參數上限（131071）；130_000 是安全值。
+  if (promptJson && promptJson.length > (cfg.maxPromptJson ?? GROK_IMAGE_MAX_PROMPT_JSON)) throw new Error("IMAGE_TOO_LARGE");
   await slot(cfg.concurrency);
   try {
     const out = await new Promise((resolve, reject) => {

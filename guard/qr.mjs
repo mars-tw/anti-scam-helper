@@ -93,6 +93,69 @@ export function shrinkForModel(mime, bytes, maxSide = 768) {
   return { mime: "image/jpeg", base64: Buffer.from(encoded.data).toString("base64"), width: image.width, height: image.height };
 }
 
+// Grok CLI 把圖片 base64 放進 --prompt-json 這一個命令列參數。
+// Linux 單一參數上限是 MAX_ARG_STRLEN = 32 * PAGE_SIZE（4 KiB 頁面就是 131072，含結尾 NUL，所以最多 131071 字元）；
+// 官方 Image Understanding 雖可到 20MiB，但從 CLI 送圖會先撞上這個參數上限，不是 20MiB。
+// 100_000 預留給 JSON 包紙與使用者提示；130_000 是整段 --prompt-json 的安全上限（低於 131071）。
+// 768 與現行 vision.maxSide／shrinkForModel 預設一致（xAI 以 448px 圖塊計 token，768 約兩塊，夠讀截圖文字）。
+export const GROK_IMAGE_MAX_SIDE = 768;
+export const GROK_IMAGE_MAX_BASE64 = 100_000;
+export const GROK_IMAGE_MAX_PROMPT_JSON = 130_000;
+
+function encodeJpeg(image, quality) {
+  const encoded = jpeg.encode({ data: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.length), width: image.width, height: image.height }, quality);
+  const data = Buffer.from(encoded.data);
+  return { mime: "image/jpeg", base64: data.toString("base64"), width: image.width, height: image.height, quality, bytes: data.length };
+}
+
+/** 長邊縮到 maxSide 以內（先對半再精準縮，與 shrinkForModel 同一作法）。 */
+function scaleToMaxSide(image, maxSide) {
+  let out = image;
+  while (Math.max(out.width, out.height) > maxSide * 2) out = half(out);
+  if (Math.max(out.width, out.height) > maxSide) out = resize(out, maxSide / Math.max(out.width, out.height));
+  return out;
+}
+
+/**
+ * 把圖縮到長邊與 base64 長度上限內，轉成 JPEG，給 Grok CLI 用。
+ * 先縮到 maxSide，再依品質 80→40、長邊 640／512／384 迴圈壓；品質不低於 40、長邊不小於 minSide（預設 384，再小截圖文字會糊）。
+ * 解碼失敗或怎麼壓都超過上限時回 undefined。
+ */
+export function shrinkToBudget(mime, bytes, { maxSide = GROK_IMAGE_MAX_SIDE, maxBase64 = GROK_IMAGE_MAX_BASE64, qualities = [80, 70, 60, 50, 40], minSide = 384 } = {}) {
+  let image;
+  try { image = decodeImage(mime, bytes); } catch { return undefined; }
+  if (!image) return undefined;
+  try {
+    image = scaleToMaxSide(image, maxSide);
+    const long = Math.max(image.width, image.height);
+    const sides = [long];
+    for (const side of [640, 512, 384]) {
+      if (side < long && side >= minSide) sides.push(side);
+    }
+    let current = image;
+    for (const side of sides) {
+      if (Math.max(current.width, current.height) > side) current = scaleToMaxSide(current, side);
+      for (const quality of qualities) {
+        const out = encodeJpeg(current, quality);
+        if (out.base64.length <= maxBase64) return out;
+      }
+    }
+  } catch { return undefined; }
+  return undefined;
+}
+
+/**
+ * 送給 Grok CLI 前的壓縮：已在 base64 上限內就原樣回傳（不重編碼）；否則 shrinkToBudget。
+ * 沒有圖、解碼失敗或壓不進上限時回 undefined（呼叫端走原本的 IMAGE_TOO_LARGE fallback）。
+ */
+export function compressImageForGrok(image, { maxSide = GROK_IMAGE_MAX_SIDE, maxBase64 = GROK_IMAGE_MAX_BASE64 } = {}) {
+  if (!image?.base64) return undefined;
+  if (image.base64.length <= maxBase64) return image;
+  let bytes;
+  try { bytes = Buffer.from(image.base64, "base64"); } catch { return undefined; }
+  return shrinkToBudget(image.mime, bytes, { maxSide, maxBase64 });
+}
+
 const LINE_INVITE = /(^|\/\/|\.)(line\.me\/(R\/)?ti\/(g2?|p)\/|line\.me\/R\/(ti|nv|oaMessage)|lin\.ee\/|liff\.line\.me\/|qr-official\.line\.me\/|page\.line\.me\/|openchat\.line\.me\/[a-z]{2}\/(cover|join)|square\.line\.me\/)|^line:\/\/(ti|nv|msg)\//i;
 
 /** QR 內容是 LINE 群組、社群、好友或官方帳號的邀請連結。 */
